@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 # ---- build stage ----
 FROM golang:1.25-alpine AS builder
+LABEL "language"="go"
 WORKDIR /src
+
+RUN apk add --no-cache build-base
 
 # Cache deps first.
 COPY go.mod go.sum* ./
