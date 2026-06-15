@@ -35,7 +35,7 @@ func main() {
 	root := api.NewRouter(picker)
 
 	// Mount admin panel under /admin.
-	admin.Mount(root.Group("/admin"))
+	admin.MountWithPicker(root.Group("/admin"), picker)
 
 	// Serve the admin SPA at /admin (the HTML page).
 	root.GET("/admin", gin.WrapH(web.AdminHandler()))
