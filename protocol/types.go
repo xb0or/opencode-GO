@@ -1,0 +1,128 @@
+package protocol
+
+import "encoding/json"
+
+// Protocol identifies the wire format.
+type Protocol string
+
+const (
+	Chat      Protocol = "chat"      // OpenAI Chat Completions
+	Messages  Protocol = "messages"  // Anthropic Messages
+	Responses Protocol = "responses" // OpenAI Responses API
+)
+
+// ──────────────────────────── IR Request ────────────────────────────
+
+// IRRequest is the unified intermediate representation of a completion request.
+// Every incoming protocol decodes into this; every outgoing protocol encodes
+// from this.
+type IRRequest struct {
+	Model       string          `json:"model"`
+	System      string          `json:"system,omitempty"`       // single system prompt (Anthropic)
+	Messages    []IRMessage     `json:"messages"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Stream      bool            `json:"stream"`
+	Tools       []IRTool        `json:"tools,omitempty"`
+	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`  // pass-through
+	TopP        *float64        `json:"top_p,omitempty"`
+	Stop        []string        `json:"stop,omitempty"`
+	// Extra holds protocol-specific fields we don't fully understand.
+	Extra map[string]any `json:"extra,omitempty"`
+}
+
+// IRMessage is one turn in the conversation.
+type IRMessage struct {
+	Role       string          `json:"role"`                 // system | user | assistant | tool
+	Content    []IRContent     `json:"content,omitempty"`    // multi-part content
+	Text       string          `json:"text,omitempty"`       // convenience: single-text shorthand
+	ToolCalls  []IRToolCall    `json:"tool_calls,omitempty"` // assistant→tool invocation
+	ToolCallID string          `json:"tool_call_id,omitempty"` // tool response references this id
+	Name       string          `json:"name,omitempty"`       // tool function name (for tool role)
+	Extra      map[string]any  `json:"extra,omitempty"`
+}
+
+// IRContent is a typed content block inside a message.
+type IRContent struct {
+	Type     string          `json:"type"`               // text | image | tool_use | tool_result | thinking
+	Text     string          `json:"text,omitempty"`     // for type=text or thinking
+	Source   *IRImageSource  `json:"source,omitempty"`   // for type=image
+	ID       string          `json:"id,omitempty"`       // tool_use id
+	Name     string          `json:"name,omitempty"`     // tool_use function name
+	Input    json.RawMessage `json:"input,omitempty"`    // tool_use input args
+	ToolID   string          `json:"tool_use_id,omitempty"` // tool_result references tool_use
+	IsError  bool            `json:"is_error,omitempty"` // tool_result error flag
+	Extra    map[string]any  `json:"extra,omitempty"`
+}
+
+// IRImageSource describes an inline image.
+type IRImageSource struct {
+	Type      string `json:"type"`                 // base64
+	MediaType string `json:"media_type,omitempty"` // image/png
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
+}
+
+// IRTool declares a function tool the model may call.
+type IRTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"` // JSON Schema
+	Strict      bool            `json:"strict,omitempty"`
+}
+
+// IRToolCall is a tool invocation made by the assistant.
+type IRToolCall struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Arguments string `json:"arguments"` // JSON string
+}
+
+// ──────────────────────────── IR Response ───────────────────────────
+
+// IRResponse is the unified intermediate representation of a completion response.
+type IRResponse struct {
+	ID      string        `json:"id"`
+	Model   string        `json:"model"`
+	Choices []IRChoice    `json:"choices"`
+	Usage   *IRUsage      `json:"usage,omitempty"`
+	Extra   map[string]any `json:"extra,omitempty"`
+}
+
+// IRChoice is one completion choice.
+type IRChoice struct {
+	Index        int            `json:"index"`
+	Message      *IRMessage     `json:"message,omitempty"`      // non-streaming
+	Delta        *IRMessage     `json:"delta,omitempty"`        // streaming
+	FinishReason string         `json:"finish_reason,omitempty"` // stop | tool_calls | length | content_filter
+	Extra        map[string]any `json:"extra,omitempty"`
+}
+
+// IRUsage carries token usage information.
+type IRUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+// ──────────────────────────── IR Stream Event ───────────────────────
+
+// IRStreamEvent is one event in a streaming response.
+type IRStreamEvent struct {
+	Type     string        `json:"type"` // message_start | content_block_start | content_block_delta | content_block_stop | message_delta | message_stop | completion
+	Response *IRResponse   `json:"response,omitempty"`
+	Choice   *IRChoice     `json:"choice,omitempty"`
+	// ContentDelta carries partial text for content_block_delta events.
+	ContentDelta string `json:"content_delta,omitempty"`
+	// ToolCallDelta carries partial arguments for tool call streaming.
+	ToolCallDelta *IRToolCallDelta `json:"tool_call_delta,omitempty"`
+	Extra         map[string]any   `json:"extra,omitempty"`
+}
+
+// IRToolCallDelta is a partial tool call update during streaming.
+type IRToolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"` // partial chunk
+}
