@@ -149,7 +149,8 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		writeOpenAIError(c, http.StatusInternalServerError, "internal_error", "failed to build upstream request")
 		return
 	}
-	copyForwardHeaders(req.Header, c.Request.Header, upstreamProto)
+	copyForwardHeaders(req.Header, c.Request.Header)
+	injectUpstreamAuth(req.Header, key.Value)
 
 	resp, err := upstream.NewClient().Do(req)
 	if err != nil {
@@ -187,7 +188,7 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 	if resp.StatusCode < 400 && copyErr == nil {
 		p.MarkSuccess(key.ID)
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, "")
-	} else if resp.StatusCode >= 500 {
+	} else if shouldMarkUpstreamFailure(resp.StatusCode) {
 		p.MarkFailure(key.ID)
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, "")
 	} else {
@@ -213,7 +214,7 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		}
 		c.Writer.WriteHeader(resp.StatusCode)
 		io.Copy(c.Writer, resp.Body)
-		if resp.StatusCode >= 500 {
+		if shouldMarkUpstreamFailure(resp.StatusCode) {
 			p.MarkFailure(key.ID)
 		}
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, "")
@@ -299,9 +300,9 @@ func rewriteModel(body []byte, realModel string) ([]byte, bool) {
 	return out, true
 }
 
-// copyForwardHeaders forwards client headers to the upstream request, replacing
-// auth with the pool key and setting the protocol-appropriate content type.
-func copyForwardHeaders(dst, src http.Header, proto config.Protocol) {
+// copyForwardHeaders forwards client headers to the upstream request while
+// stripping hop-by-hop and client auth headers.
+func copyForwardHeaders(dst, src http.Header) {
 	skip := map[string]bool{
 		"Authorization":  true,
 		"X-Api-Key":      true,
@@ -316,6 +317,28 @@ func copyForwardHeaders(dst, src http.Header, proto config.Protocol) {
 		for _, v := range vs {
 			dst.Add(k, v)
 		}
+	}
+}
+
+// injectUpstreamAuth attaches the selected upstream key to the outbound
+// request using both Authorization and X-Api-Key for compatibility.
+func injectUpstreamAuth(h http.Header, keyValue string) {
+	keyValue = strings.TrimSpace(keyValue)
+	if keyValue == "" {
+		return
+	}
+	h.Set("Authorization", "Bearer "+keyValue)
+	h.Set("X-Api-Key", keyValue)
+}
+
+// shouldMarkUpstreamFailure reports whether a response status should count as a
+// key failure and trigger cooldown bookkeeping.
+func shouldMarkUpstreamFailure(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+		return true
+	default:
+		return status >= 500
 	}
 }
 
