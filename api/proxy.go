@@ -84,15 +84,6 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 
 	// Stash group so RequireGroup middleware (if mounted) can authorize it.
 	c.Set("group", route.Group)
-	// Re-run group authorization inline (in case middleware ordering differs).
-	if tokAny, exists := c.Get("token"); exists {
-		if tok, ok := tokAny.(*store.Token); ok && !pool.GroupAllowed(tok, route.Group) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error": gin.H{"type": "permission_denied", "message": "token not allowed for group: " + route.Group},
-			})
-			return
-		}
-	}
 
 	// Cross-protocol request conversion.
 	// If the inbound protocol differs from the upstream model's protocol,
@@ -152,7 +143,8 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	copyForwardHeaders(req.Header, c.Request.Header)
 	injectUpstreamAuth(req.Header, key.Value)
 
-	resp, err := upstream.NewClient().Do(req)
+	upstreamClient := upstream.NewClientForProxy(key.ProxyURL)
+	resp, err := upstreamClient.Do(req)
 	if err != nil {
 		p.MarkFailure(key.ID)
 		markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, err.Error())
