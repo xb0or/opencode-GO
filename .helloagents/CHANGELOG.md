@@ -1,5 +1,10 @@
 ﻿## 2026-06-16
 
+- 按当前 OpenCode Go 官方清单更新默认模型路由：8 个 Chat Completions 模型与 6 个 Messages 模型。
+- 管理后台新增模型时自动根据真实 Go 模型同步模型 ID、显示名与协议，移除上游/分组可编辑入口和列表展示列。
+- 清理 `.env.example` 和文档中残留的 Zen 配置说明；仅保留 Go 实际 API URL 中的 `/zen/go` 路径；启动时过滤旧数据库中的历史非当前 Go 模型。
+## 2026-06-16
+
 - 修复管理后台语言/主题下拉菜单被遮罩拦截点击的问题。
 - 修复管理后台 Key/Token/Recent Log 使用错误 JSON 字段名导致删除、开关、重置冷却和展示失效的问题。
 - 修复 API 分组鉴权执行顺序：在模型路由解析后按实际 group 校验 token 权限。
@@ -29,5 +34,7 @@
 - 体验增强：自定义 Modal 替代浏览器原生 confirm，全局 Toast、按钮 loading、空状态占位、复制反馈、数字格式化、耗时自动 ms/s 转换。
 - 修复字段对齐：统一使用小写 JSON tag（`id`/`created_at`/`cooldown_until`/`real_model`/`context_len`），与后端 GORM 序列化完全一致。
 - 新增 `GET /admin/health` 池健康状态展示，models 删除时 `encodeURIComponent(id)` 兼容含点号的 id。
+
+
 
 

@@ -90,13 +90,26 @@ func BaseURLFor(u Upstream) string {
 	}
 }
 
-// DefaultModels is the seed catalog (sourced from models.dev/providers/opencode).
+// DefaultModels is the OpenCode Go seed catalog.
 // The group field doubles as the KEY-pool group name used by the pool package.
 func DefaultModels() []ModelRoute {
 	return []ModelRoute{
-		// --- OpenAI Chat Completions (Go subscription) ---
-		{ID: "go-glm-4.6", Name: "GLM 4.6 (Go)", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "zai/glm-4.6", Group: "go"},
-		{ID: "go-deepseek-v3.2", Name: "DeepSeek V3.2 (Go)", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "deepseek/deepseek-v3.2", Group: "go"},
-		{ID: "go-kimi-k2", Name: "Kimi K2 (Go)", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "moonshot/kimi-k2", Group: "go"},
+		// --- OpenAI-compatible Chat Completions ---
+		{ID: "glm-5.1", Name: "GLM-5.1", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "glm-5.1", Group: "go"},
+		{ID: "glm-5", Name: "GLM-5", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "glm-5", Group: "go"},
+		{ID: "kimi-k2.7-code", Name: "Kimi K2.7 Code", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "kimi-k2.7-code", Group: "go"},
+		{ID: "kimi-k2.6", Name: "Kimi K2.6", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "kimi-k2.6", Group: "go"},
+		{ID: "mimo-v2.5", Name: "MiMo-V2.5", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "mimo-v2.5", Group: "go"},
+		{ID: "mimo-v2.5-pro", Name: "MiMo-V2.5-Pro", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "mimo-v2.5-pro", Group: "go"},
+		{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "deepseek-v4-pro", Group: "go"},
+		{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "deepseek-v4-flash", Group: "go"},
+
+		// --- Anthropic-compatible Messages ---
+		{ID: "minimax-m3", Name: "MiniMax M3", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "minimax-m3", Group: "go"},
+		{ID: "minimax-m2.7", Name: "MiniMax M2.7", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "minimax-m2.7", Group: "go"},
+		{ID: "minimax-m2.5", Name: "MiniMax M2.5", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "minimax-m2.5", Group: "go"},
+		{ID: "qwen3.7-max", Name: "Qwen3.7 Max", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "qwen3.7-max", Group: "go"},
+		{ID: "qwen3.7-plus", Name: "Qwen3.7 Plus", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "qwen3.7-plus", Group: "go"},
+		{ID: "qwen3.6-plus", Name: "Qwen3.6 Plus", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "qwen3.6-plus", Group: "go"},
 	}
 }

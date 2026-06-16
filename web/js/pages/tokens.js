@@ -6,8 +6,6 @@
 import { validateRequired } from "../api.js";
 const { ref, reactive } = Vue;
 
-const GROUP_OPTIONS = ["go"];
-
 export function useTokens(api, showToast, t, showConfirm) {
   const tokens = ref([]);
   const showTokenModal = ref(false);
@@ -17,8 +15,6 @@ export function useTokens(api, showToast, t, showConfirm) {
     allowed_groups: [],
     rate_limit: 0,
   });
-
-  const availableTokenGroups = GROUP_OPTIONS;
 
   /** 打开模态框 */
   function openTokenModal() {
@@ -49,7 +45,7 @@ export function useTokens(api, showToast, t, showConfirm) {
       // 将分组数组转为逗号分隔字符串发送给后端
       const payload = {
         name: newToken.name,
-        allowed_groups: newToken.allowed_groups.join(","),
+        allowed_groups: "",
         rate_limit: newToken.rate_limit,
       };
       await api("/tokens", "POST", payload, t);
@@ -83,7 +79,6 @@ export function useTokens(api, showToast, t, showConfirm) {
     tokens,
     newToken,
     showTokenModal,
-    availableTokenGroups,
     openTokenModal,
     closeTokenModal,
     load,

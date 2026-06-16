@@ -80,6 +80,15 @@ curl -X POST localhost:3000/admin/keys \
 curl localhost:3000/v1/models
 ```
 
+## OpenCode Go models
+
+The default Go catalog includes:
+
+- Chat Completions: `glm-5.1`, `glm-5`, `kimi-k2.7-code`, `kimi-k2.6`, `mimo-v2.5`, `mimo-v2.5-pro`, `deepseek-v4-pro`, `deepseek-v4-flash`
+- Messages: `minimax-m3`, `minimax-m2.7`, `minimax-m2.5`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`
+
+Go usage limits are value-based: 5-hour `$12`, weekly `$30`, and monthly `$60`. Request counts vary by model cost. If limits are reached, the upstream service may fall back to balance usage when enabled in the OpenCode console.
+
 ## Cross-protocol conversion
 
 Any client protocol can reach any upstream model. The gateway automatically converts through the IR (Intermediate Representation):
@@ -109,25 +118,26 @@ Create `opencode.json` in your project (or `~/.config/opencode/opencode.json`):
         "apiKey": "{env:OCSW_TOKEN}"
       },
       "models": {
-        "glm-4.6": { "name": "GLM 4.6" },
-        "deepseek-v3.2": { "name": "DeepSeek V3.2" },
-        "kimi-k2": { "name": "Kimi K2" }
+        "glm-5.1": { "name": "GLM-5.1" },
+        "kimi-k2.7-code": { "name": "Kimi K2.7 Code" },
+        "deepseek-v4-flash": { "name": "DeepSeek V4 Flash" }
       }
     },
     "opencode-sw-messages": {
       "npm": "@ai-sdk/anthropic",
-      "name": "opencode-sw (Claude)",
+      "name": "opencode-sw (Messages)",
       "options": {
         "baseURL": "https://<your-zeabur-domain>",
         "apiKey": "{env:OCSW_TOKEN}",
         "headers": { "anthropic-version": "2023-06-01" }
       },
       "models": {
-        "claude-sonnet-4.5": { "name": "Claude Sonnet 4.5" }
+        "minimax-m3": { "name": "MiniMax M3" },
+        "qwen3.7-plus": { "name": "Qwen3.7 Plus" }
       }
     }
   },
-  "model": "opencode-sw-chat/glm-4.6"
+  "model": "opencode-sw-chat/glm-5.1"
 }
 ```
 

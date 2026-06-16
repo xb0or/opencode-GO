@@ -9,20 +9,22 @@ const { ref, reactive, computed, watch } = Vue;
 /**
  * 根据上游可选的真实模型列表
  */
-const MODEL_OPTIONS = {
-  go: [
-    "gpt-4o",
-    "gpt-4o-mini",
-    "claude-sonnet-4-20250514",
-    "claude-3-5-haiku-latest",
-    "gemini-2.5-pro-exp-03-25",
-    "gemini-2.0-flash-exp",
-    "deepseek-chat",
-    "deepseek-reasoner",
-  ],
-};
-
-const GROUP_OPTIONS = ["go"];
+const GO_MODELS = [
+  { id: "glm-5.1", name: "GLM-5.1", protocol: "chat" },
+  { id: "glm-5", name: "GLM-5", protocol: "chat" },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", protocol: "chat" },
+  { id: "kimi-k2.6", name: "Kimi K2.6", protocol: "chat" },
+  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", protocol: "chat" },
+  { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", protocol: "chat" },
+  { id: "mimo-v2.5", name: "MiMo-V2.5", protocol: "chat" },
+  { id: "mimo-v2.5-pro", name: "MiMo-V2.5-Pro", protocol: "chat" },
+  { id: "minimax-m3", name: "MiniMax M3", protocol: "messages" },
+  { id: "minimax-m2.7", name: "MiniMax M2.7", protocol: "messages" },
+  { id: "minimax-m2.5", name: "MiniMax M2.5", protocol: "messages" },
+  { id: "qwen3.7-max", name: "Qwen3.7 Max", protocol: "messages" },
+  { id: "qwen3.7-plus", name: "Qwen3.7 Plus", protocol: "messages" },
+  { id: "qwen3.6-plus", name: "Qwen3.6 Plus", protocol: "messages" },
+];
 
 export function useModels(api, showToast, t, showConfirm) {
   const models = ref([]);
@@ -39,27 +41,28 @@ export function useModels(api, showToast, t, showConfirm) {
   });
 
   /** 当前上游可选的模型列表 */
-  const availableModels = computed(
-    () => MODEL_OPTIONS[newModel.upstream] || []
-  );
-  const availableGroups = GROUP_OPTIONS;
+  const availableModels = computed(() => GO_MODELS);
 
-  /** 当上游切换时，自动同步分组 */
+  /** 当真实模型变化时，自动同步模型 ID、名称与协议。 */
   watch(
-    () => newModel.upstream,
+    () => newModel.real_model,
     (val) => {
-      if (GROUP_OPTIONS.includes(val)) {
-        newModel.group = val;
-      }
+      const found = GO_MODELS.find((m) => m.id === val);
+      if (!found) return;
+      newModel.id = found.id;
+      newModel.name = found.name;
+      newModel.protocol = found.protocol;
+      newModel.upstream = "go";
+      newModel.group = "go";
     }
   );
 
-  /** 当名称变化时，自动填充模型 ID（格式: {upstream}-{slug}） */
+  /** 当名称变化时，自动填充模型 ID */
   watch(
     () => newModel.name,
     (val) => {
-      if (val && val.trim()) {
-        newModel.id = newModel.upstream + "-" + toSlug(val);
+      if (val && val.trim() && !newModel.real_model) {
+        newModel.id = toSlug(val);
       }
     }
   );
@@ -106,6 +109,8 @@ export function useModels(api, showToast, t, showConfirm) {
     )
       return;
     try {
+      newModel.upstream = "go";
+      newModel.group = "go";
       await api("/models", "POST", newModel, t);
       showToast(t("models.addBtn") + " ✓");
       closeModal();
@@ -138,7 +143,6 @@ export function useModels(api, showToast, t, showConfirm) {
     newModel,
     showModal,
     availableModels,
-    availableGroups,
     openModal,
     closeModal,
     load,

@@ -80,10 +80,11 @@ opencode-sw/
 ### 2. 模型路由表（`config/models.go`）
 
 ```
-"claude-sonnet-4.5"  -> {upstream: go, protocol: messages,  real: "anthropic/claude-sonnet-4.5"}
-"gpt-5"              -> {upstream: go, protocol: responses, real: "openai/gpt-5"}
-"glm-4.6"            -> {upstream: go, protocol: chat,      real: "zai/glm-4.6"}
-"go-glm-4.6"         -> {upstream: go,  protocol: chat,      real: "zai/glm-4.6"}
+"glm-5.1"          -> {upstream: go, protocol: chat,     real: "glm-5.1"}
+"kimi-k2.7-code"  -> {upstream: go, protocol: chat,     real: "kimi-k2.7-code"}
+"deepseek-v4-flash" -> {upstream: go, protocol: chat,  real: "deepseek-v4-flash"}
+"minimax-m3"       -> {upstream: go, protocol: messages, real: "minimax-m3"}
+"qwen3.7-plus"    -> {upstream: go, protocol: messages, real: "qwen3.7-plus"}
 ```
 
 - 可在 Web 面板编辑，写回 SQLite，热生效
@@ -190,40 +191,27 @@ opencode-sw/
         "apiKey": "{env:OCSW_TOKEN}"
       },
       "models": {
-        "glm-4.6":       { "name": "GLM 4.6" },
-        "deepseek-v3.2": { "name": "DeepSeek V3.2" },
-        "kimi-k2":       { "name": "Kimi K2" },
-        "minimax-m2":    { "name": "MiniMax M2" }
+        "glm-5.1":          { "name": "GLM-5.1" },
+        "kimi-k2.7-code":  { "name": "Kimi K2.7 Code" },
+        "deepseek-v4-flash": { "name": "DeepSeek V4 Flash" }
       }
     },
     "opencode-sw-messages": {
       "npm": "@ai-sdk/anthropic",
-      "name": "opencode-sw (Claude)",
+      "name": "opencode-sw (Messages)",
       "options": {
         "baseURL": "https://<your-zeabur-domain>",
         "apiKey": "{env:OCSW_TOKEN}",
         "headers": { "anthropic-version": "2023-06-01" }
       },
       "models": {
-        "claude-sonnet-4.5": { "name": "Claude Sonnet 4.5" },
-        "claude-opus-4.1":   { "name": "Claude Opus 4.1" },
-        "qwen3-coder":       { "name": "Qwen3 Coder" }
-      }
-    },
-    "opencode-sw-responses": {
-      "npm": "@ai-sdk/openai",
-      "name": "opencode-sw (Responses)",
-      "options": {
-        "baseURL": "https://<your-zeabur-domain>/v1",
-        "apiKey": "{env:OCSW_TOKEN}"
-      },
-      "models": {
-        "gpt-5":       { "name": "GPT-5" },
-        "gpt-5-codex": { "name": "GPT-5 Codex" }
+        "minimax-m3":    { "name": "MiniMax M3" },
+        "qwen3.7-plus": { "name": "Qwen3.7 Plus" },
+        "qwen3.6-plus": { "name": "Qwen3.6 Plus" }
       }
     }
   },
-  "model": "opencode-sw-chat/glm-4.6"
+  "model": "opencode-sw-chat/glm-5.1"
 }
 ```
 

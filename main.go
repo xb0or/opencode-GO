@@ -63,14 +63,14 @@ func main() {
 // loadModelRoutes loads model routes from DB, seeding defaults if empty.
 func loadModelRoutes() {
 	rows, err := store.LoadModelRoutes()
+	defaults := config.DefaultModels()
 	if err != nil {
 		log.Printf("warn: cannot load model routes: %v", err)
-		config.RegisterModels(config.DefaultModels())
+		config.RegisterModels(defaults)
 		return
 	}
 	if len(rows) == 0 {
 		// First run: seed defaults into DB.
-		defaults := config.DefaultModels()
 		for _, m := range defaults {
 			store.SaveModelRoute(&store.ModelRouteRow{
 				ID: m.ID, Name: m.Name, Upstream: string(m.Upstream),
@@ -83,9 +83,13 @@ func loadModelRoutes() {
 		return
 	}
 	// Load from DB into config.
+	allowed := map[string]bool{}
+	for _, m := range defaults {
+		allowed[m.ID] = true
+	}
 	var routes []config.ModelRoute
 	for _, r := range rows {
-		if r.Upstream != string(config.UpstreamGo) || r.Group != "go" {
+		if r.Upstream != string(config.UpstreamGo) || r.Group != "go" || !allowed[r.ID] {
 			continue
 		}
 		routes = append(routes, config.ModelRoute{

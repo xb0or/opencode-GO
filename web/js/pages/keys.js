@@ -18,8 +18,6 @@ export function useKeys(api, showToast, t, showConfirm) {
     proxy_url: "",
   });
 
-  const keyGroupOptions = ["go"];
-
   function openKeyModal() {
     newKey.value = "";
     newKey.group = "go";
@@ -96,7 +94,6 @@ export function useKeys(api, showToast, t, showConfirm) {
     keys,
     newKey,
     showKeyModal,
-    keyGroupOptions,
     openKeyModal,
     closeKeyModal,
     load,

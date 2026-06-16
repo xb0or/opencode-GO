@@ -251,7 +251,6 @@
                     <tr>
                       <th>{{t('table.active')}}</th>
                       <th>{{t('table.key')}}</th>
-                      <th>{{t('table.group')}}</th>
                       <th>{{t('table.label')}}</th>
                       <th>{{t('table.weight')}}</th>
                       <th>{{t('table.proxy')}}</th>
@@ -280,9 +279,6 @@
                         "
                       >
                         {{k.value}}
-                      </td>
-                      <td>
-                        <span class="badge badge-yellow">{{k.group}}</span>
                       </td>
                       <td>{{k.label||'—'}}</td>
                       <td>{{k.weight}}</td>
@@ -336,7 +332,6 @@
                       <th>{{t('table.id')}}</th>
                       <th>{{t('table.token')}}</th>
                       <th>{{t('table.name')}}</th>
-                      <th>{{t('table.groups')}}</th>
                       <th>{{t('table.rateLimit')}}</th>
                       <th>{{t('table.expires')}}</th>
                       <th>{{t('table.actions')}}</th>
@@ -347,7 +342,6 @@
                         {{tk.token}}
                       </td>
                       <td>{{tk.name||'—'}}</td>
-                      <td>{{tk.allowed_groups||t('tokens.allGroups')}}</td>
                       <td>{{tk.rate_limit||t('tokens.unlimited')}}</td>
                       <td style="font-size: 12px">
                         {{tk.expires_at?fmtTime(tk.expires_at):t('tokens.never')}}
@@ -381,24 +375,16 @@
                     <tr>
                       <th>{{t('table.id')}}</th>
                       <th>{{t('table.name')}}</th>
-                      <th>{{t('table.upstream')}}</th>
                       <th>{{t('table.protocol')}}</th>
                       <th>{{t('table.realModel')}}</th>
-                      <th>{{t('table.group')}}</th>
                       <th>{{t('table.context')}}</th>
                       <th>{{t('table.actions')}}</th>
                     </tr>
                     <tr v-for="m in models" :key="m.id">
                       <td><code>{{m.id}}</code></td>
                       <td>{{m.name}}</td>
-                      <td>
-                        <span class="badge badge-blue">{{m.upstream}}</span>
-                      </td>
                       <td>{{m.protocol}}</td>
                       <td style="font-size: 12px">{{m.real_model}}</td>
-                      <td>
-                        <span class="badge badge-yellow">{{m.group||'—'}}</span>
-                      </td>
                       <td>{{m.context_len||'—'}}</td>
                       <td>
                         <button
@@ -424,17 +410,10 @@
           <h2>{{t('models.addModel')}}</h2>
           <div class="form-row">
             <div class="form-group">
-              <label>{{t('models.upstream')}}</label>
-              <select v-model="newModel.upstream">
-                <option value="go">go</option>
-              </select>
-            </div>
-            <div class="form-group">
               <label>{{t('models.protocol')}}</label>
-              <select v-model="newModel.protocol">
+              <select v-model="newModel.protocol" disabled>
                 <option value="chat">chat</option>
                 <option value="messages">messages</option>
-                <option value="responses">responses</option>
               </select>
             </div>
           </div>
@@ -458,16 +437,8 @@
                 <option value="" disabled>
                   — {{t('models.select') || '请选择'}} —
                 </option>
-                <option v-for="m in availableModels" :key="m" :value="m">
-                  {{m}}
-                </option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>{{t('models.group')}}</label>
-              <select v-model="newModel.group">
-                <option v-for="g in availableGroups" :key="g" :value="g">
-                  {{g}}
+                <option v-for="m in availableModels" :key="m.id" :value="m.id">
+                  {{m.name}} ({{m.id}})
                 </option>
               </select>
             </div>
@@ -519,25 +490,6 @@
               />
             </div>
           </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>{{t('tokens.allowedGroups')}}</label>
-              <div class="checkbox-group">
-                <label
-                  class="checkbox-label"
-                  v-for="g in availableTokenGroups"
-                  :key="g"
-                >
-                  <input
-                    type="checkbox"
-                    :value="g"
-                    v-model="newToken.allowed_groups"
-                  />
-                  <span>{{g}}</span>
-                </label>
-              </div>
-            </div>
-          </div>
           <div class="btn-group">
             <button class="btn btn-ghost" @click="closeTokenModal">
               {{t('tokens.cancel') || '取消'}}
@@ -561,14 +513,6 @@
             <div class="form-group">
               <label>{{t('keys.keyValue')}}</label>
               <input v-model="newKey.value" placeholder="sk-..." />
-            </div>
-            <div class="form-group">
-              <label>{{t('keys.group')}}</label>
-              <select v-model="newKey.group">
-                <option v-for="g in keyGroupOptions" :key="g" :value="g">
-                  {{g}}
-                </option>
-              </select>
             </div>
           </div>
           <div class="form-row">
