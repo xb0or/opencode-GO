@@ -67,7 +67,7 @@ export function useKeys(api, showToast, t, showConfirm) {
   async function resetCooldown(id) {
     try {
       await api("/keys/" + id + "/reset", "POST", null, t);
-      showToast("Cooldown reset ✓");
+      showToast(t("keys.cooldownReset") + " ✓");
       load();
     } catch (e) {
       showToast(e.message, "error");

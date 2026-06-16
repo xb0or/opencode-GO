@@ -7,11 +7,13 @@
  */
 
 // Format API errors into user-friendly messages
-function fmtApiError(err) {
+// Note: when called from api() in createApi, the error message uses t()
+// but fmtApiError itself is a static fallback if t() is not available.
+function fmtApiError(err, t) {
   if (err instanceof TypeError && err.message === "Failed to fetch") {
-    return "网络连接失败，请检查服务是否运行";
+    return t ? t("errors.network") : "Network error";
   }
-  return err.message || "未知错误";
+  return err.message || (t ? t("errors.unknown") : "Unknown error");
 }
 
 // Simple required field check
@@ -51,7 +53,7 @@ function createApi(tokenRef) {
       r = await fetch("/admin" + path, opts);
     } catch (e) {
       // Network error (DNS, connection refused, timeout, etc.)
-      throw new Error(fmtApiError(e));
+      throw new Error(fmtApiError(e, t));
     }
     if (r.status === 401) {
       tokenRef.value = "";
@@ -60,7 +62,9 @@ function createApi(tokenRef) {
     }
     const data = await r.json();
     if (!r.ok)
-      throw new Error(data.error || (t ? t("errors.requestFailed") : "Request failed"));
+      throw new Error(
+        data.error || (t ? t("errors.requestFailed") : "Request failed")
+      );
     return data;
   }
 
