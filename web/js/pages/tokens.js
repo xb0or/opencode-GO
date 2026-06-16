@@ -62,15 +62,21 @@ export function useTokens(api, showToast, t, showConfirm) {
   }
 
   async function remove(id) {
-    showConfirm("deleteToken", async () => {
-      try {
-        await api("/tokens/" + id, "DELETE", null, t);
-        showToast(t("tokens.delete") + " ✓");
-        load();
-      } catch (e) {
-        showToast(e.message, "error");
-      }
-    });
+    const item = tokens.value.find((tk) => tk.id === id);
+    const name = item ? item.name || item.token : "";
+    showConfirm(
+      "deleteToken",
+      async () => {
+        try {
+          await api("/tokens/" + id, "DELETE", null, t);
+          showToast(t("tokens.delete") + " ✓");
+          load();
+        } catch (e) {
+          showToast(e.message, "error");
+        }
+      },
+      name
+    );
   }
 
   return {

@@ -32,8 +32,8 @@ createApp({
       show: false,
       title: "",
       msg: "",
-      okText: "确定",
-      cancelText: "取消",
+      okText: "",
+      cancelText: "",
       danger: false,
       onOk: null,
     });
@@ -99,29 +99,30 @@ createApp({
     }
 
     // ─── 确认弹窗 ─────────────────────────────────────
-    function showConfirm(type, item) {
+    function showConfirm(type, item, name) {
+      confirm.cancelText = t("confirm.cancel");
       if (type === "logout") {
-        confirm.title = t("nav.logout");
-        confirm.msg = "确定退出登录？";
-        confirm.okText = "退出";
+        confirm.title = t("confirm.logout.title");
+        confirm.msg = t("confirm.logout.msg");
+        confirm.okText = t("confirm.logout.ok");
         confirm.danger = false;
         confirm.onOk = () => logout();
       } else if (type === "deleteKey") {
-        confirm.title = "删除密钥";
-        confirm.msg = "确定删除此 API 密钥？此操作不可撤销。";
-        confirm.okText = "删除";
+        confirm.title = t("confirm.deleteKey.title");
+        confirm.msg = t("confirm.deleteKey.msg", { name: name || "" });
+        confirm.okText = t("confirm.deleteKey.ok");
         confirm.danger = true;
         confirm.onOk = item;
       } else if (type === "deleteToken") {
-        confirm.title = "删除令牌";
-        confirm.msg = "确定删除此访问令牌？此操作不可撤销。";
-        confirm.okText = "删除";
+        confirm.title = t("confirm.deleteToken.title");
+        confirm.msg = t("confirm.deleteToken.msg", { name: name || "" });
+        confirm.okText = t("confirm.deleteToken.ok");
         confirm.danger = true;
         confirm.onOk = item;
       } else if (type === "deleteModel") {
-        confirm.title = "删除模型";
-        confirm.msg = "确定删除此模型路由？此操作不可撤销。";
-        confirm.okText = "删除";
+        confirm.title = t("confirm.deleteModel.title");
+        confirm.msg = t("confirm.deleteModel.msg", { name: name || "" });
+        confirm.okText = t("confirm.deleteModel.ok");
         confirm.danger = true;
         confirm.onOk = item;
       }

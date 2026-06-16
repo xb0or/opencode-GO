@@ -79,6 +79,37 @@ export const locales = {
       cancel: "取消",
       select: "请选择",
     },
+    theme: {
+      dark: "深色模式",
+      light: "浅色模式",
+    },
+    confirm: {
+      ok: "确定",
+      cancel: "取消",
+      logout: {
+        title: "退出登录",
+        msg: "确定退出登录？",
+        ok: "退出",
+      },
+      deleteKey: {
+        title: "删除密钥",
+        msg: "确定删除 API 密钥「{name}」？此操作不可撤销。",
+        ok: "删除",
+      },
+      deleteToken: {
+        title: "删除令牌",
+        msg: "确定删除访问令牌「{name}」？此操作不可撤销。",
+        ok: "删除",
+      },
+      deleteModel: {
+        title: "删除模型",
+        msg: "确定删除模型路由「{name}」？此操作不可撤销。",
+        ok: "删除",
+      },
+    },
+    keys: {
+      cooldownReset: "冷却已重置",
+    },
     table: {
       time: "时间",
       model: "模型",
@@ -186,6 +217,37 @@ export const locales = {
       delete: "Delete",
       cancel: "Cancel",
       select: "Select",
+    },
+    theme: {
+      dark: "Dark",
+      light: "Light",
+    },
+    confirm: {
+      ok: "Confirm",
+      cancel: "Cancel",
+      logout: {
+        title: "Logout",
+        msg: "Are you sure you want to logout?",
+        ok: "Logout",
+      },
+      deleteKey: {
+        title: "Delete Key",
+        msg: 'Are you sure you want to delete API key "{name}"? This action cannot be undone.',
+        ok: "Delete",
+      },
+      deleteToken: {
+        title: "Delete Token",
+        msg: 'Are you sure you want to delete token "{name}"? This action cannot be undone.',
+        ok: "Delete",
+      },
+      deleteModel: {
+        title: "Delete Model",
+        msg: 'Are you sure you want to delete model route "{name}"? This action cannot be undone.',
+        ok: "Delete",
+      },
+    },
+    keys: {
+      cooldownReset: "Cooldown reset",
     },
     table: {
       time: "Time",

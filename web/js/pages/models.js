@@ -116,15 +116,21 @@ export function useModels(api, showToast, t, showConfirm) {
   }
 
   async function remove(id) {
-    showConfirm("deleteModel", async () => {
-      try {
-        await api("/models/" + id, "DELETE", null, t);
-        showToast(t("models.delete") + " ✓");
-        load();
-      } catch (e) {
-        showToast(e.message, "error");
-      }
-    });
+    const item = models.value.find((m) => m.id === id);
+    const name = item ? item.name || item.id : "";
+    showConfirm(
+      "deleteModel",
+      async () => {
+        try {
+          await api("/models/" + id, "DELETE", null, t);
+          showToast(t("models.delete") + " ✓");
+          load();
+        } catch (e) {
+          showToast(e.message, "error");
+        }
+      },
+      name
+    );
   }
 
   return {

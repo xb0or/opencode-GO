@@ -22,21 +22,22 @@
           <div class="login-logo" v-html="icons.logo"></div>
           <h1>OpenCode-SW</h1>
           <p>{{t('login.subtitle')}}</p>
-          <input
-            v-model="password"
-            type="password"
-            :placeholder="t('login.placeholder')"
-            @keyup.enter="login"
-          />
-          <button class="btn btn-primary" :disabled="logging" @click="login">
-            {{logging?t('login.logging'):t('login.signin')}}
-          </button>
-          <p
-            v-if="loginError"
-            style="color: var(--red); margin-top: 12px; font-size: 13px"
-          >
-            {{loginError}}
-          </p>
+          <form @submit.prevent="login">
+            <input
+              v-model="password"
+              type="password"
+              :placeholder="t('login.placeholder')"
+            />
+            <button class="btn btn-primary" :disabled="logging" type="submit">
+              {{logging?t('login.logging'):t('login.signin')}}
+            </button>
+            <p
+              v-if="loginError"
+              style="color: var(--red); margin-top: 12px; font-size: 13px"
+            >
+              {{loginError}}
+            </p>
+          </form>
         </div>
       </div>
 
@@ -98,7 +99,7 @@
                 @click="theme='dark';dropTheme=false"
               >
                 <span v-html="icons.moon"></span>
-                {{locale==='zh'?'深色模式':'Dark'}}
+                {{t('theme.dark')}}
               </button>
               <button
                 class="drop-item"
@@ -106,7 +107,7 @@
                 @click="theme='light';dropTheme=false"
               >
                 <span v-html="icons.sun"></span>
-                {{locale==='zh'?'浅色模式':'Light'}}
+                {{t('theme.light')}}
               </button>
             </div>
           </div>
