@@ -1,387 +1,640 @@
 <!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenCode-SW Admin</title>
-<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--text:#e2e8f0;--muted:#8892b0;--accent:#6366f1;--accent2:#8b5cf6;--green:#10b981;--red:#ef4444;--yellow:#f59e0b;--blue:#3b82f6;--radius:10px}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-a{color:var(--accent);text-decoration:none}
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>OpenCode-SW Admin</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M13 2L3 14h9l-1 8 10-12h-9l1-8z' fill='%236366f1'/%3E%3C/svg%3E"
+    />
+    <base href="/admin/" />
+    <link rel="stylesheet" href="css/admin.css" />
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  </head>
+  <body>
+    <div id="app">
+      <!-- Login -->
+      <div v-if="!token" class="login-wrap">
+        <div class="login-box">
+          <div class="login-logo" v-html="icons.logo"></div>
+          <h1>OpenCode-SW</h1>
+          <p>{{t('login.subtitle')}}</p>
+          <input
+            v-model="password"
+            type="password"
+            :placeholder="t('login.placeholder')"
+            @keyup.enter="login"
+          />
+          <button class="btn btn-primary" :disabled="logging" @click="login">
+            {{logging?t('login.logging'):t('login.signin')}}
+          </button>
+          <p
+            v-if="loginError"
+            style="color: var(--red); margin-top: 12px; font-size: 13px"
+          >
+            {{loginError}}
+          </p>
+        </div>
+      </div>
 
-/* Layout */
-.app{display:flex;min-height:100vh}
-.sidebar{width:240px;background:var(--card);border-right:1px solid var(--border);padding:20px 0;flex-shrink:0;display:flex;flex-direction:column}
-.sidebar .logo{font-size:20px;font-weight:700;padding:0 20px 20px;border-bottom:1px solid var(--border);margin-bottom:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.sidebar nav a{display:flex;align-items:center;gap:10px;padding:12px 20px;color:var(--muted);transition:all .2s;font-size:14px}
-.sidebar nav a:hover,.sidebar nav a.active{color:var(--text);background:rgba(99,102,241,.1);border-right:3px solid var(--accent)}
-.sidebar nav a .icon{font-size:18px;width:24px;text-align:center}
-.main{flex:1;padding:30px;overflow-y:auto;max-height:100vh}
-.main h1{font-size:24px;margin-bottom:24px;font-weight:600}
+      <!-- App -->
+      <div v-else class="app">
+        <!-- Top Bar -->
+        <div class="topbar">
+          <div
+            class="logo"
+            v-html="icons.logo+'<span> OpenCode-SW</span>'"
+          ></div>
+          <!-- Language Dropdown -->
+          <div class="dropdown-wrap">
+            <button class="locale-btn" @click="dropLang=!dropLang">
+              <span
+                v-html="icons.globe"
+                style="
+                  width: 14px;
+                  height: 14px;
+                  display: inline-block;
+                  vertical-align: middle;
+                  margin-right: 3px;
+                "
+              ></span>
+              {{locale==='zh'?'CN':'EN'}}
+            </button>
+            <div v-if="dropLang" class="dropdown-menu" style="min-width: 110px">
+              <div class="drop-backdrop" @click="dropLang=false"></div>
+              <button
+                class="drop-item"
+                :class="{active:locale==='zh'}"
+                @click="locale='zh';dropLang=false"
+              >
+                🌏 中文
+              </button>
+              <button
+                class="drop-item"
+                :class="{active:locale==='en'}"
+                @click="locale='en';dropLang=false"
+              >
+                🌍 English
+              </button>
+            </div>
+          </div>
+          <!-- Theme Dropdown -->
+          <div class="dropdown-wrap">
+            <button
+              class="top-btn icon-btn"
+              @click="dropTheme=!dropTheme"
+              v-html="theme==='dark'?icons.moon:icons.sun"
+            ></button>
+            <div
+              v-if="dropTheme"
+              class="dropdown-menu"
+              style="min-width: 140px"
+            >
+              <div class="drop-backdrop" @click="dropTheme=false"></div>
+              <button
+                class="drop-item"
+                :class="{active:theme==='dark'}"
+                @click="theme='dark';dropTheme=false"
+              >
+                <span v-html="icons.moon"></span>
+                {{locale==='zh'?'深色模式':'Dark'}}
+              </button>
+              <button
+                class="drop-item"
+                :class="{active:theme==='light'}"
+                @click="theme='light';dropTheme=false"
+              >
+                <span v-html="icons.sun"></span>
+                {{locale==='zh'?'浅色模式':'Light'}}
+              </button>
+            </div>
+          </div>
+          <!-- Logout -->
+          <button class="btn btn-ghost btn-sm" @click="showConfirm('logout')">
+            {{t('nav.logout')}}
+          </button>
+        </div>
+        <!-- App Body -->
+        <div class="app-body">
+          <aside class="sidebar">
+            <nav>
+              <a :class="{active:page==='dashboard'}" @click="page='dashboard'">
+                <span class="icon" v-html="icons.dashboard"></span
+                ><span>{{t('nav.dashboard')}}</span>
+              </a>
+              <a
+                :class="{active:page==='keys'}"
+                @click="page='keys';loadKeys()"
+              >
+                <span class="icon" v-html="icons.key"></span
+                ><span>{{t('nav.keys')}}</span>
+              </a>
+              <a
+                :class="{active:page==='tokens'}"
+                @click="page='tokens';loadTokens()"
+              >
+                <span class="icon" v-html="icons.token"></span
+                ><span>{{t('nav.tokens')}}</span>
+              </a>
+              <a
+                :class="{active:page==='models'}"
+                @click="page='models';loadModels()"
+              >
+                <span class="icon" v-html="icons.model"></span
+                ><span>{{t('nav.models')}}</span>
+              </a>
+            </nav>
+          </aside>
 
-/* Cards */
-.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px}
-.card h2{font-size:16px;margin-bottom:16px;color:var(--muted);font-weight:500}
-.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;margin-bottom:24px}
-.stat-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
-.stat-card .label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
-.stat-card .value{font-size:28px;font-weight:700;margin-top:4px}
-.stat-card .value.green{color:var(--green)}
-.stat-card .value.blue{color:var(--blue)}
-.stat-card .value.yellow{color:var(--yellow)}
-.stat-card .value.accent{color:var(--accent)}
+          <main class="main">
+            <!-- Dashboard -->
+            <div v-if="page==='dashboard'">
+              <h1>{{t('dashboard.title')}}</h1>
+              <div class="stats-grid">
+                <div class="stat-card">
+                  <div class="label">{{t('dashboard.totalCalls')}}</div>
+                  <div class="value accent">{{stats.total_calls||0}}</div>
+                </div>
+                <div class="stat-card">
+                  <div class="label">{{t('dashboard.apiKeys')}}</div>
+                  <div class="value green">{{stats.keys||0}}</div>
+                </div>
+                <div class="stat-card">
+                  <div class="label">{{t('dashboard.tokens')}}</div>
+                  <div class="value blue">{{stats.tokens||0}}</div>
+                </div>
+                <div class="stat-card">
+                  <div class="label">{{t('dashboard.avgDuration')}}</div>
+                  <div class="value yellow">
+                    {{(stats.avg_duration_ms||0).toFixed(0)}}ms
+                  </div>
+                </div>
+              </div>
 
-/* Table */
-.table-wrap{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-size:14px}
-th{text-align:left;padding:10px 12px;color:var(--muted);font-weight:500;border-bottom:1px solid var(--border);font-size:12px;text-transform:uppercase;letter-spacing:.5px}
-td{padding:10px 12px;border-bottom:1px solid var(--border)}
-tr:hover{background:rgba(99,102,241,.04)}
+              <div
+                style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px"
+              >
+                <div class="card">
+                  <h2>{{t('dashboard.callsByModel')}}</h2>
+                  <div class="chart-container">
+                    <canvas id="chartModel"></canvas>
+                  </div>
+                </div>
+                <div class="card">
+                  <h2>{{t('dashboard.callsByProtocol')}}</h2>
+                  <div class="chart-container">
+                    <canvas id="chartProtocol"></canvas>
+                  </div>
+                </div>
+              </div>
 
-/* Buttons */
-.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border:none;border-radius:6px;font-size:13px;font-weight:500;cursor:pointer;transition:all .2s}
-.btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:var(--accent2)}
-.btn-danger{background:var(--red);color:#fff}.btn-danger:hover{opacity:.8}
-.btn-ghost{background:transparent;color:var(--muted);border:1px solid var(--border)}.btn-ghost:hover{color:var(--text);border-color:var(--muted)}
-.btn-sm{padding:5px 10px;font-size:12px}
-.btn-group{display:flex;gap:8px;flex-wrap:wrap}
+              <div class="card" style="margin-top: 20px">
+                <h2>{{t('dashboard.recentCalls')}}</h2>
+                <div class="table-wrap">
+                  <table>
+                    <tr>
+                      <th>{{t('table.time')}}</th>
+                      <th>{{t('table.model')}}</th>
+                      <th>{{t('table.protocol')}}</th>
+                      <th>{{t('table.status')}}</th>
+                      <th>{{t('table.duration')}}</th>
+                      <th>{{t('table.stream')}}</th>
+                      <th>{{t('table.token')}}</th>
+                      <th>{{t('table.error')}}</th>
+                    </tr>
+                    <tr v-for="l in (stats.recent||[])" :key="l.ID">
+                      <td style="white-space: nowrap; font-size: 12px">
+                        {{fmtTime(l.CreatedAt)}}
+                      </td>
+                      <td><span class="badge badge-blue">{{l.model}}</span></td>
+                      <td>{{l.protocol}}</td>
+                      <td>
+                        <span
+                          :class="'badge '+(l.status_code<400?'badge-green':'badge-red')"
+                          >{{l.status_code}}</span
+                        >
+                      </td>
+                      <td>{{l.duration_ms}}ms</td>
+                      <td>{{l.stream?'✓':'—'}}</td>
+                      <td style="font-size: 12px">{{l.token_name||'—'}}</td>
+                      <td
+                        style="
+                          max-width: 200px;
+                          overflow: hidden;
+                          text-overflow: ellipsis;
+                          font-size: 12px;
+                          color: var(--red);
+                        "
+                      >
+                        {{l.error}}
+                      </td>
+                    </tr>
+                  </table>
+                </div>
+              </div>
+            </div>
 
-/* Forms */
-.form-row{display:flex;gap:12px;margin-bottom:12px;align-items:end;flex-wrap:wrap}
-.form-group{display:flex;flex-direction:column;gap:4px;flex:1;min-width:140px}
-.form-group label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
-input,select{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:14px;outline:none;transition:border .2s}
-input:focus,select:focus{border-color:var(--accent)}
+            <!-- Keys -->
+            <div v-if="page==='keys'">
+              <h1 class="page-title">
+                {{t('keys.title')}}
+                <button class="btn btn-primary" @click="openKeyModal">
+                  {{t('keys.addKey')}}
+                </button>
+              </h1>
+              <div class="card">
+                <h2>{{t('keys.registered',{count:keys.length})}}</h2>
+                <div class="table-wrap">
+                  <table>
+                    <tr>
+                      <th>{{t('table.active')}}</th>
+                      <th>{{t('table.key')}}</th>
+                      <th>{{t('table.group')}}</th>
+                      <th>{{t('table.label')}}</th>
+                      <th>{{t('table.weight')}}</th>
+                      <th>{{t('table.proxy')}}</th>
+                      <th>{{t('table.cooldown')}}</th>
+                      <th>{{t('table.usage')}}</th>
+                      <th>{{t('table.actions')}}</th>
+                    </tr>
+                    <tr v-for="k in keys" :key="k.ID">
+                      <td>
+                        <label class="toggle"
+                          ><input
+                            type="checkbox"
+                            :checked="k.active"
+                            @change="toggleKey(k.ID)" /><span
+                            class="slider"
+                          ></span
+                        ></label>
+                      </td>
+                      <td
+                        style="
+                          font-family: monospace;
+                          font-size: 12px;
+                          max-width: 300px;
+                          overflow: hidden;
+                          text-overflow: ellipsis;
+                        "
+                      >
+                        {{k.key_value}}
+                      </td>
+                      <td>
+                        <span class="badge badge-yellow">{{k.group_name}}</span>
+                      </td>
+                      <td>{{k.label||'—'}}</td>
+                      <td>{{k.weight}}</td>
+                      <td
+                        style="
+                          font-size: 12px;
+                          max-width: 200px;
+                          overflow: hidden;
+                          text-overflow: ellipsis;
+                        "
+                      >
+                        {{k.proxy_url||'—'}}
+                      </td>
+                      <td style="font-size: 12px">
+                        {{k.cooldown_until?fmtTime(k.cooldown_until):'—'}}
+                      </td>
+                      <td>{{k.usage_count}}</td>
+                      <td class="btn-group">
+                        <button
+                          class="btn btn-ghost btn-sm"
+                          @click="resetCooldown(k.ID)"
+                        >
+                          {{t('keys.reset')}}
+                        </button>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          @click="deleteKey(k.ID)"
+                        >
+                          {{t('keys.delete')}}
+                        </button>
+                      </td>
+                    </tr>
+                  </table>
+                </div>
+              </div>
+            </div>
 
-/* Toggle */
-.toggle{position:relative;width:40px;height:22px;cursor:pointer}
-.toggle input{opacity:0;width:0;height:0}
-.toggle .slider{position:absolute;inset:0;background:var(--border);border-radius:11px;transition:.3s}
-.toggle .slider:before{content:'';position:absolute;height:16px;width:16px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.3s}
-.toggle input:checked+.slider{background:var(--green)}
-.toggle input:checked+.slider:before{transform:translateX(18px)}
+            <!-- Tokens -->
+            <div v-if="page==='tokens'">
+              <h1 class="page-title">
+                {{t('tokens.title')}}
+                <button class="btn btn-primary" @click="openTokenModal">
+                  {{t('tokens.createToken')}}
+                </button>
+              </h1>
+              <div class="card">
+                <h2>{{t('tokens.activeTokens')}}</h2>
+                <div class="table-wrap">
+                  <table>
+                    <tr>
+                      <th>{{t('table.id')}}</th>
+                      <th>{{t('table.token')}}</th>
+                      <th>{{t('table.name')}}</th>
+                      <th>{{t('table.groups')}}</th>
+                      <th>{{t('table.rateLimit')}}</th>
+                      <th>{{t('table.expires')}}</th>
+                      <th>{{t('table.actions')}}</th>
+                    </tr>
+                    <tr v-for="tk in tokens" :key="tk.ID">
+                      <td>{{tk.ID}}</td>
+                      <td style="font-family: monospace; font-size: 12px">
+                        {{tk.token}}
+                      </td>
+                      <td>{{tk.name||'—'}}</td>
+                      <td>{{tk.allowed_groups||t('tokens.allGroups')}}</td>
+                      <td>{{tk.rate_limit||t('tokens.unlimited')}}</td>
+                      <td style="font-size: 12px">
+                        {{tk.expires_at?fmtTime(tk.expires_at):t('tokens.never')}}
+                      </td>
+                      <td>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          @click="deleteToken(tk.ID)"
+                        >
+                          {{t('tokens.delete')}}
+                        </button>
+                      </td>
+                    </tr>
+                  </table>
+                </div>
+              </div>
+            </div>
 
-/* Badges */
-.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600}
-.badge-green{background:rgba(16,185,129,.15);color:var(--green)}
-.badge-red{background:rgba(239,68,68,.15);color:var(--red)}
-.badge-blue{background:rgba(59,130,246,.15);color:var(--blue)}
-.badge-yellow{background:rgba(245,158,11,.15);color:var(--yellow)}
+            <!-- Models -->
+            <div v-if="page==='models'">
+              <h1 class="page-title">
+                {{t('models.title')}}
+                <button class="btn btn-primary" @click="openModal">
+                  {{t('models.addModel')}}
+                </button>
+              </h1>
+              <div class="card">
+                <h2>{{t('models.registered',{count:models.length})}}</h2>
+                <div class="table-wrap">
+                  <table>
+                    <tr>
+                      <th>{{t('table.id')}}</th>
+                      <th>{{t('table.name')}}</th>
+                      <th>{{t('table.upstream')}}</th>
+                      <th>{{t('table.protocol')}}</th>
+                      <th>{{t('table.realModel')}}</th>
+                      <th>{{t('table.group')}}</th>
+                      <th>{{t('table.context')}}</th>
+                      <th>{{t('table.actions')}}</th>
+                    </tr>
+                    <tr v-for="m in models" :key="m.id">
+                      <td><code>{{m.id}}</code></td>
+                      <td>{{m.name}}</td>
+                      <td>
+                        <span class="badge badge-blue">{{m.upstream}}</span>
+                      </td>
+                      <td>{{m.protocol}}</td>
+                      <td style="font-size: 12px">{{m.real_model}}</td>
+                      <td>
+                        <span class="badge badge-yellow">{{m.group||'—'}}</span>
+                      </td>
+                      <td>{{m.context_len||'—'}}</td>
+                      <td>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          @click="deleteModel(m.id)"
+                        >
+                          {{t('models.delete')}}
+                        </button>
+                      </td>
+                    </tr>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </main>
+        </div>
+        <!-- /app-body -->
+      </div>
 
-/* Login */
-.login-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh;background:var(--bg)}
-.login-box{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:40px;width:380px;text-align:center}
-.login-box h1{font-size:24px;margin-bottom:8px;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.login-box p{color:var(--muted);margin-bottom:24px;font-size:14px}
-.login-box input{width:100%;margin-bottom:16px}
-.login-box .btn{width:100%;justify-content:center;padding:10px}
+      <!-- Model Add Modal -->
+      <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
+        <div class="modal">
+          <h2>{{t('models.addModel')}}</h2>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('models.upstream')}}</label>
+              <select v-model="newModel.upstream">
+                <option value="zen">zen</option>
+                <option value="go">go</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>{{t('models.protocol')}}</label>
+              <select v-model="newModel.protocol">
+                <option value="chat">chat</option>
+                <option value="messages">messages</option>
+                <option value="responses">responses</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('models.modelId')}}</label>
+              <input v-model="newModel.id" placeholder="auto-generated" />
+            </div>
+            <div class="form-group">
+              <label>{{t('models.displayName')}}</label>
+              <input
+                v-model="newModel.name"
+                :placeholder="t('models.namePlaceholder')"
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('models.realModel')}}</label>
+              <select v-model="newModel.real_model">
+                <option value="" disabled>
+                  — {{t('models.select') || '请选择'}} —
+                </option>
+                <option v-for="m in availableModels" :key="m" :value="m">
+                  {{m}}
+                </option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>{{t('models.group')}}</label>
+              <select v-model="newModel.group">
+                <option v-for="g in availableGroups" :key="g" :value="g">
+                  {{g}}
+                </option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('models.contextLen')}}</label>
+              <input
+                v-model.number="newModel.context_len"
+                type="number"
+                placeholder="128000"
+              />
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-ghost" @click="closeModal">
+              {{t('models.cancel') || '取消'}}
+            </button>
+            <button class="btn btn-primary" @click="addModel">
+              {{t('models.addBtn')}}
+            </button>
+          </div>
+        </div>
+      </div>
 
-/* Chart */
-.chart-container{position:relative;height:250px;margin-top:12px}
+      <!-- Token Create Modal -->
+      <div
+        v-if="showTokenModal"
+        class="modal-overlay"
+        @click.self="closeTokenModal"
+      >
+        <div class="modal">
+          <h2>{{t('tokens.createToken')}}</h2>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('tokens.name')}}</label>
+              <input
+                v-model="newToken.name"
+                :placeholder="t('tokens.namePlaceholder')"
+              />
+            </div>
+            <div class="form-group">
+              <label>{{t('tokens.rateLimit')}}</label>
+              <input
+                v-model.number="newToken.rate_limit"
+                type="number"
+                min="0"
+                :placeholder="t('tokens.ratePlaceholder')"
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('tokens.allowedGroups')}}</label>
+              <div class="checkbox-group">
+                <label
+                  class="checkbox-label"
+                  v-for="g in availableTokenGroups"
+                  :key="g"
+                >
+                  <input
+                    type="checkbox"
+                    :value="g"
+                    v-model="newToken.allowed_groups"
+                  />
+                  <span>{{g}}</span>
+                </label>
+              </div>
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-ghost" @click="closeTokenModal">
+              {{t('tokens.cancel') || '取消'}}
+            </button>
+            <button class="btn btn-primary" @click="addToken">
+              {{t('tokens.create')}}
+            </button>
+          </div>
+        </div>
+      </div>
 
-/* Toast */
-.toast{position:fixed;top:20px;right:20px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 20px;font-size:14px;z-index:9999;animation:slideIn .3s ease}
-.toast.success{border-color:var(--green);color:var(--green)}
-.toast.error{border-color:var(--red);color:var(--red)}
-@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}
+      <!-- Key Create Modal -->
+      <div
+        v-if="showKeyModal"
+        class="modal-overlay"
+        @click.self="closeKeyModal"
+      >
+        <div class="modal">
+          <h2>{{t('keys.addKey')}}</h2>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('keys.keyValue')}}</label>
+              <input v-model="newKey.value" placeholder="sk-..." />
+            </div>
+            <div class="form-group">
+              <label>{{t('keys.group')}}</label>
+              <select v-model="newKey.group">
+                <option v-for="g in keyGroupOptions" :key="g" :value="g">
+                  {{g}}
+                </option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('keys.label')}}</label>
+              <input v-model="newKey.label" :placeholder="t('keys.optional')" />
+            </div>
+            <div class="form-group">
+              <label>{{t('keys.weight')}}</label>
+              <input
+                v-model.number="newKey.weight"
+                type="number"
+                min="1"
+                max="100"
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('keys.proxyUrl')}}</label>
+              <input
+                v-model="newKey.proxy_url"
+                placeholder="http://proxy:8080"
+              />
+            </div>
+          </div>
+          <div class="btn-group">
+            <button class="btn btn-ghost" @click="closeKeyModal">
+              {{t('keys.cancel') || '取消'}}
+            </button>
+            <button class="btn btn-primary" @click="addKey">
+              {{t('keys.addBtn')}}
+            </button>
+          </div>
+        </div>
+      </div>
 
-/* Modal */
-.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:1000}
-.modal{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:30px;width:480px;max-width:90vw}
-.modal h2{margin-bottom:20px;font-size:18px}
-.modal .form-group{margin-bottom:16px}
-.modal .btn-group{margin-top:20px;justify-content:flex-end}
+      <!-- Confirm Modal -->
+      <div
+        v-if="confirm.show"
+        class="confirm-overlay"
+        @click.self="confirmCancel"
+      >
+        <div class="confirm-box">
+          <h3>{{confirm.title}}</h3>
+          <p>{{confirm.msg}}</p>
+          <div class="btn-group">
+            <button class="btn btn-ghost" @click="confirmCancel">
+              {{confirm.cancelText||'取消'}}
+            </button>
+            <button
+              :class="'btn '+(confirm.danger?'btn-danger':'btn-primary')"
+              @click="confirmOk"
+            >
+              {{confirm.okText||'确定'}}
+            </button>
+          </div>
+        </div>
+      </div>
 
-/* Responsive */
-@media(max-width:768px){
-  .sidebar{width:60px}.sidebar .logo{font-size:0;padding:10px;text-align:center}.sidebar .logo:after{content:'⚡';font-size:20px;-webkit-text-fill-color:initial}.sidebar nav a span{display:none}.sidebar nav a{justify-content:center;padding:12px}
-  .main{padding:16px}.stats-grid{grid-template-columns:repeat(2,1fr)}
-}
-</style>
-</head>
-<body>
-<div id="app">
-  <!-- Login -->
-  <div v-if="!token" class="login-wrap">
-    <div class="login-box">
-      <h1>⚡ OpenCode-SW</h1>
-      <p>Multi-Key Management Gateway</p>
-      <input v-model="password" type="password" placeholder="Admin password" @keyup.enter="login">
-      <button class="btn btn-primary" @click="login">Sign In</button>
-      <p v-if="loginError" style="color:var(--red);margin-top:12px;font-size:13px">{{loginError}}</p>
+      <!-- Toast -->
+      <div v-if="toast.show" :class="'toast '+toast.type">{{toast.msg}}</div>
     </div>
-  </div>
 
-  <!-- App -->
-  <div v-else class="app">
-    <aside class="sidebar">
-      <div class="logo">⚡ OpenCode-SW</div>
-      <nav>
-        <a :class="{active:page==='dashboard'}" @click="page='dashboard'"><span class="icon">📊</span><span>Dashboard</span></a>
-        <a :class="{active:page==='keys'}" @click="page='keys';loadKeys()"><span class="icon">🔑</span><span>API Keys</span></a>
-        <a :class="{active:page==='tokens'}" @click="page='tokens';loadTokens()"><span class="icon">🎫</span><span>Tokens</span></a>
-        <a :class="{active:page==='models'}" @click="page='models';loadModels()"><span class="icon">🤖</span><span>Models</span></a>
-      </nav>
-      <div style="margin-top:auto;padding:12px 20px">
-        <button class="btn btn-ghost btn-sm" @click="logout" style="width:100%">Logout</button>
-      </div>
-    </aside>
-
-    <main class="main">
-      <!-- Dashboard -->
-      <div v-if="page==='dashboard'">
-        <h1>Dashboard</h1>
-        <div class="stats-grid">
-          <div class="stat-card"><div class="label">Total Calls</div><div class="value accent">{{stats.total_calls||0}}</div></div>
-          <div class="stat-card"><div class="label">API Keys</div><div class="value green">{{stats.keys||0}}</div></div>
-          <div class="stat-card"><div class="label">Tokens</div><div class="value blue">{{stats.tokens||0}}</div></div>
-          <div class="stat-card"><div class="label">Avg Duration</div><div class="value yellow">{{(stats.avg_duration_ms||0).toFixed(0)}}ms</div></div>
-        </div>
-
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
-          <div class="card">
-            <h2>Calls by Model</h2>
-            <div class="chart-container"><canvas id="chartModel"></canvas></div>
-          </div>
-          <div class="card">
-            <h2>Calls by Protocol</h2>
-            <div class="chart-container"><canvas id="chartProtocol"></canvas></div>
-          </div>
-        </div>
-
-        <div class="card" style="margin-top:20px">
-          <h2>Recent Calls</h2>
-          <div class="table-wrap">
-            <table>
-              <tr><th>Time</th><th>Model</th><th>Protocol</th><th>Status</th><th>Duration</th><th>Stream</th><th>Token</th><th>Error</th></tr>
-              <tr v-for="l in (stats.recent||[])" :key="l.ID">
-                <td style="white-space:nowrap;font-size:12px">{{fmtTime(l.CreatedAt)}}</td>
-                <td><span class="badge badge-blue">{{l.model}}</span></td>
-                <td>{{l.protocol}}</td>
-                <td><span :class="'badge '+(l.status_code<400?'badge-green':'badge-red')">{{l.status_code}}</span></td>
-                <td>{{l.duration_ms}}ms</td>
-                <td>{{l.stream?'✓':'—'}}</td>
-                <td style="font-size:12px">{{l.token_name||'—'}}</td>
-                <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;font-size:12px;color:var(--red)">{{l.error}}</td>
-              </tr>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <!-- Keys -->
-      <div v-if="page==='keys'">
-        <h1>API Keys</h1>
-        <div class="card">
-          <h2>Add Key</h2>
-          <div class="form-row">
-            <div class="form-group"><label>Key Value</label><input v-model="newKey.value" placeholder="sk-..."></div>
-            <div class="form-group"><label>Group</label><select v-model="newKey.group"><option value="zen">zen</option><option value="go">go</option></select></div>
-            <div class="form-group"><label>Label</label><input v-model="newKey.label" placeholder="optional label"></div>
-            <div class="form-group"><label>Weight</label><input v-model.number="newKey.weight" type="number" min="1" placeholder="1"></div>
-            <div class="form-group"><label>&nbsp;</label><button class="btn btn-primary" @click="addKey">Add Key</button></div>
-          </div>
-        </div>
-        <div class="card">
-          <h2>Key Pool</h2>
-          <div class="table-wrap">
-            <table>
-              <tr><th>ID</th><th>Key</th><th>Group</th><th>Label</th><th>Weight</th><th>Enabled</th><th>Fails</th><th>Cooldown</th><th>Usage</th><th>Actions</th></tr>
-              <tr v-for="k in keys" :key="k.ID">
-                <td>{{k.ID}}</td>
-                <td style="font-family:monospace;font-size:12px">{{k.value}}</td>
-                <td><span class="badge badge-blue">{{k.group}}</span></td>
-                <td>{{k.label||'—'}}</td>
-                <td>{{k.weight}}</td>
-                <td><label class="toggle"><input type="checkbox" :checked="k.enabled" @change="toggleKey(k.ID)"><span class="slider"></span></label></td>
-                <td><span :class="'badge '+(k.fail_count>0?'badge-red':'badge-green')">{{k.fail_count}}</span></td>
-                <td style="font-size:12px">{{k.cooldown_until?fmtTime(k.cooldown_until):'—'}}</td>
-                <td>{{k.usage_count}}</td>
-                <td class="btn-group">
-                  <button class="btn btn-ghost btn-sm" @click="resetCooldown(k.ID)">Reset</button>
-                  <button class="btn btn-danger btn-sm" @click="deleteKey(k.ID)">Delete</button>
-                </td>
-              </tr>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <!-- Tokens -->
-      <div v-if="page==='tokens'">
-        <h1>Gateway Tokens</h1>
-        <div class="card">
-          <h2>Create Token</h2>
-          <div class="form-row">
-            <div class="form-group"><label>Name</label><input v-model="newToken.name" placeholder="e.g. my-app"></div>
-            <div class="form-group"><label>Allowed Groups</label><input v-model="newToken.allowed_groups" placeholder="zen,go (empty=all)"></div>
-            <div class="form-group"><label>Rate Limit</label><input v-model.number="newToken.rate_limit" type="number" min="0" placeholder="0=unlimited"></div>
-            <div class="form-group"><label>&nbsp;</label><button class="btn btn-primary" @click="addToken">Create</button></div>
-          </div>
-        </div>
-        <div class="card">
-          <h2>Active Tokens</h2>
-          <div class="table-wrap">
-            <table>
-              <tr><th>ID</th><th>Token</th><th>Name</th><th>Groups</th><th>Rate Limit</th><th>Expires</th><th>Actions</th></tr>
-              <tr v-for="t in tokens" :key="t.ID">
-                <td>{{t.ID}}</td>
-                <td style="font-family:monospace;font-size:12px">{{t.token}}</td>
-                <td>{{t.name||'—'}}</td>
-                <td>{{t.allowed_groups||'all'}}</td>
-                <td>{{t.rate_limit||'unlimited'}}</td>
-                <td style="font-size:12px">{{t.expires_at?fmtTime(t.expires_at):'never'}}</td>
-                <td><button class="btn btn-danger btn-sm" @click="deleteToken(t.ID)">Delete</button></td>
-              </tr>
-            </table>
-          </div>
-        </div>
-      </div>
-
-      <!-- Models -->
-      <div v-if="page==='models'">
-        <h1>Model Routes</h1>
-        <div class="card">
-          <h2>Add Model Route</h2>
-          <div class="form-row">
-            <div class="form-group"><label>Model ID</label><input v-model="newModel.id" placeholder="my-model"></div>
-            <div class="form-group"><label>Display Name</label><input v-model="newModel.name" placeholder="My Model"></div>
-            <div class="form-group"><label>Upstream</label><select v-model="newModel.upstream"><option value="zen">zen</option><option value="go">go</option></select></div>
-            <div class="form-group"><label>Protocol</label><select v-model="newModel.protocol"><option value="chat">chat</option><option value="messages">messages</option><option value="responses">responses</option></select></div>
-          </div>
-          <div class="form-row">
-            <div class="form-group"><label>Real Model</label><input v-model="newModel.real_model" placeholder="provider/model-id"></div>
-            <div class="form-group"><label>Group</label><input v-model="newModel.group" placeholder="zen or go"></div>
-            <div class="form-group"><label>Context Length</label><input v-model.number="newModel.context_len" type="number" placeholder="128000"></div>
-            <div class="form-group"><label>&nbsp;</label><button class="btn btn-primary" @click="addModel">Add Model</button></div>
-          </div>
-        </div>
-        <div class="card">
-          <h2>Registered Models ({{models.length}})</h2>
-          <div class="table-wrap">
-            <table>
-              <tr><th>ID</th><th>Name</th><th>Upstream</th><th>Protocol</th><th>Real Model</th><th>Group</th><th>Context</th><th>Actions</th></tr>
-              <tr v-for="m in models" :key="m.id">
-                <td style="font-weight:600">{{m.id}}</td>
-                <td>{{m.name}}</td>
-                <td><span class="badge badge-yellow">{{m.upstream}}</span></td>
-                <td><span :class="'badge '+(m.protocol==='messages'?'badge-green':m.protocol==='responses'?'badge-blue':'badge-yellow')">{{m.protocol}}</span></td>
-                <td style="font-family:monospace;font-size:12px">{{m.real_model}}</td>
-                <td>{{m.group}}</td>
-                <td>{{m.context_len||'—'}}</td>
-                <td><button class="btn btn-danger btn-sm" @click="deleteModel(m.id)">Delete</button></td>
-              </tr>
-            </table>
-          </div>
-        </div>
-      </div>
-    </main>
-  </div>
-
-  <!-- Toast -->
-  <div v-if="toast.show" :class="'toast '+toast.type">{{toast.msg}}</div>
-</div>
-
-<script>
-const{createApp,ref,reactive,onMounted,watch,nextTick}=Vue;
-
-createApp({
-  setup(){
-    const token=ref(localStorage.getItem('admin_token')||'');
-    const password=ref('');
-    const loginError=ref('');
-    const page=ref('dashboard');
-    const stats=ref({});
-    const keys=ref([]);
-    const tokens=ref([]);
-    const models=ref([]);
-    let chartModel=null,chartProtocol=null;
-
-    const toast=reactive({show:false,msg:'',type:'success'});
-    function showToast(msg,type='success'){toast.show=true;toast.msg=msg;toast.type=type;setTimeout(()=>toast.show=false,3000)}
-
-    const newKey=reactive({value:'',group:'zen',label:'',weight:1});
-    const newToken=reactive({name:'',allowed_groups:'',rate_limit:0});
-    const newModel=reactive({id:'',name:'',upstream:'zen',protocol:'chat',real_model:'',group:'',context_len:0});
-
-    function headers(){return{'Content-Type':'application/json','Authorization':'Bearer '+token.value}}
-    async function api(path,method='GET',body=null){
-      const opts={method,headers:headers()};
-      if(body)opts.body=JSON.stringify(body);
-      const r=await fetch('/admin'+path,opts);
-      if(r.status===401){token.value='';localStorage.removeItem('admin_token');throw new Error('Session expired')}
-      const data=await r.json();
-      if(!r.ok)throw new Error(data.error||'Request failed');
-      return data;
-    }
-
-    async function login(){
-      loginError.value='';
-      try{
-        const d=await api('/login','POST',{password:password.value});
-        token.value=d.token;
-        localStorage.setItem('admin_token',d.token);
-        password.value='';
-        loadDashboard();
-      }catch(e){loginError.value=e.message}
-    }
-    function logout(){token.value='';localStorage.removeItem('admin_token')}
-
-    async function loadDashboard(){
-      try{
-        const d=await api('/stats');
-        stats.value=d;
-        await nextTick();
-        renderCharts(d);
-      }catch(e){showToast(e.message,'error')}
-    }
-
-    function renderCharts(d){
-      // Model chart
-      const mc=document.getElementById('chartModel');
-      if(mc){
-        if(chartModel)chartModel.destroy();
-        const labels=(d.by_model||[]).map(m=>m.model);
-        const values=(d.by_model||[]).map(m=>m.count);
-        chartModel=new Chart(mc,{type:'bar',data:{labels,datasets:[{label:'Calls',data:values,backgroundColor:'rgba(99,102,241,0.6)',borderColor:'rgba(99,102,241,1)',borderWidth:1,borderRadius:4}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#8892b0',font:{size:10}},grid:{display:false}},y:{ticks:{color:'#8892b0'},grid:{color:'rgba(42,45,58,0.5)'}}}}});
-      }
-      // Protocol chart
-      const pc=document.getElementById('chartProtocol');
-      if(pc){
-        if(chartProtocol)chartProtocol.destroy();
-        const labels=(d.by_protocol||[]).map(p=>p.protocol);
-        const values=(d.by_protocol||[]).map(p=>p.count);
-        const colors=['#6366f1','#10b981','#f59e0b','#ef4444'];
-        chartProtocol=new Chart(pc,{type:'doughnut',data:{labels,datasets:[{data:values,backgroundColor:colors.slice(0,labels.length),borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{color:'#8892b0',padding:12}}}}});
-      }
-    }
-
-    async function loadKeys(){try{const d=await api('/keys');keys.value=d.data||[]}catch(e){showToast(e.message,'error')}}
-    async function addKey(){try{await api('/keys','POST',newKey);showToast('Key added');newKey.value='';newKey.label='';loadKeys()}catch(e){showToast(e.message,'error')}}
-    async function toggleKey(id){try{await api('/keys/'+id+'/toggle','POST');loadKeys()}catch(e){showToast(e.message,'error')}}
-    async function resetCooldown(id){try{await api('/keys/'+id+'/reset','POST');showToast('Cooldown reset');loadKeys()}catch(e){showToast(e.message,'error')}}
-    async function deleteKey(id){if(!confirm('Delete this key?'))return;try{await api('/keys/'+id,'DELETE');showToast('Key deleted');loadKeys()}catch(e){showToast(e.message,'error')}}
-
-    async function loadTokens(){try{const d=await api('/tokens');tokens.value=d.data||[]}catch(e){showToast(e.message,'error')}}
-    async function addToken(){try{await api('/tokens','POST',newToken);showToast('Token created');newToken.name='';loadTokens()}catch(e){showToast(e.message,'error')}}
-    async function deleteToken(id){if(!confirm('Delete this token?'))return;try{await api('/tokens/'+id,'DELETE');showToast('Token deleted');loadTokens()}catch(e){showToast(e.message,'error')}}
-
-    async function loadModels(){try{const d=await api('/models');models.value=d.data||[]}catch(e){showToast(e.message,'error')}}
-    async function addModel(){try{await api('/models','POST',newModel);showToast('Model added');newModel.id='';newModel.name='';newModel.real_model='';loadModels()}catch(e){showToast(e.message,'error')}}
-    async function deleteModel(id){if(!confirm('Delete this model?'))return;try{await api('/models/'+id,'DELETE');showToast('Model deleted');loadModels()}catch(e){showToast(e.message,'error')}}
-
-    function fmtTime(s){if(!s)return'—';try{return new Date(s).toLocaleString()}catch(e){return s}}
-
-    onMounted(()=>{if(token.value)loadDashboard()});
-
-    watch(page,(p)=>{if(p==='dashboard')loadDashboard()});
-
-    return{token,password,loginError,page,stats,keys,tokens,models,toast,newKey,newToken,newModel,login,logout,loadKeys,addKey,toggleKey,resetCooldown,deleteKey,loadTokens,addToken,deleteToken,loadModels,addModel,deleteModel,fmtTime};
-  }
-}).mount('#app');
-</script>
-</body>
+    <script type="module" src="js/app.js"></script>
+  </body>
 </html>
