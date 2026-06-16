@@ -30,3 +30,6 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+.snow/
+.env
+gateway

@@ -2,7 +2,7 @@
 
 A multi-key management gateway for **OpenCode Zen / Go** services, written in Go + Gin and ready to deploy on **Zeabur**.
 
-It aggregates many OpenCode API keys (Zen pay-as-you-go *and* Go subscription) behind a single set of universal endpoints, so any OpenAI- / Anthropic-compatible client (including opencode itself) can consume them with one gateway token.
+It aggregates many OpenCode API keys (Zen pay-as-you-go _and_ Go subscription) behind a single set of universal endpoints, so any OpenAI- / Anthropic-compatible client (including opencode itself) can consume them with one gateway token.
 
 ## Features
 
@@ -84,12 +84,12 @@ curl localhost:3000/v1/models
 
 Any client protocol can reach any upstream model. The gateway automatically converts through the IR (Intermediate Representation):
 
-| Client calls | Model speaks | What happens |
-|---|---|---|
-| `/v1/chat/completions` | `messages` (Claude) | Chat → IR → Messages, response Messages → IR → Chat |
-| `/v1/messages` | `chat` (DeepSeek) | Messages → IR → Chat, response Chat → IR → Messages |
-| `/v1/responses` | `messages` (Claude) | Responses → IR → Messages, response Messages → IR → Responses |
-| Same protocol | Same protocol | Transparent passthrough (no buffering) |
+| Client calls           | Model speaks        | What happens                                                  |
+| ---------------------- | ------------------- | ------------------------------------------------------------- |
+| `/v1/chat/completions` | `messages` (Claude) | Chat → IR → Messages, response Messages → IR → Chat           |
+| `/v1/messages`         | `chat` (DeepSeek)   | Messages → IR → Chat, response Chat → IR → Messages           |
+| `/v1/responses`        | `messages` (Claude) | Responses → IR → Messages, response Messages → IR → Responses |
+| Same protocol          | Same protocol       | Transparent passthrough (no buffering)                        |
 
 Streaming SSE is fully supported in all combinations.
 
@@ -109,9 +109,9 @@ Create `opencode.json` in your project (or `~/.config/opencode/opencode.json`):
         "apiKey": "{env:OCSW_TOKEN}"
       },
       "models": {
-        "glm-4.6":      { "name": "GLM 4.6" },
-        "deepseek-v3.2":{ "name": "DeepSeek V3.2" },
-        "kimi-k2":      { "name": "Kimi K2" }
+        "glm-4.6": { "name": "GLM 4.6" },
+        "deepseek-v3.2": { "name": "DeepSeek V3.2" },
+        "kimi-k2": { "name": "Kimi K2" }
       }
     },
     "opencode-sw-messages": {
@@ -158,15 +158,15 @@ Access at `http://<gateway>/admin`. Features:
 
 ## Environment variables
 
-| Var | Default | Description |
-|---|---|---|
-| `PORT` | `3000` | HTTP listen port (Zeabur injects) |
-| `ADMIN_PASSWORD` | `admin` | Admin login password |
-| `JWT_SECRET` | (built-in) | Secret for admin JWT |
-| `DB_PATH` | `./data/opencode-sw.db` | SQLite file path |
-| `ZEN_BASE_URL` | `https://opencode.ai/zen` | Zen upstream base |
-| `GO_BASE_URL` | `https://opencode.ai/zen/go` | Go upstream base |
-| `UPSTREAM_TIMEOUT` | `120` | Upstream call timeout (seconds) |
+| Var                | Default                      | Description                                              |
+| ------------------ | ---------------------------- | -------------------------------------------------------- |
+| `PORT`             | `9812`                       | HTTP listen port (use env to override, e.g. `PORT=3000`) |
+| `ADMIN_PASSWORD`   | `admin`                      | Admin login password                                     |
+| `JWT_SECRET`       | (built-in)                   | Secret for admin JWT                                     |
+| `DB_PATH`          | `./data/opencode-sw.db`      | SQLite file path                                         |
+| `ZEN_BASE_URL`     | `https://opencode.ai/zen`    | Zen upstream base                                        |
+| `GO_BASE_URL`      | `https://opencode.ai/zen/go` | Go upstream base                                         |
+| `UPSTREAM_TIMEOUT` | `120`                        | Upstream call timeout (seconds)                          |
 
 ## Project structure
 

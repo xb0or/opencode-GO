@@ -20,6 +20,7 @@ type Key struct {
 	Label     string    `gorm:"size:128" json:"label"`
 	Enabled   bool      `gorm:"default:true" json:"enabled"`
 	Weight    int       `gorm:"default:1" json:"weight"`
+	ProxyURL  string    `gorm:"size:512" json:"proxy_url"`
 	FailCount int       `json:"fail_count"`
 	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
 	LastUsed  *time.Time `json:"last_used,omitempty"`
