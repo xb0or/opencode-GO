@@ -1,0 +1,213 @@
+/**
+ * OpenCode-SW Admin 管理面板 - 主入口
+ *
+ * ES Module 入口文件，导入各模块并创建 Vue 3 应用。
+ */
+
+import { icons } from "./icons.js";
+import { locales } from "./locales.js";
+import { createApi, fmtTime } from "./api.js";
+import { useDashboard } from "./pages/dashboard.js";
+import { useKeys } from "./pages/keys.js";
+import { useTokens } from "./pages/tokens.js";
+import { useModels } from "./pages/models.js";
+
+const { createApp, reactive, ref, watch } = Vue;
+
+createApp({
+  setup() {
+    // ─── 全局状态 ─────────────────────────────────────
+    const token = ref(localStorage.getItem("admin_token") || "");
+    const password = ref("");
+    const loginError = ref("");
+    const logging = ref(false);
+    const page = ref("dashboard");
+    const locale = ref(localStorage.getItem("admin_locale") || "zh");
+    const theme = ref(localStorage.getItem("admin_theme") || "dark");
+    const dropLang = ref(false);
+    const dropTheme = ref(false);
+
+    const toast = reactive({ show: false, msg: "", type: "success" });
+    const confirm = reactive({
+      show: false,
+      title: "",
+      msg: "",
+      okText: "确定",
+      cancelText: "取消",
+      danger: false,
+      onOk: null,
+    });
+
+    function showToast(msg, type = "success") {
+      toast.show = true;
+      toast.msg = msg;
+      toast.type = type;
+      const duration = type === "error" ? 5000 : 3000;
+      setTimeout(() => (toast.show = false), duration);
+    }
+
+    // ─── 国际化 ───────────────────────────────────────
+    function t(key, params) {
+      const keys = key.split(".");
+      let val = locales[locale.value];
+      for (const k of keys) if (val) val = val[k];
+      if (typeof val === "string" && params)
+        for (const [k, v] of Object.entries(params))
+          val = val.replace("{" + k + "}", v);
+      return val || key;
+    }
+
+    watch(locale, (val) => {
+      localStorage.setItem("admin_locale", val);
+      document.documentElement.lang = val === "zh" ? "zh-CN" : "en";
+    });
+
+    // ─── 主题 ─────────────────────────────────────────
+    function toggleTheme() {
+      theme.value = theme.value === "dark" ? "light" : "dark";
+    }
+    // Apply theme on init
+    document.documentElement.dataset.theme = theme.value;
+    watch(theme, (val) => {
+      localStorage.setItem("admin_theme", val);
+      document.documentElement.dataset.theme = val;
+    });
+
+    // ─── API 客户端 ───────────────────────────────────
+    const { api } = createApi(token);
+
+    // ─── 登录 / 注销 ──────────────────────────────────
+    async function login() {
+      loginError.value = "";
+      logging.value = true;
+      try {
+        const d = await api("/login", "POST", { password: password.value });
+        token.value = d.token;
+        localStorage.setItem("admin_token", d.token);
+        password.value = "";
+        logging.value = false;
+        dashboard.load();
+      } catch (e) {
+        logging.value = false;
+        loginError.value = e.message;
+      }
+    }
+
+    function logout() {
+      token.value = "";
+      localStorage.removeItem("admin_token");
+    }
+
+    // ─── 确认弹窗 ─────────────────────────────────────
+    function showConfirm(type, item) {
+      if (type === "logout") {
+        confirm.title = t("nav.logout");
+        confirm.msg = "确定退出登录？";
+        confirm.okText = "退出";
+        confirm.danger = false;
+        confirm.onOk = () => logout();
+      } else if (type === "deleteKey") {
+        confirm.title = "删除密钥";
+        confirm.msg = "确定删除此 API 密钥？此操作不可撤销。";
+        confirm.okText = "删除";
+        confirm.danger = true;
+        confirm.onOk = item;
+      } else if (type === "deleteToken") {
+        confirm.title = "删除令牌";
+        confirm.msg = "确定删除此访问令牌？此操作不可撤销。";
+        confirm.okText = "删除";
+        confirm.danger = true;
+        confirm.onOk = item;
+      } else if (type === "deleteModel") {
+        confirm.title = "删除模型";
+        confirm.msg = "确定删除此模型路由？此操作不可撤销。";
+        confirm.okText = "删除";
+        confirm.danger = true;
+        confirm.onOk = item;
+      }
+      confirm.show = true;
+    }
+    function confirmCancel() {
+      confirm.show = false;
+    }
+    async function confirmOk() {
+      const fn = confirm.onOk;
+      confirm.show = false;
+      if (fn) await fn();
+    }
+
+    // ─── 页面组合式函数 ───────────────────────────────
+    const dashboard = useDashboard(api, showToast, t);
+    const keys = useKeys(api, showToast, t, showConfirm);
+    const tokens = useTokens(api, showToast, t, showConfirm);
+    const models = useModels(api, showToast, t, showConfirm);
+
+    // ─── 初始化 ───────────────────────────────────────
+    if (token.value) dashboard.load();
+
+    // ─── 暴露给模板 ───────────────────────────────────
+    return {
+      // 全局
+      token,
+      password,
+      loginError,
+      logging,
+      page,
+      locale,
+      theme,
+      dropLang,
+      dropTheme,
+      toast,
+      confirm,
+      icons,
+      t,
+      login,
+      logout,
+      toggleTheme,
+      showConfirm,
+      confirmCancel,
+      confirmOk,
+      showToast,
+      fmtTime,
+
+      // 仪表盘
+      stats: dashboard.stats,
+
+      // 密钥管理
+      keys: keys.keys,
+      newKey: keys.newKey,
+      showKeyModal: keys.showKeyModal,
+      keyGroupOptions: keys.keyGroupOptions,
+      openKeyModal: keys.openKeyModal,
+      closeKeyModal: keys.closeKeyModal,
+      loadKeys: keys.load,
+      addKey: keys.add,
+      toggleKey: keys.toggle,
+      resetCooldown: keys.resetCooldown,
+      deleteKey: keys.remove,
+
+      // 令牌管理
+      tokens: tokens.tokens,
+      newToken: tokens.newToken,
+      showTokenModal: tokens.showTokenModal,
+      availableTokenGroups: tokens.availableTokenGroups,
+      openTokenModal: tokens.openTokenModal,
+      closeTokenModal: tokens.closeTokenModal,
+      loadTokens: tokens.load,
+      addToken: tokens.add,
+      deleteToken: tokens.remove,
+
+      // 模型管理
+      models: models.models,
+      newModel: models.newModel,
+      showModal: models.showModal,
+      availableModels: models.availableModels,
+      availableGroups: models.availableGroups,
+      openModal: models.openModal,
+      closeModal: models.closeModal,
+      loadModels: models.load,
+      addModel: models.add,
+      deleteModel: models.remove,
+    };
+  },
+}).mount("#app");
