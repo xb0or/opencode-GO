@@ -8,3 +8,5 @@ Model Mapping 配置位于 `config/model_mapping.go`：支持 `MODEL_MAPPINGS` J
 
 后台管理已提供 Model Mappings 页面：前端模块为 `web/js/pages/mappings.js`，管理接口为 `/admin/model-mappings`，持久化模型为 `store.ModelMappingRow`。
 
+总览仪表盘统计由 `admin/router.go` 的 `/admin/stats` 聚合输出，前端渲染位于 `web/admin.html` 与 `web/js/pages/dashboard.js`。当前总览卡片覆盖访问令牌/API 密钥启用数、今日/累计请求、今日/累计消费、今日/累计 Token、RPM/TPM 和平均响应时间。`UsageLog` 已持久化 `input_tokens`、`output_tokens`、`cache_tokens`、`cache_read_tokens`、`cache_creation_tokens`、`total_tokens`、`total_cost`、`actual_cost`、`account_cost`，非流式同协议和跨协议 JSON 响应会尽力解析 usage 写入。缓存 Token 兼容 OpenAI/Responses 的 `prompt_tokens_details.cached_tokens` 与 Anthropic 的 `cache_read_input_tokens`、`cache_creation_input_tokens` 等字段；使用记录页会展示本页 Token、缓存 Token 和消费。
+

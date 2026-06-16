@@ -109,6 +109,86 @@ func TestListTokensReturnsCopyableSKToken(t *testing.T) {
 	}
 }
 
+func TestStatsIncludesDashboardAccountingFields(t *testing.T) {
+	if err := store.InitForTest("file:admin_stats_dashboard?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	if err := store.DB().Create(&store.Key{Value: "enabled-key", Group: "go", Enabled: true, Weight: 1}).Error; err != nil {
+		t.Fatalf("create enabled key: %v", err)
+	}
+	disabledKey := store.Key{Value: "disabled-key", Group: "go", Enabled: true, Weight: 1}
+	if err := store.DB().Create(&disabledKey).Error; err != nil {
+		t.Fatalf("create disabled key: %v", err)
+	}
+	if err := store.DB().Model(&store.Key{}).Where("id = ?", disabledKey.ID).Update("enabled", false).Error; err != nil {
+		t.Fatalf("disable key: %v", err)
+	}
+	if err := store.DB().Create(&store.Token{Token: "sk-enabled", Name: "enabled", Enabled: true}).Error; err != nil {
+		t.Fatalf("create enabled token: %v", err)
+	}
+	disabledToken := store.Token{Token: "sk-disabled", Name: "disabled", Enabled: true}
+	if err := store.DB().Create(&disabledToken).Error; err != nil {
+		t.Fatalf("create disabled token: %v", err)
+	}
+	if err := store.DB().Model(&store.Token{}).Where("id = ?", disabledToken.ID).Update("enabled", false).Error; err != nil {
+		t.Fatalf("disable token: %v", err)
+	}
+
+	now := time.Now()
+	rows := []store.UsageLog{
+		{Model: "glm-5.1", Protocol: "chat", StatusCode: 200, DurationMs: 1000, InputTokens: 100, OutputTokens: 50, CacheTokens: 20, CacheReadTokens: 20, TotalTokens: 150, TotalCost: 0.15, ActualCost: 0.14, AccountCost: 0.16, CreatedAt: now},
+		{Model: "glm-5.1", Protocol: "chat", StatusCode: 200, DurationMs: 3000, InputTokens: 60, OutputTokens: 90, CacheTokens: 15, CacheCreationTokens: 15, TotalTokens: 150, TotalCost: 0.30, ActualCost: 0.28, AccountCost: 0.32, CreatedAt: now},
+		{Model: "glm-5", Protocol: "chat", StatusCode: 500, DurationMs: 2000, InputTokens: 10, OutputTokens: 20, CacheTokens: 5, CacheReadTokens: 5, TotalTokens: 30, TotalCost: 0.03, ActualCost: 0.02, AccountCost: 0.04, CreatedAt: now.Add(-48 * time.Hour)},
+	}
+	if err := store.DB().Create(&rows).Error; err != nil {
+		t.Fatalf("create usage logs: %v", err)
+	}
+
+	r := gin.New()
+	MountWithPicker(r.Group("/admin"), pool.NewPicker())
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/stats", nil)
+	req.Header.Set("Authorization", "Bearer "+signedAdminToken(t))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	assertJSONNumber(t, got, "keys", 2)
+	assertJSONNumber(t, got, "enabled_keys", 1)
+	assertJSONNumber(t, got, "tokens", 2)
+	assertJSONNumber(t, got, "enabled_tokens", 1)
+	assertJSONNumber(t, got, "today_calls", 2)
+	assertJSONNumber(t, got, "total_calls", 3)
+	assertJSONNumber(t, got, "today_input_tokens", 160)
+	assertJSONNumber(t, got, "today_output_tokens", 140)
+	assertJSONNumber(t, got, "today_cache_tokens", 35)
+	assertJSONNumber(t, got, "today_cache_read_tokens", 20)
+	assertJSONNumber(t, got, "today_cache_creation_tokens", 15)
+	assertJSONNumber(t, got, "today_total_tokens", 300)
+	assertJSONNumber(t, got, "total_input_tokens", 170)
+	assertJSONNumber(t, got, "total_output_tokens", 160)
+	assertJSONNumber(t, got, "total_cache_tokens", 40)
+	assertJSONNumber(t, got, "total_cache_read_tokens", 25)
+	assertJSONNumber(t, got, "total_cache_creation_tokens", 15)
+	assertJSONNumber(t, got, "total_tokens", 330)
+	assertJSONNumber(t, got, "tpm", 300)
+	assertJSONFloat(t, got, "today_total_cost", 0.45)
+	assertJSONFloat(t, got, "today_actual_cost", 0.42)
+	assertJSONFloat(t, got, "today_account_cost", 0.48)
+	assertJSONFloat(t, got, "total_cost", 0.48)
+	assertJSONFloat(t, got, "total_actual_cost", 0.44)
+	assertJSONFloat(t, got, "total_account_cost", 0.52)
+}
+
 func TestModelMappingCRUDUpdatesStoreAndRuntimeConfig(t *testing.T) {
 	if err := store.InitForTest("file:admin_model_mapping?mode=memory&cache=shared"); err != nil {
 		t.Fatalf("init test db: %v", err)
@@ -195,6 +275,28 @@ func TestDeleteModelMappingSupportsSlashInSource(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Fatalf("mapping row should be deleted: %#v", rows)
+	}
+}
+
+func assertJSONNumber(t *testing.T, payload map[string]any, key string, want float64) {
+	t.Helper()
+	got, ok := payload[key].(float64)
+	if !ok {
+		t.Fatalf("%s missing or not numeric: %#v", key, payload[key])
+	}
+	if got != want {
+		t.Fatalf("%s = %v, want %v", key, got, want)
+	}
+}
+
+func assertJSONFloat(t *testing.T, payload map[string]any, key string, want float64) {
+	t.Helper()
+	got, ok := payload[key].(float64)
+	if !ok {
+		t.Fatalf("%s missing or not numeric: %#v", key, payload[key])
+	}
+	if diff := got - want; diff < -0.000001 || diff > 0.000001 {
+		t.Fatalf("%s = %v, want %v", key, got, want)
 	}
 }
 

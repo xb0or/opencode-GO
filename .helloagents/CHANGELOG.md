@@ -1,8 +1,26 @@
 ## 2026-06-16
 
-- 新增 Model Mapping 功能：支持通过 `MODEL_MAPPINGS` JSON、`MODEL_MAPPING_FILE` 文件和后台 UI 管理请求模型改写规则。
-- 新增后台“模型映射”管理页面与 `/admin/model-mappings` 管理接口，规则持久化到 SQLite 并保存后立即同步运行时配置。
-- 代理转发在改写 JSON Body 后会重算并覆盖上游请求的 `Content-Length`；非法 JSON、缺失 `model` 或未命中映射时记录 warning 并原样透传；普通 JSON 与 SSE 响应继续透传。
+- Token 统计继续补齐缓存口径：`UsageLog` 新增缓存总量、缓存读、缓存写字段，兼容 OpenAI cached_tokens 与 Anthropic cache_*_input_tokens。
+- `/admin/stats` 新增今日/累计缓存 Token、缓存读 Token、缓存写 Token 聚合；TPM 与总览卡片可展示缓存细分。
+- 使用记录页新增本页 Token、本页缓存 Token、本页消费摘要，并在明细表展示输入/输出/缓存读写与单次消费。
+
+## 2026-06-16
+
+- 总览仪表盘补齐截图中的 8 类统计卡：访问令牌、API 密钥、今日请求、今日消费、今日 Token、累计 Token、性能指标、平均响应。
+- `/admin/stats` 新增启用密钥/令牌、Token 汇总、消费汇总、TPM 等聚合字段；非流式同协议响应会解析 usage 并写入 `UsageLog`。
+- 新增 `UsageLog` token/cost 字段与后台统计回归测试，验证 `go test ./...` 与前端入口语法检查通过。
+
+## 2026-06-16
+
+- 新增后台“模型映射”管理 UI：支持查看、新增、编辑、删除客户端模型到上游模型的改写规则。
+- 新增 `/admin/model-mappings` 管理接口与 SQLite 持久化表，UI 保存后立即同步运行时 `config` 映射。
+- 管理后台侧边栏与中英文文案新增 Model Mappings 页面入口，并补充 CRUD 回归测试。
+
+## 2026-06-16
+
+- 新增 Model Mapping 功能：支持通过 `MODEL_MAPPINGS` JSON 或 `MODEL_MAPPING_FILE` 文件配置请求模型改写规则。
+- 代理转发在改写 JSON Body 后会重算并覆盖上游请求的 `Content-Length`，同时保留非 hop-by-hop 的原始请求头并注入上游 KEY。
+- 非法 JSON、缺失 `model` 或未命中映射的请求改为记录 warning 并原样透传；标准 JSON 响应与 SSE 流式响应继续透传。
 
 ## 2026-06-16
 
@@ -52,3 +70,8 @@
 - 体验增强：自定义 Modal 替代浏览器原生 confirm，全局 Toast、按钮 loading、空状态占位、复制反馈、数字格式化、耗时自动 ms/s 转换。
 - 修复字段对齐：统一使用小写 JSON tag（`id`/`created_at`/`cooldown_until`/`real_model`/`context_len`），与后端 GORM 序列化完全一致。
 - 新增 `GET /admin/health` 池健康状态展示，models 删除时 `encodeURIComponent(id)` 兼容含点号的 id。
+## 2026-06-16
+
+- 修复代理遇到上游 KEY 相关错误时直接返回的问题：`401/402/403/429/5xx` 会先记录失败 KEY，再自动尝试同组其它可用 KEY。
+- 最近调用记录现在会从上游非 2xx 响应体提取并脱敏错误摘要，写入 `UsageLog.Error`，便于后台定位具体失败原因。
+- 新增 API 与 KEY 池回归测试，覆盖 fallback 成功、最终上游错误展示、候选 KEY 顺序。

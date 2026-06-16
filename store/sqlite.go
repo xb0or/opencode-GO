@@ -63,17 +63,26 @@ type ModelMappingRow struct {
 
 // UsageLog records a single proxied request.
 type UsageLog struct {
-	ID         uint      `gorm:"primaryKey" json:"id"`
-	TokenID    uint      `gorm:"index" json:"token_id"`
-	TokenName  string    `gorm:"size:128;index" json:"token_name"`
-	KeyID      uint      `gorm:"index" json:"key_id"`
-	Model      string    `gorm:"size:128;index" json:"model"`
-	Protocol   string    `gorm:"size:32" json:"protocol"`
-	StatusCode int       `json:"status_code"`
-	DurationMs int64     `json:"duration_ms"`
-	Stream     bool      `json:"stream"`
-	Error      string    `gorm:"type:text" json:"error,omitempty"`
-	CreatedAt  time.Time `gorm:"index" json:"created_at"`
+	ID                  uint      `gorm:"primaryKey" json:"id"`
+	TokenID             uint      `gorm:"index" json:"token_id"`
+	TokenName           string    `gorm:"size:128;index" json:"token_name"`
+	KeyID               uint      `gorm:"index" json:"key_id"`
+	Model               string    `gorm:"size:128;index" json:"model"`
+	Protocol            string    `gorm:"size:32" json:"protocol"`
+	StatusCode          int       `json:"status_code"`
+	DurationMs          int64     `json:"duration_ms"`
+	Stream              bool      `json:"stream"`
+	InputTokens         int       `json:"input_tokens"`
+	OutputTokens        int       `json:"output_tokens"`
+	CacheTokens         int       `json:"cache_tokens"`
+	CacheReadTokens     int       `json:"cache_read_tokens"`
+	CacheCreationTokens int       `json:"cache_creation_tokens"`
+	TotalTokens         int       `json:"total_tokens"`
+	TotalCost           float64   `json:"total_cost"`
+	ActualCost          float64   `json:"actual_cost"`
+	AccountCost         float64   `json:"account_cost"`
+	Error               string    `gorm:"type:text" json:"error,omitempty"`
+	CreatedAt           time.Time `gorm:"index" json:"created_at"`
 }
 
 var (

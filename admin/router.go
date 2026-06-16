@@ -2,6 +2,7 @@ package admin
 
 import (
 	"crypto/subtle"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/opencode-sw/gateway/config"
 	"github.com/opencode-sw/gateway/pool"
 	"github.com/opencode-sw/gateway/store"
+	"gorm.io/gorm"
 )
 
 // picker is set at startup via MountWithPicker.
@@ -37,6 +39,7 @@ func MountWithPicker(rg *gin.RouterGroup, p *pool.Picker) {
 //	POST /admin/tokens                      create
 //	DELETE /admin/tokens/:id
 //	GET  /admin/stats                                                   usage summary
+//	GET  /admin/usage                                                   paginated usage logs
 //	GET  /admin/models                                                  model route table
 //	POST /admin/models                      add/update route
 //	DELETE /admin/models/:id
@@ -62,6 +65,7 @@ func Mount(rg *gin.RouterGroup) {
 		authed.DELETE("/tokens/:id", deleteToken)
 
 		authed.GET("/stats", stats)
+		authed.GET("/usage", listUsageLogs)
 		authed.GET("/models", listModelsAdmin)
 		authed.POST("/models", upsertModel)
 		authed.DELETE("/models/:id", deleteModel)
@@ -396,8 +400,35 @@ func deleteModelMapping(c *gin.Context) {
 // --- Stats ---
 
 func stats(c *gin.Context) {
+	now := time.Now()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	lastMinute := now.Add(-time.Minute)
+	lastHour := now.Add(-time.Hour)
+	last24h := now.Add(-24 * time.Hour)
+
 	var totalCalls int64
 	store.DB().Model(&store.UsageLog{}).Count(&totalCalls)
+
+	var todayCalls int64
+	store.DB().Model(&store.UsageLog{}).Where("created_at >= ?", todayStart).Count(&todayCalls)
+
+	var lastHourCalls int64
+	store.DB().Model(&store.UsageLog{}).Where("created_at >= ?", lastHour).Count(&lastHourCalls)
+
+	var rpm int64
+	store.DB().Model(&store.UsageLog{}).Where("created_at >= ?", lastMinute).Count(&rpm)
+
+	var tpm int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(total_tokens),0)").
+		Where("created_at >= ?", lastMinute).
+		Scan(&tpm)
+
+	var successCalls int64
+	store.DB().Model(&store.UsageLog{}).Where("status_code < ?", http.StatusBadRequest).Count(&successCalls)
+
+	var errorCalls int64
+	store.DB().Model(&store.UsageLog{}).Where("status_code >= ?", http.StatusBadRequest).Count(&errorCalls)
 
 	type bucket struct {
 		StatusCode int   `json:"status_code"`
@@ -431,25 +462,351 @@ func stats(c *gin.Context) {
 	var avgDuration float64
 	store.DB().Model(&store.UsageLog{}).Select("coalesce(avg(duration_ms),0)").Scan(&avgDuration)
 
+	var todayInputTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(input_tokens),0)").
+		Where("created_at >= ?", todayStart).
+		Scan(&todayInputTokens)
+
+	var todayOutputTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(output_tokens),0)").
+		Where("created_at >= ?", todayStart).
+		Scan(&todayOutputTokens)
+
+	var todayCacheTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(cache_tokens),0)").
+		Where("created_at >= ?", todayStart).
+		Scan(&todayCacheTokens)
+
+	var todayCacheReadTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(cache_read_tokens),0)").
+		Where("created_at >= ?", todayStart).
+		Scan(&todayCacheReadTokens)
+
+	var todayCacheCreationTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(cache_creation_tokens),0)").
+		Where("created_at >= ?", todayStart).
+		Scan(&todayCacheCreationTokens)
+
+	var todayTotalTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(total_tokens),0)").
+		Where("created_at >= ?", todayStart).
+		Scan(&todayTotalTokens)
+
+	var totalInputTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(input_tokens),0)").
+		Scan(&totalInputTokens)
+
+	var totalOutputTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(output_tokens),0)").
+		Scan(&totalOutputTokens)
+
+	var totalCacheTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(cache_tokens),0)").
+		Scan(&totalCacheTokens)
+
+	var totalCacheReadTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(cache_read_tokens),0)").
+		Scan(&totalCacheReadTokens)
+
+	var totalCacheCreationTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(cache_creation_tokens),0)").
+		Scan(&totalCacheCreationTokens)
+
+	var totalTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(total_tokens),0)").
+		Scan(&totalTokens)
+
+	var todayTotalCost float64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(total_cost),0)").
+		Where("created_at >= ?", todayStart).
+		Scan(&todayTotalCost)
+
+	var todayActualCost float64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(actual_cost),0)").
+		Where("created_at >= ?", todayStart).
+		Scan(&todayActualCost)
+
+	var todayAccountCost float64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(account_cost),0)").
+		Where("created_at >= ?", todayStart).
+		Scan(&todayAccountCost)
+
+	var totalCost float64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(total_cost),0)").
+		Scan(&totalCost)
+
+	var totalActualCost float64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(actual_cost),0)").
+		Scan(&totalActualCost)
+
+	var totalAccountCost float64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(account_cost),0)").
+		Scan(&totalAccountCost)
+
+	var durations []int64
+	store.DB().Model(&store.UsageLog{}).Where("duration_ms > 0").Order("duration_ms asc").Limit(10000).Pluck("duration_ms", &durations)
+	p50Duration := percentileDuration(durations, 0.50)
+	p95Duration := percentileDuration(durations, 0.95)
+	p99Duration := percentileDuration(durations, 0.99)
+
+	type timelineBucket struct {
+		Bucket      string  `json:"bucket"`
+		Total       int64   `json:"total"`
+		Success     int64   `json:"success"`
+		Errors      int64   `json:"errors"`
+		AvgDuration float64 `json:"avg_duration_ms"`
+	}
+	var timeline []timelineBucket
+	store.DB().Model(&store.UsageLog{}).
+		Select("strftime('%Y-%m-%d %H:00', created_at) as bucket, count(*) as total, sum(case when status_code < 400 then 1 else 0 end) as success, sum(case when status_code >= 400 then 1 else 0 end) as errors, coalesce(avg(duration_ms),0) as avg_duration").
+		Where("created_at >= ?", last24h).
+		Group("bucket").
+		Order("bucket asc").
+		Scan(&timeline)
+
+	type latencyBucket struct {
+		Range string `json:"range"`
+		Count int64  `json:"count"`
+	}
+	latencyBuckets := []latencyBucket{
+		{Range: "<250ms", Count: countLatencyRange(0, 249)},
+		{Range: "250-500ms", Count: countLatencyRange(250, 500)},
+		{Range: "500ms-1s", Count: countLatencyRange(501, 1000)},
+		{Range: "1-3s", Count: countLatencyRange(1001, 3000)},
+		{Range: ">3s", Count: countLatencyRange(3001, 0)},
+	}
+
 	var keys int64
 	store.DB().Model(&store.Key{}).Count(&keys)
+	var enabledKeys int64
+	store.DB().Model(&store.Key{}).Where("enabled = ?", true).Count(&enabledKeys)
 	var tokens int64
 	store.DB().Model(&store.Token{}).Count(&tokens)
+	var enabledTokens int64
+	store.DB().Model(&store.Token{}).Where("enabled = ?", true).Count(&enabledTokens)
 
 	// Recent logs
 	var recent []store.UsageLog
 	store.DB().Order("id desc").Limit(50).Find(&recent)
 
 	c.JSON(http.StatusOK, gin.H{
-		"total_calls":     totalCalls,
-		"by_status":       byStatus,
-		"by_model":        byModel,
-		"by_protocol":     byProtocol,
-		"avg_duration_ms": avgDuration,
-		"keys":            keys,
-		"tokens":          tokens,
-		"recent":          recent,
+		"total_calls":                 totalCalls,
+		"today_calls":                 todayCalls,
+		"last_hour_calls":             lastHourCalls,
+		"success_calls":               successCalls,
+		"error_calls":                 errorCalls,
+		"success_rate":                ratio(successCalls, totalCalls),
+		"error_rate":                  ratio(errorCalls, totalCalls),
+		"rpm":                         rpm,
+		"tpm":                         tpm,
+		"qps":                         float64(rpm) / 60,
+		"by_status":                   byStatus,
+		"by_model":                    byModel,
+		"by_protocol":                 byProtocol,
+		"avg_duration_ms":             avgDuration,
+		"p50_duration_ms":             p50Duration,
+		"p95_duration_ms":             p95Duration,
+		"p99_duration_ms":             p99Duration,
+		"timeline":                    timeline,
+		"latency_buckets":             latencyBuckets,
+		"keys":                        keys,
+		"enabled_keys":                enabledKeys,
+		"tokens":                      tokens,
+		"enabled_tokens":              enabledTokens,
+		"today_input_tokens":          todayInputTokens,
+		"today_output_tokens":         todayOutputTokens,
+		"today_cache_tokens":          todayCacheTokens,
+		"today_cache_read_tokens":     todayCacheReadTokens,
+		"today_cache_creation_tokens": todayCacheCreationTokens,
+		"today_total_tokens":          todayTotalTokens,
+		"total_input_tokens":          totalInputTokens,
+		"total_output_tokens":         totalOutputTokens,
+		"total_cache_tokens":          totalCacheTokens,
+		"total_cache_read_tokens":     totalCacheReadTokens,
+		"total_cache_creation_tokens": totalCacheCreationTokens,
+		"total_tokens":                totalTokens,
+		"today_total_cost":            todayTotalCost,
+		"today_actual_cost":           todayActualCost,
+		"today_account_cost":          todayAccountCost,
+		"total_cost":                  totalCost,
+		"total_actual_cost":           totalActualCost,
+		"total_account_cost":          totalAccountCost,
+		"recent":                      recent,
 	})
+}
+
+func listUsageLogs(c *gin.Context) {
+	page := queryInt(c, "page", 1)
+	if page < 1 {
+		page = 1
+	}
+	pageSize := queryInt(c, "page_size", 25)
+	if pageSize < 1 {
+		pageSize = 25
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	q := usageLogQuery(c)
+
+	var total int64
+	if err := q.Model(&store.UsageLog{}).Count(&total).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	sortBy := c.DefaultQuery("sort_by", "created_at")
+	sortOrder := strings.ToLower(c.DefaultQuery("sort_order", "desc"))
+	if sortOrder != "asc" {
+		sortOrder = "desc"
+	}
+	switch sortBy {
+	case "created_at", "duration_ms", "status_code", "model", "protocol":
+	default:
+		sortBy = "created_at"
+	}
+
+	var items []store.UsageLog
+	err := q.Order(sortBy + " " + sortOrder).
+		Offset((page - 1) * pageSize).
+		Limit(pageSize).
+		Find(&items).Error
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items":     items,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
+}
+
+func usageLogQuery(c *gin.Context) *gorm.DB {
+	q := store.DB().Model(&store.UsageLog{})
+	if model := strings.TrimSpace(c.Query("model")); model != "" {
+		q = q.Where("model = ?", model)
+	}
+	if protocol := strings.TrimSpace(c.Query("protocol")); protocol != "" {
+		q = q.Where("protocol = ?", protocol)
+	}
+	if token := strings.TrimSpace(c.Query("token")); token != "" {
+		q = q.Where("token_name = ?", token)
+	}
+	if status := strings.TrimSpace(c.Query("status")); status != "" {
+		switch status {
+		case "success":
+			q = q.Where("status_code < ?", http.StatusBadRequest)
+		case "error":
+			q = q.Where("status_code >= ?", http.StatusBadRequest)
+		default:
+			if code, err := strconv.Atoi(status); err == nil {
+				q = q.Where("status_code = ?", code)
+			}
+		}
+	}
+	if stream := strings.TrimSpace(c.Query("stream")); stream != "" {
+		if stream == "true" || stream == "1" {
+			q = q.Where("stream = ?", true)
+		} else if stream == "false" || stream == "0" {
+			q = q.Where("stream = ?", false)
+		}
+	}
+	if qText := strings.TrimSpace(c.Query("q")); qText != "" {
+		like := "%" + qText + "%"
+		q = q.Where("model LIKE ? OR protocol LIKE ? OR token_name LIKE ? OR error LIKE ?", like, like, like, like)
+	}
+	if start := parseQueryTime(c.Query("start")); start != nil {
+		q = q.Where("created_at >= ?", *start)
+	}
+	if end := parseQueryTime(c.Query("end")); end != nil {
+		q = q.Where("created_at <= ?", *end)
+	}
+	return q
+}
+
+func queryInt(c *gin.Context, key string, fallback int) int {
+	raw := strings.TrimSpace(c.Query(key))
+	if raw == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func parseQueryTime(raw string) *time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	layouts := []string{time.RFC3339, "2006-01-02", "2006-01-02 15:04:05"}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return &t
+		}
+	}
+	return nil
+}
+
+func ratio(part, total int64) float64 {
+	if total <= 0 {
+		return 0
+	}
+	return float64(part) / float64(total)
+}
+
+func percentileDuration(values []int64, p float64) int64 {
+	if len(values) == 0 {
+		return 0
+	}
+	if p <= 0 {
+		return values[0]
+	}
+	if p >= 1 {
+		return values[len(values)-1]
+	}
+	idx := int(math.Ceil(float64(len(values))*p)) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(values) {
+		idx = len(values) - 1
+	}
+	return values[idx]
+}
+
+func countLatencyRange(minMs, maxMs int64) int64 {
+	q := store.DB().Model(&store.UsageLog{}).Where("duration_ms >= ?", minMs)
+	if maxMs > 0 {
+		q = q.Where("duration_ms <= ?", maxMs)
+	}
+	var count int64
+	q.Count(&count)
+	return count
 }
 
 // --- helpers ---
