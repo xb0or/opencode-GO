@@ -20,6 +20,7 @@ func NewRouter(p *pool.Picker) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
+	r.Use(corsMiddleware())
 
 	r.GET("/health", health)
 	r.GET("/", health)
@@ -29,16 +30,13 @@ func NewRouter(p *pool.Picker) *gin.Engine {
 
 	rateLimit := RateLimitMiddleware()
 
-	auth := v1.Group("", Auth(), rateLimit, RequireGroup())
+	auth := v1.Group("", Auth(), rateLimit)
 	registerProxyRoutes(auth, p)
 
 	// OpenCode clients sometimes hit the bare endpoints without /v1; mirror them.
-	auth2 := r.Group("", Auth(), rateLimit, RequireGroup())
+	auth2 := r.Group("", Auth(), rateLimit)
 	registerProxyRoutes(auth2, p)
 	r.GET("/models", listModels)
-
-	// Apply CORS globally after all routes are registered.
-	r.Use(corsMiddleware())
 
 	return r
 }

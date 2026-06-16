@@ -64,7 +64,6 @@
               {{locale==='zh'?'CN':'EN'}}
             </button>
             <div v-if="dropLang" class="dropdown-menu" style="min-width: 110px">
-              <div class="drop-backdrop" @click="dropLang=false"></div>
               <button
                 class="drop-item"
                 :class="{active:locale==='zh'}"
@@ -93,7 +92,6 @@
               class="dropdown-menu"
               style="min-width: 140px"
             >
-              <div class="drop-backdrop" @click="dropTheme=false"></div>
               <button
                 class="drop-item"
                 :class="{active:theme==='dark'}"
@@ -205,9 +203,9 @@
                       <th>{{t('table.token')}}</th>
                       <th>{{t('table.error')}}</th>
                     </tr>
-                    <tr v-for="l in (stats.recent||[])" :key="l.ID">
+                    <tr v-for="l in (stats.recent||[])" :key="l.id">
                       <td style="white-space: nowrap; font-size: 12px">
-                        {{fmtTime(l.CreatedAt)}}
+                        {{fmtTime(l.created_at)}}
                       </td>
                       <td><span class="badge badge-blue">{{l.model}}</span></td>
                       <td>{{l.protocol}}</td>
@@ -260,13 +258,13 @@
                       <th>{{t('table.usage')}}</th>
                       <th>{{t('table.actions')}}</th>
                     </tr>
-                    <tr v-for="k in keys" :key="k.ID">
+                    <tr v-for="k in keys" :key="k.id">
                       <td>
                         <label class="toggle"
                           ><input
                             type="checkbox"
-                            :checked="k.active"
-                            @change="toggleKey(k.ID)" /><span
+                            :checked="k.enabled"
+                            @change="toggleKey(k.id)" /><span
                             class="slider"
                           ></span
                         ></label>
@@ -280,10 +278,10 @@
                           text-overflow: ellipsis;
                         "
                       >
-                        {{k.key_value}}
+                        {{k.value}}
                       </td>
                       <td>
-                        <span class="badge badge-yellow">{{k.group_name}}</span>
+                        <span class="badge badge-yellow">{{k.group}}</span>
                       </td>
                       <td>{{k.label||'—'}}</td>
                       <td>{{k.weight}}</td>
@@ -304,13 +302,13 @@
                       <td class="btn-group">
                         <button
                           class="btn btn-ghost btn-sm"
-                          @click="resetCooldown(k.ID)"
+                          @click="resetCooldown(k.id)"
                         >
                           {{t('keys.reset')}}
                         </button>
                         <button
                           class="btn btn-danger btn-sm"
-                          @click="deleteKey(k.ID)"
+                          @click="deleteKey(k.id)"
                         >
                           {{t('keys.delete')}}
                         </button>
@@ -342,8 +340,8 @@
                       <th>{{t('table.expires')}}</th>
                       <th>{{t('table.actions')}}</th>
                     </tr>
-                    <tr v-for="tk in tokens" :key="tk.ID">
-                      <td>{{tk.ID}}</td>
+                    <tr v-for="tk in tokens" :key="tk.id">
+                      <td>{{tk.id}}</td>
                       <td style="font-family: monospace; font-size: 12px">
                         {{tk.token}}
                       </td>
@@ -356,7 +354,7 @@
                       <td>
                         <button
                           class="btn btn-danger btn-sm"
-                          @click="deleteToken(tk.ID)"
+                          @click="deleteToken(tk.id)"
                         >
                           {{t('tokens.delete')}}
                         </button>
@@ -427,7 +425,6 @@
             <div class="form-group">
               <label>{{t('models.upstream')}}</label>
               <select v-model="newModel.upstream">
-                <option value="zen">zen</option>
                 <option value="go">go</option>
               </select>
             </div>

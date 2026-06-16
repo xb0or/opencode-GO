@@ -18,9 +18,8 @@ type Config struct {
 	DBPath          string
 	UpstreamTimeout int // seconds
 
-	// Zen / Go upstream base URLs (without trailing slash).
-	ZenBaseURL string
-	GoBaseURL  string
+	// Go upstream base URL (without trailing slash).
+	GoBaseURL string
 }
 
 var (
@@ -40,7 +39,6 @@ func Load() *Config {
 			JWTSecret:       envStr("JWT_SECRET", "opencode-sw-default-secret-change-me"),
 			DBPath:          envStr("DB_PATH", "./data/opencode-sw.db"),
 			UpstreamTimeout: envInt("UPSTREAM_TIMEOUT", 120),
-			ZenBaseURL:      strings.TrimRight(envStr("ZEN_BASE_URL", "https://opencode.ai/zen"), "/"),
 			GoBaseURL:       strings.TrimRight(envStr("GO_BASE_URL", "https://opencode.ai/zen/go"), "/"),
 		}
 	})
@@ -70,6 +68,7 @@ func envInt(key string, def int) int {
 	}
 	return def
 }
+
 // DSN returns the SQLite connection string.
 func (c *Config) DSN() string {
 	return fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=5000", c.DBPath)

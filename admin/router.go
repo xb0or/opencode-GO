@@ -117,7 +117,7 @@ func adminAuth() gin.HandlerFunc {
 // --- Pool Health ---
 
 func poolHealth(c *gin.Context) {
-	groups := []string{"zen", "go"}
+	groups := []string{"go"}
 	health := map[string]any{}
 	for _, g := range groups {
 		health[g] = picker.Stats(g)
@@ -132,6 +132,9 @@ func poolHealth(c *gin.Context) {
 
 func listKeys(c *gin.Context) {
 	group := c.Query("group")
+	if group == "" {
+		group = "go"
+	}
 	keys, err := pool.AllByGroup(group)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -159,9 +162,17 @@ func createKey(c *gin.Context) {
 	if w <= 0 {
 		w = 1
 	}
+	group := strings.TrimSpace(body.Group)
+	if group == "" {
+		group = "go"
+	}
+	if group != "go" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only go group is supported"})
+		return
+	}
 	k := &store.Key{
 		Value:    strings.TrimSpace(body.Value),
-		Group:    strings.TrimSpace(body.Group),
+		Group:    group,
 		Label:    body.Label,
 		Enabled:  true,
 		Weight:   w,
@@ -225,7 +236,12 @@ func createTokenAdmin(c *gin.Context) {
 		ExpiresAt     *time.Time `json:"expires_at"`
 	}
 	_ = c.ShouldBindJSON(&body)
-	t, err := pool.CreateToken(body.Name, body.AllowedGroups, body.RateLimit, body.ExpiresAt)
+	allowedGroups := strings.TrimSpace(body.AllowedGroups)
+	if allowedGroups != "" && allowedGroups != "go" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only go group is supported"})
+		return
+	}
+	t, err := pool.CreateToken(body.Name, allowedGroups, body.RateLimit, body.ExpiresAt)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -253,6 +269,16 @@ func upsertModel(c *gin.Context) {
 	if body.ID == "" || body.Protocol == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id and protocol are required"})
 		return
+	}
+	if body.Upstream == "" {
+		body.Upstream = config.UpstreamGo
+	}
+	if body.Upstream != config.UpstreamGo {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only go upstream is supported"})
+		return
+	}
+	if body.Group == "" {
+		body.Group = "go"
 	}
 	config.RegisterModel(body)
 	// Persist to DB.
@@ -319,14 +345,14 @@ func stats(c *gin.Context) {
 	store.DB().Order("id desc").Limit(50).Find(&recent)
 
 	c.JSON(http.StatusOK, gin.H{
-		"total_calls":    totalCalls,
-		"by_status":      byStatus,
-		"by_model":       byModel,
-		"by_protocol":    byProtocol,
+		"total_calls":     totalCalls,
+		"by_status":       byStatus,
+		"by_model":        byModel,
+		"by_protocol":     byProtocol,
 		"avg_duration_ms": avgDuration,
-		"keys":           keys,
-		"tokens":         tokens,
-		"recent":         recent,
+		"keys":            keys,
+		"tokens":          tokens,
+		"recent":          recent,
 	})
 }
 

@@ -10,16 +10,6 @@ const { ref, reactive, computed, watch } = Vue;
  * 根据上游可选的真实模型列表
  */
 const MODEL_OPTIONS = {
-  zen: [
-    "gpt-4o",
-    "gpt-4o-mini",
-    "claude-sonnet-4-20250514",
-    "claude-3-5-haiku-latest",
-    "gemini-2.5-pro-exp-03-25",
-    "gemini-2.0-flash-exp",
-    "deepseek-chat",
-    "deepseek-reasoner",
-  ],
   go: [
     "gpt-4o",
     "gpt-4o-mini",
@@ -32,7 +22,7 @@ const MODEL_OPTIONS = {
   ],
 };
 
-const GROUP_OPTIONS = ["zen", "go"];
+const GROUP_OPTIONS = ["go"];
 
 export function useModels(api, showToast, t, showConfirm) {
   const models = ref([]);
@@ -41,10 +31,10 @@ export function useModels(api, showToast, t, showConfirm) {
   const newModel = reactive({
     id: "",
     name: "",
-    upstream: "zen",
+    upstream: "go",
     protocol: "chat",
     real_model: "",
-    group: "zen",
+    group: "go",
     context_len: 0,
   });
 
@@ -86,10 +76,10 @@ export function useModels(api, showToast, t, showConfirm) {
   function openModal() {
     newModel.id = "";
     newModel.name = "";
-    newModel.upstream = "zen";
+    newModel.upstream = "go";
     newModel.protocol = "chat";
     newModel.real_model = "";
-    newModel.group = "zen";
+    newModel.group = "go";
     newModel.context_len = 0;
     showModal.value = true;
   }

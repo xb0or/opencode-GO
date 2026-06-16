@@ -12,17 +12,17 @@ export function useKeys(api, showToast, t, showConfirm) {
 
   const newKey = reactive({
     value: "",
-    group: "zen",
+    group: "go",
     label: "",
     weight: 1,
     proxy_url: "",
   });
 
-  const keyGroupOptions = ["zen", "go"];
+  const keyGroupOptions = ["go"];
 
   function openKeyModal() {
     newKey.value = "";
-    newKey.group = "zen";
+    newKey.group = "go";
     newKey.label = "";
     newKey.weight = 1;
     newKey.proxy_url = "";

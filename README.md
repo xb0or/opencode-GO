@@ -1,8 +1,8 @@
 # opencode-sw
 
-A multi-key management gateway for **OpenCode Zen / Go** services, written in Go + Gin and ready to deploy on **Zeabur**.
+A multi-key management gateway for **OpenCode Go** services, written in Go + Gin and ready to deploy on **Zeabur**.
 
-It aggregates many OpenCode API keys (Zen pay-as-you-go _and_ Go subscription) behind a single set of universal endpoints, so any OpenAI- / Anthropic-compatible client (including opencode itself) can consume them with one gateway token.
+It aggregates many OpenCode Go API keys behind a single set of universal endpoints, so any OpenAI- / Anthropic-compatible client (including opencode itself) can consume them with one gateway token.
 
 ## Features
 
@@ -49,7 +49,7 @@ Client (any protocol)
 └─────────────────────────────┘
   │
   ▼
-OpenCode Zen / Go upstream
+OpenCode Go upstream
 ```
 
 ## Quick start (local)
@@ -71,10 +71,10 @@ Or use the REST API:
 curl -X POST localhost:3000/admin/login -H 'Content-Type: application/json' \
   -d '{"password":"admin"}'   # -> {"token":"eyJ..."}
 
-# add a Zen key
+# add a Go key
 curl -X POST localhost:3000/admin/keys \
   -H 'Authorization: Bearer <admin-jwt>' -H 'Content-Type: application/json' \
-  -d '{"value":"opencode_xxxx","group":"zen","label":"personal"}'
+  -d '{"value":"opencode_xxxx","group":"go","label":"personal"}'
 
 # list models
 curl localhost:3000/v1/models
@@ -161,7 +161,7 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 3. Set environment variables:
    - `ADMIN_PASSWORD` — admin panel password
    - `JWT_SECRET` — random string for JWT signing
-   - `ZEN_BASE_URL` / `GO_BASE_URL` — override upstreams if needed
+   - `GO_BASE_URL` — override the Go upstream if needed
 4. Deploy. Zeabur assigns a domain; health check hits `/health`.
 
 ## Environment variables
@@ -172,7 +172,6 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 | `ADMIN_PASSWORD`   | `admin`                      | Admin login password                                     |
 | `JWT_SECRET`       | (built-in)                   | Secret for admin JWT                                     |
 | `DB_PATH`          | `./data/opencode-sw.db`      | SQLite file path                                         |
-| `ZEN_BASE_URL`     | `https://opencode.ai/zen`    | Zen upstream base                                        |
 | `GO_BASE_URL`      | `https://opencode.ai/zen/go` | Go upstream base                                         |
 | `UPSTREAM_TIMEOUT` | `120`                        | Upstream call timeout (seconds)                          |
 

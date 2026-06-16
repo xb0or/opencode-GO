@@ -12,34 +12,34 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-// Key is an upstream OpenCode API key belonging to a group (zen/go).
+// Key is an upstream OpenCode API key belonging to a pool group.
 type Key struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	Value     string    `gorm:"uniqueIndex;size:255;not null" json:"value"`
-	Group     string    `gorm:"index;size:32;not null" json:"group"` // zen | go | custom
-	Label     string    `gorm:"size:128" json:"label"`
-	Enabled   bool      `gorm:"default:true" json:"enabled"`
-	Weight    int       `gorm:"default:1" json:"weight"`
-	ProxyURL  string    `gorm:"size:512" json:"proxy_url"`
-	FailCount int       `json:"fail_count"`
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	Value         string     `gorm:"uniqueIndex;size:255;not null" json:"value"`
+	Group         string     `gorm:"index;size:32;not null" json:"group"` // go | custom
+	Label         string     `gorm:"size:128" json:"label"`
+	Enabled       bool       `gorm:"default:true" json:"enabled"`
+	Weight        int        `gorm:"default:1" json:"weight"`
+	ProxyURL      string     `gorm:"size:512" json:"proxy_url"`
+	FailCount     int        `json:"fail_count"`
 	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
-	LastUsed  *time.Time `json:"last_used,omitempty"`
-	UsageCount int64     `gorm:"default:0" json:"usage_count"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	LastUsed      *time.Time `json:"last_used,omitempty"`
+	UsageCount    int64      `gorm:"default:0" json:"usage_count"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // Token is a gateway-facing credential a client uses to access the gateway.
 type Token struct {
-	ID          uint       `gorm:"primaryKey" json:"id"`
-	Token       string     `gorm:"uniqueIndex;size:128;not null" json:"token"`
-	Name        string     `gorm:"size:128" json:"name"`
-	Enabled     bool       `gorm:"default:true" json:"enabled"`
-	AllowedGroups string  `gorm:"size:255" json:"allowed_groups"` // comma-separated; empty = all
-	RateLimit   int        `gorm:"default:0" json:"rate_limit"`   // req/min, 0 = unlimited
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	Token         string     `gorm:"uniqueIndex;size:128;not null" json:"token"`
+	Name          string     `gorm:"size:128" json:"name"`
+	Enabled       bool       `gorm:"default:true" json:"enabled"`
+	AllowedGroups string     `gorm:"size:255" json:"allowed_groups"` // comma-separated; empty = all
+	RateLimit     int        `gorm:"default:0" json:"rate_limit"`    // req/min, 0 = unlimited
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // ModelRouteRow persists a model route in the database.

@@ -6,7 +6,7 @@
 import { validateRequired } from "../api.js";
 const { ref, reactive } = Vue;
 
-const GROUP_OPTIONS = ["zen", "go"];
+const GROUP_OPTIONS = ["go"];
 
 export function useTokens(api, showToast, t, showConfirm) {
   const tokens = ref([]);

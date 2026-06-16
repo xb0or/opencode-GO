@@ -181,13 +181,6 @@ a {
   background: var(--border);
   margin: 4px 0;
 }
-.dropdown-backdrop,
-.drop-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 999;
-}
-
 /* Confirm Modal */
 .confirm-overlay {
   position: fixed;

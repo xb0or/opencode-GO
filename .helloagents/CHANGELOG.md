@@ -1,4 +1,12 @@
-﻿# CHANGELOG
+﻿## 2026-06-16
+
+- 修复管理后台语言/主题下拉菜单被遮罩拦截点击的问题。
+- 修复管理后台 Key/Token/Recent Log 使用错误 JSON 字段名导致删除、开关、重置冷却和展示失效的问题。
+- 修复 API 分组鉴权执行顺序：在模型路由解析后按实际 group 校验 token 权限。
+- 修复 CORS middleware 注册顺序，确保已注册 API 路由也返回 CORS 响应头。
+- 移除 Zen 产品/分组相关默认配置、模型、前端选项、部署变量和文档说明，仅保留 Go 上游默认路径；管理 API 禁止新建非 go 分组/上游，启动时非破坏性跳过旧数据库里的非 go 模型路由。
+- 新增分组鉴权和 CORS 回归测试，验证 `go test ./...` 通过。
+# CHANGELOG
 
 ## 2026-06-16
 
@@ -21,3 +29,5 @@
 - 体验增强：自定义 Modal 替代浏览器原生 confirm，全局 Toast、按钮 loading、空状态占位、复制反馈、数字格式化、耗时自动 ms/s 转换。
 - 修复字段对齐：统一使用小写 JSON tag（`id`/`created_at`/`cooldown_until`/`real_model`/`context_len`），与后端 GORM 序列化完全一致。
 - 新增 `GET /admin/health` 池健康状态展示，models 删除时 `encodeURIComponent(id)` 兼容含点号的 id。
+
+

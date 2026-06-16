@@ -2,8 +2,8 @@
 
 ## 一、项目定位
 
-构建一个 **Go + Gin** 实现的 OpenCode Zen/Go 多 KEY 聚合网关，部署在 **Zeabur**。核心价值：
-- 把 **Zen（API 按量付费）** 和 **Go（订阅套餐）** 两类上游、多账号多 KEY 聚合成**统一的通用端点**
+构建一个 **Go + Gin** 实现的 OpenCode Go 多 KEY 聚合网关，部署在 **Zeabur**。核心价值：
+- 把 **Go（订阅套餐）** 上游、多账号多 KEY 聚合成**统一的通用端点**
 - 客户端用任意一种协议（Claude `/v1/messages`、OpenAI `/v1/chat/completions`、OpenAI Responses `/v1/responses`）调用，网关自动路由到正确上游并完成**全协议互转（含流式）**
 - 提供 **Web 管理面板**（增删 KEY、分组、统计、健康检查）和**多用户 Token 鉴权**
 
@@ -11,11 +11,11 @@
 
 ## 二、上游事实依据（已核实）
 
-| 项 | Zen | Go |
-|---|---|---|
-| 性质 | API 网关，按量付费 | 低成本订阅套餐 |
-| 鉴权 | `OPENCODE_API_KEY`（`Authorization: Bearer`，部分模型走 `x-api-key`） | 同一个 `OPENCODE_API_KEY` |
-| 模型协议 | 混合：Responses(GPT系)/Messages(Claude,Qwen)/ChatCompletions(GLM,DeepSeek,Kimi,MiniMax等)/Google(Gemini) | 主要 ChatCompletions + Messages |
+| 项 | Go |
+|---|---|
+| 性质 | 低成本订阅套餐 |
+| 鉴权 | `OPENCODE_API_KEY`（`Authorization: Bearer`，部分模型走 `x-api-key`） |
+| 模型协议 | 主要 ChatCompletions + Messages |
 | 模型来源 | 约 40 个，见 [models.dev/providers/opencode](https://models.dev/providers/opencode) | 开源编程模型子集 |
 
 **参考实现**：
@@ -36,11 +36,11 @@ opencode-sw/
 ├── PLAN.md                      # 本文件
 ├── config/
 │   ├── config.go                # 配置加载（env + 文件），热重载
-│   └── models.go                # 模型注册表：model_id -> {upstream(zen/go), protocol, real_model}
+│   └── models.go                # 模型注册表：model_id -> {upstream(go), protocol, real_model}
 ├── store/
 │   └── sqlite.go                # 内嵌 SQLite（key、token、用量、日志），GORM
 ├── pool/
-│   ├── key.go                   # KEY 池：按分组(Zen/Go)+模型选择，轮询/加权/最少使用
+│   ├── key.go                   # KEY 池：按分组(Go)+模型选择，轮询/加权/最少使用
 │   └── token.go                 # 网关多用户 Token 管理 + 限流
 ├── upstream/
 │   └── client.go                # 上游 HTTP 客户端，透明转发 header
@@ -80,9 +80,9 @@ opencode-sw/
 ### 2. 模型路由表（`config/models.go`）
 
 ```
-"claude-sonnet-4.5"  -> {upstream: zen, protocol: messages,  real: "anthropic/claude-sonnet-4.5"}
-"gpt-5"              -> {upstream: zen, protocol: responses, real: "openai/gpt-5"}
-"glm-4.6"            -> {upstream: zen, protocol: chat,      real: "zai/glm-4.6"}
+"claude-sonnet-4.5"  -> {upstream: go, protocol: messages,  real: "anthropic/claude-sonnet-4.5"}
+"gpt-5"              -> {upstream: go, protocol: responses, real: "openai/gpt-5"}
+"glm-4.6"            -> {upstream: go, protocol: chat,      real: "zai/glm-4.6"}
 "go-glm-4.6"         -> {upstream: go,  protocol: chat,      real: "zai/glm-4.6"}
 ```
 
@@ -91,7 +91,7 @@ opencode-sw/
 
 ### 3. KEY 池（`pool/key.go`）
 
-- 按 `分组(Zen/Go) × 模型` 维度组织；同一 KEY 可归属多组
+- 按 `分组(Go) × 模型` 维度组织；同一 KEY 可归属多组
 - 调度策略：轮询 / 加权 / 最少使用 / 故障优先回避
 - 健康检查：失败计数达阈值→冷却（退避）→自动探活恢复；并发安全（`sync.Mutex`）
 

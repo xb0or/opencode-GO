@@ -82,7 +82,19 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		return
 	}
 
-	// Stash group so RequireGroup middleware (if mounted) can authorize it.
+	if tokAny, exists := c.Get("token"); exists {
+		if tok, ok := tokAny.(*store.Token); ok && !pool.GroupAllowed(tok, route.Group) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": gin.H{
+					"type":    "permission_denied",
+					"message": "this token is not allowed to use group: " + route.Group,
+				},
+			})
+			return
+		}
+	}
+
+	// Stash group for logging/debugging after the model route is known.
 	c.Set("group", route.Group)
 
 	// Cross-protocol request conversion.

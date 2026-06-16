@@ -53,7 +53,6 @@ func main() {
 
 	addr := ":" + cfg.Port
 	log.Printf("opencode-sw listening on %s", addr)
-	log.Printf("  zen base url : %s", cfg.ZenBaseURL)
 	log.Printf("  go  base url : %s", cfg.GoBaseURL)
 	log.Printf("  models       : %d registered", len(config.AllModels()))
 	if err := root.Run(addr); err != nil {
@@ -86,11 +85,27 @@ func loadModelRoutes() {
 	// Load from DB into config.
 	var routes []config.ModelRoute
 	for _, r := range rows {
+		if r.Upstream != string(config.UpstreamGo) || r.Group != "go" {
+			continue
+		}
 		routes = append(routes, config.ModelRoute{
 			ID: r.ID, Name: r.Name, Upstream: config.Upstream(r.Upstream),
 			Protocol: config.Protocol(r.Protocol), RealModel: r.RealModel,
 			Group: r.Group, ContextLen: r.ContextLen,
 		})
+	}
+	if len(routes) == 0 {
+		defaults := config.DefaultModels()
+		for _, m := range defaults {
+			store.SaveModelRoute(&store.ModelRouteRow{
+				ID: m.ID, Name: m.Name, Upstream: string(m.Upstream),
+				Protocol: string(m.Protocol), RealModel: m.RealModel,
+				Group: m.Group, ContextLen: m.ContextLen,
+			})
+		}
+		config.RegisterModels(defaults)
+		log.Printf("seeded %d default Go model routes into DB", len(defaults))
+		return
 	}
 	config.RegisterModels(routes)
 	log.Printf("loaded %d model routes from DB", len(rows))

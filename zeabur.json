@@ -23,7 +23,6 @@
     { "key": "DB_PATH", "value": "/data/opencode-sw.db" },
     { "key": "ADMIN_PASSWORD", "description": "Admin panel password (default: admin)" },
     { "key": "JWT_SECRET", "description": "Secret for admin JWT signing" },
-    { "key": "ZEN_BASE_URL", "value": "https://opencode.ai/zen" },
     { "key": "GO_BASE_URL", "value": "https://opencode.ai/zen/go" },
     { "key": "UPSTREAM_TIMEOUT", "value": "120" }
   ]

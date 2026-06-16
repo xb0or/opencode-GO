@@ -48,7 +48,7 @@ func NewPicker() *Picker {
 // updated. Returns ErrNoAvailableKey if none usable.
 func (p *Picker) Pick(group string) (*store.Key, error) {
 	if group == "" {
-		group = "zen"
+		group = "go"
 	}
 
 	var keys []store.Key
@@ -129,7 +129,7 @@ func (p *Picker) Pick(group string) (*store.Key, error) {
 // Useful when you want to try multiple keys on failure.
 func (p *Picker) PickAll(group string) ([]store.Key, error) {
 	if group == "" {
-		group = "zen"
+		group = "go"
 	}
 	var keys []store.Key
 	now := time.Now()
