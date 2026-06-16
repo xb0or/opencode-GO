@@ -9,16 +9,16 @@ import (
 
 // MsgRequest is the wire format for POST /v1/messages.
 type MsgRequest struct {
-	Model       string           `json:"model"`
-	MaxTokens   int              `json:"max_tokens"`
-	System      any              `json:"system,omitempty"` // string | []MsgSystemBlock
-	Messages    []MsgMessage     `json:"messages"`
-	Temperature *float64         `json:"temperature,omitempty"`
-	Stream      bool             `json:"stream,omitempty"`
-	Tools       []MsgTool        `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage  `json:"tool_choice,omitempty"`
-	TopP        *float64         `json:"top_p,omitempty"`
-	StopSequences []string       `json:"stop_sequences,omitempty"`
+	Model         string          `json:"model"`
+	MaxTokens     int             `json:"max_tokens"`
+	System        any             `json:"system,omitempty"` // string | []MsgSystemBlock
+	Messages      []MsgMessage    `json:"messages"`
+	Temperature   *float64        `json:"temperature,omitempty"`
+	Stream        bool            `json:"stream,omitempty"`
+	Tools         []MsgTool       `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage `json:"tool_choice,omitempty"`
+	TopP          *float64        `json:"top_p,omitempty"`
+	StopSequences []string        `json:"stop_sequences,omitempty"`
 }
 
 type MsgSystemBlock struct {
@@ -27,8 +27,8 @@ type MsgSystemBlock struct {
 }
 
 type MsgMessage struct {
-	Role    string        `json:"role"` // user | assistant
-	Content []MsgContent  `json:"content"`
+	Role    string       `json:"role"` // user | assistant
+	Content []MsgContent `json:"content"`
 }
 
 type MsgContent struct {
@@ -76,20 +76,20 @@ type MsgUsage struct {
 
 // MsgStreamEvent is one SSE event for streaming Anthropic Messages.
 type MsgStreamEvent struct {
-	Type         string        `json:"type"`
-	Index        int           `json:"index,omitempty"`
-	Delta        *MsgDelta     `json:"delta,omitempty"`
-	ContentBlock *MsgContent   `json:"content_block,omitempty"`
-	Message      *MsgResponse  `json:"message,omitempty"`
-	Usage        *MsgUsage     `json:"usage,omitempty"`
+	Type         string       `json:"type"`
+	Index        int          `json:"index,omitempty"`
+	Delta        *MsgDelta    `json:"delta,omitempty"`
+	ContentBlock *MsgContent  `json:"content_block,omitempty"`
+	Message      *MsgResponse `json:"message,omitempty"`
+	Usage        *MsgUsage    `json:"usage,omitempty"`
 }
 
 type MsgDelta struct {
-	Type         string `json:"type,omitempty"` // text_delta | input_json_delta | thinking_delta
-	Text         string `json:"text,omitempty"`
-	PartialJSON  string `json:"partial_json,omitempty"`
-	Thinking     string `json:"thinking,omitempty"`
-	StopReason   string `json:"stop_reason,omitempty"`
+	Type        string `json:"type,omitempty"` // text_delta | input_json_delta | thinking_delta
+	Text        string `json:"text,omitempty"`
+	PartialJSON string `json:"partial_json,omitempty"`
+	Thinking    string `json:"thinking,omitempty"`
+	StopReason  string `json:"stop_reason,omitempty"`
 }
 
 // ──────────────────────── Decoders ──────────────────────────────────
@@ -257,6 +257,13 @@ func DecodeMessagesStreamEvent(data []byte) (*IRStreamEvent, error) {
 	case "message_start":
 		if ev.Message != nil {
 			ir.Response = &IRResponse{ID: ev.Message.ID, Model: ev.Message.Model}
+			if ev.Message.Usage != nil {
+				ir.Response.Usage = &IRUsage{
+					PromptTokens:     ev.Message.Usage.InputTokens,
+					CompletionTokens: ev.Message.Usage.OutputTokens,
+					TotalTokens:      ev.Message.Usage.InputTokens + ev.Message.Usage.OutputTokens,
+				}
+			}
 		}
 	case "content_block_start":
 		if ev.ContentBlock != nil {
@@ -293,11 +300,20 @@ func DecodeMessagesStreamEvent(data []byte) (*IRStreamEvent, error) {
 		}
 		if ev.Usage != nil {
 			ir.Response = &IRResponse{Usage: &IRUsage{
+				PromptTokens:     ev.Usage.InputTokens,
 				CompletionTokens: ev.Usage.OutputTokens,
+				TotalTokens:      ev.Usage.InputTokens + ev.Usage.OutputTokens,
 			}}
 		}
 	case "message_stop":
 		ir.Choice = &IRChoice{Index: 0, FinishReason: "stop"}
+		if ev.Usage != nil {
+			ir.Response = &IRResponse{Usage: &IRUsage{
+				PromptTokens:     ev.Usage.InputTokens,
+				CompletionTokens: ev.Usage.OutputTokens,
+				TotalTokens:      ev.Usage.InputTokens + ev.Usage.OutputTokens,
+			}}
+		}
 	}
 	return ir, nil
 }

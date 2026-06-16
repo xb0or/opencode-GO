@@ -64,6 +64,9 @@ func DecodeChatSSE(r io.Reader) (*IRResponse, error) {
 	var finishReason string
 
 	err := ChatStreamDecoder(r, func(ev *IRStreamEvent) error {
+		if ev.Response != nil && ev.Response.Usage != nil {
+			resp.Usage = ev.Response.Usage
+		}
 		if ev.Choice == nil {
 			return nil
 		}

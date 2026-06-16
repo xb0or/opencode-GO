@@ -104,10 +104,18 @@ func encodeResponse(proto config.Protocol, ir *IRResponse) ([]byte, error) {
 // converts each event to the target protocol, and writes it to dst.
 // It returns once the source stream ends.
 func StreamConverter(dst io.Writer, src io.Reader, from, to config.Protocol) error {
+	_, err := StreamConverterWithUsage(dst, src, from, to)
+	return err
+}
+
+// StreamConverterWithUsage is StreamConverter plus the buffered IR response
+// used for conversion. Callers can use the returned response to account for
+// token usage from final streaming events.
+func StreamConverterWithUsage(dst io.Writer, src io.Reader, from, to config.Protocol) (*IRResponse, error) {
 	if from == to {
 		// Transparent byte copy for same-protocol passthrough.
 		_, err := io.Copy(dst, src)
-		return err
+		return nil, err
 	}
 
 	// For cross-protocol streaming we use the IR as intermediate:
@@ -126,11 +134,14 @@ func StreamConverter(dst io.Writer, src io.Reader, from, to config.Protocol) err
 	// it back out in the target protocol format.
 	fullResp, err := bufferStream(from, src)
 	if err != nil {
-		return fmt.Errorf("stream convert: buffer upstream: %w", err)
+		return nil, fmt.Errorf("stream convert: buffer upstream: %w", err)
 	}
 
 	// Emit the buffered response as a streaming response in the target protocol.
-	return emitStreamResponse(dst, to, fullResp)
+	if err := emitStreamResponse(dst, to, fullResp); err != nil {
+		return fullResp, err
+	}
+	return fullResp, nil
 }
 
 // bufferStream reads the entire upstream SSE stream into an IRResponse.
@@ -176,7 +187,7 @@ func emitChatStream(dst io.Writer, resp *IRResponse) error {
 
 	// Emit initial chunk with role.
 	first := &IRStreamEvent{
-		Type:  "chat.completion.chunk",
+		Type: "chat.completion.chunk",
 		Choice: &IRChoice{
 			Index: 0,
 			Delta: &IRMessage{Role: "assistant"},
@@ -189,7 +200,7 @@ func emitChatStream(dst io.Writer, resp *IRResponse) error {
 	// Emit text content.
 	if msg.Text != "" {
 		ev := &IRStreamEvent{
-			Type:        "chat.completion.chunk",
+			Type:         "chat.completion.chunk",
 			ContentDelta: msg.Text,
 			Choice: &IRChoice{
 				Index: 0,
@@ -284,7 +295,7 @@ func emitMessagesStream(dst io.Writer, resp *IRResponse) error {
 			}
 		}
 		startCb := &IRStreamEvent{
-			Type:  "content_block_start",
+			Type:   "content_block_start",
 			Choice: &IRChoice{Index: idx, Delta: &IRMessage{Content: []IRContent{{Type: "thinking"}}}},
 		}
 		if err := enc.WriteEvent(startCb); err != nil {
@@ -311,7 +322,7 @@ func emitMessagesStream(dst io.Writer, resp *IRResponse) error {
 	// Text block.
 	if hasText {
 		startCb := &IRStreamEvent{
-			Type:  "content_block_start",
+			Type:   "content_block_start",
 			Choice: &IRChoice{Index: idx, Delta: &IRMessage{Content: []IRContent{{Type: "text"}}}},
 		}
 		if err := enc.WriteEvent(startCb); err != nil {
@@ -346,9 +357,9 @@ func emitMessagesStream(dst io.Writer, resp *IRResponse) error {
 		}
 		if tc.Arguments != "" {
 			deltaEv := &IRStreamEvent{
-				Type: "content_block_delta",
+				Type:          "content_block_delta",
 				ToolCallDelta: &IRToolCallDelta{Index: idx, Arguments: tc.Arguments},
-				Choice: &IRChoice{Index: idx},
+				Choice:        &IRChoice{Index: idx},
 			}
 			if err := enc.WriteEvent(deltaEv); err != nil {
 				return err
@@ -379,7 +390,6 @@ func emitMessagesStream(dst io.Writer, resp *IRResponse) error {
 	if err := enc.WriteEvent(deltaMsg); err != nil {
 		return err
 	}
-
 	return enc.WriteDone()
 }
 

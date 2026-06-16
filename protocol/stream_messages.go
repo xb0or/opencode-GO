@@ -96,6 +96,9 @@ func DecodeMessagesSSE(r io.Reader) (*IRResponse, error) {
 			if ev.Response != nil {
 				resp.ID = ev.Response.ID
 				resp.Model = ev.Response.Model
+				if ev.Response.Usage != nil {
+					resp.Usage = ev.Response.Usage
+				}
 			}
 		case "content_block_start":
 			if ev.Choice != nil && ev.Choice.Delta != nil {
@@ -145,6 +148,10 @@ func DecodeMessagesSSE(r io.Reader) (*IRResponse, error) {
 					resp.Usage = &IRUsage{}
 				}
 				resp.Usage.CompletionTokens = ev.Response.Usage.CompletionTokens
+			}
+		case "message_stop":
+			if ev.Response != nil && ev.Response.Usage != nil {
+				resp.Usage = ev.Response.Usage
 			}
 		}
 		return nil

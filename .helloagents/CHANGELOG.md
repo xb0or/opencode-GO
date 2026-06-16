@@ -1,5 +1,11 @@
 ## 2026-06-16
 
+- 修复管理后台侧边栏“模型映射”菜单重复渲染，仅保留单一入口。
+- 修复 `page-hero` 装饰伪元素拦截点击导致刷新按钮无反应的问题，并将流式/空错误显示从问号改为明确状态与空值占位。
+- 流式同协议响应现在会透传 SSE 的同时捕获最终 usage；Chat 流式请求自动追加 `stream_options.include_usage=true`，调用记录可写入输入/输出/总 Token。
+- 跨协议流式转换返回缓冲后的 usage 供日志统计使用，并新增流式 usage 回归测试。
+## 2026-06-16
+
 - Token 统计继续补齐缓存口径：`UsageLog` 新增缓存总量、缓存读、缓存写字段，兼容 OpenAI cached_tokens 与 Anthropic cache_*_input_tokens。
 - `/admin/stats` 新增今日/累计缓存 Token、缓存读 Token、缓存写 Token 聚合；TPM 与总览卡片可展示缓存细分。
 - 使用记录页新增本页 Token、本页缓存 Token、本页消费摘要，并在明细表展示输入/输出/缓存读写与单次消费。

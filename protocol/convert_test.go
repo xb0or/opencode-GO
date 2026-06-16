@@ -1,7 +1,9 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/opencode-sw/gateway/config"
@@ -386,6 +388,23 @@ func TestConvertResponse_ThinkingBlockPreserved(t *testing.T) {
 	}
 	if !foundThinking {
 		t.Error("thinking text not found in responses output")
+	}
+}
+
+func TestStreamConverterWithUsageReturnsBufferedUsage(t *testing.T) {
+	src := strings.NewReader("data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":6,\"total_tokens\":10}}\n\n" +
+		"data: [DONE]\n\n")
+	var dst bytes.Buffer
+	resp, err := StreamConverterWithUsage(&dst, src, config.ProtocolChat, config.ProtocolMessages)
+	if err != nil {
+		t.Fatalf("StreamConverterWithUsage error: %v", err)
+	}
+	if resp == nil || resp.Usage == nil || resp.Usage.PromptTokens != 4 || resp.Usage.CompletionTokens != 6 || resp.Usage.TotalTokens != 10 {
+		t.Fatalf("unexpected buffered usage: %#v", resp)
+	}
+	if !strings.Contains(dst.String(), `"type":"message_stop"`) {
+		t.Fatalf("converted stream missing message_stop event: %s", dst.String())
 	}
 }
 
