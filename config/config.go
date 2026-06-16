@@ -20,6 +20,13 @@ type Config struct {
 
 	// Go upstream base URL (without trailing slash).
 	GoBaseURL string
+
+	// ModelMappings is an optional JSON object that rewrites client-facing
+	// model names before forwarding, for example {"gpt-5.5":"glm-5.1"}.
+	ModelMappings string
+	// ModelMappingFile optionally points to a JSON file with the same mapping
+	// object shape as ModelMappings.
+	ModelMappingFile string
 }
 
 var (
@@ -34,12 +41,14 @@ func Load() *Config {
 	cfgOnce.Do(func() {
 		loadDotEnv()
 		cfg = &Config{
-			Port:            envStr("PORT", "9812"),
-			AdminPassword:   envStr("ADMIN_PASSWORD", "admin"),
-			JWTSecret:       envStr("JWT_SECRET", "opencode-sw-default-secret-change-me"),
-			DBPath:          envStr("DB_PATH", "./data/opencode-sw.db"),
-			UpstreamTimeout: envInt("UPSTREAM_TIMEOUT", 120),
-			GoBaseURL:       strings.TrimRight(envStr("GO_BASE_URL", "https://opencode.ai/zen/go"), "/"),
+			Port:             envStr("PORT", "9812"),
+			AdminPassword:    envStr("ADMIN_PASSWORD", "admin"),
+			JWTSecret:        envStr("JWT_SECRET", "opencode-sw-default-secret-change-me"),
+			DBPath:           envStr("DB_PATH", "./data/opencode-sw.db"),
+			UpstreamTimeout:  envInt("UPSTREAM_TIMEOUT", 120),
+			GoBaseURL:        strings.TrimRight(envStr("GO_BASE_URL", "https://opencode.ai/zen/go"), "/"),
+			ModelMappings:    envStr("MODEL_MAPPINGS", ""),
+			ModelMappingFile: envStr("MODEL_MAPPING_FILE", ""),
 		}
 	})
 	return cfg

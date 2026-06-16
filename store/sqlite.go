@@ -53,6 +53,14 @@ type ModelRouteRow struct {
 	ContextLen int    `json:"context_len"`
 }
 
+// ModelMappingRow persists a UI-managed model rewrite rule.
+type ModelMappingRow struct {
+	SourceModel string    `gorm:"primaryKey;size:255" json:"source_model"`
+	TargetModel string    `gorm:"size:255;not null" json:"target_model"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 // UsageLog records a single proxied request.
 type UsageLog struct {
 	ID         uint      `gorm:"primaryKey" json:"id"`
@@ -87,7 +95,7 @@ func Init() error {
 	if err != nil {
 		return fmt.Errorf("open sqlite: %w", err)
 	}
-	if err := gdb.AutoMigrate(&Key{}, &Token{}, &UsageLog{}, &ModelRouteRow{}); err != nil {
+	if err := gdb.AutoMigrate(&Key{}, &Token{}, &UsageLog{}, &ModelRouteRow{}, &ModelMappingRow{}); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	db = gdb
@@ -118,6 +126,22 @@ func DeleteModelRoute(id string) error {
 	return db.Delete(&ModelRouteRow{}, "id = ?", id).Error
 }
 
+// LoadModelMappings loads all persisted model rewrite rules from the database.
+func LoadModelMappings() ([]ModelMappingRow, error) {
+	var rows []ModelMappingRow
+	return rows, db.Order("source_model asc").Find(&rows).Error
+}
+
+// SaveModelMapping upserts a model rewrite rule.
+func SaveModelMapping(r *ModelMappingRow) error {
+	return db.Save(r).Error
+}
+
+// DeleteModelMapping deletes a model rewrite rule by source model id.
+func DeleteModelMapping(sourceModel string) error {
+	return db.Delete(&ModelMappingRow{}, "source_model = ?", sourceModel).Error
+}
+
 // InitForTest opens an in-memory SQLite for testing. Not for production use.
 func InitForTest(dsn string) error {
 	gdb, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{
@@ -126,7 +150,7 @@ func InitForTest(dsn string) error {
 	if err != nil {
 		return err
 	}
-	if err := gdb.AutoMigrate(&Key{}, &Token{}, &UsageLog{}, &ModelRouteRow{}); err != nil {
+	if err := gdb.AutoMigrate(&Key{}, &Token{}, &UsageLog{}, &ModelRouteRow{}, &ModelMappingRow{}); err != nil {
 		return err
 	}
 	db = gdb

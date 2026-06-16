@@ -11,6 +11,7 @@ import { useDashboard } from "./pages/dashboard.js";
 import { useKeys } from "./pages/keys.js";
 import { useTokens } from "./pages/tokens.js";
 import { useModels } from "./pages/models.js";
+import { useMappings } from "./pages/mappings.js";
 
 const { createApp, reactive, ref, watch } = Vue;
 
@@ -168,6 +169,12 @@ createApp({
         confirm.okText = t("confirm.deleteModel.ok");
         confirm.danger = true;
         confirm.onOk = item;
+      } else if (type === "deleteMapping") {
+        confirm.title = t("confirm.deleteMapping.title");
+        confirm.msg = t("confirm.deleteMapping.msg", { name: name || "" });
+        confirm.okText = t("confirm.deleteMapping.ok");
+        confirm.danger = true;
+        confirm.onOk = item;
       }
       confirm.show = true;
     }
@@ -185,6 +192,7 @@ createApp({
     const keys = useKeys(api, showToast, t, showConfirm);
     const tokens = useTokens(api, showToast, t, showConfirm);
     const models = useModels(api, showToast, t, showConfirm);
+    const mappings = useMappings(api, showToast, t, showConfirm);
 
     // ─── 初始化 ───────────────────────────────────────
     if (token.value) dashboard.load();
@@ -256,6 +264,18 @@ createApp({
       loadModels: models.load,
       addModel: models.add,
       deleteModel: models.remove,
+
+      // 模型映射管理
+      mappings: mappings.mappings,
+      newMapping: mappings.newMapping,
+      editingSource: mappings.editingSource,
+      showMappingModal: mappings.showMappingModal,
+      openMappingModal: mappings.openMappingModal,
+      openMappingSettings: mappings.openMappingSettings,
+      closeMappingModal: mappings.closeMappingModal,
+      loadMappings: mappings.load,
+      addMapping: mappings.add,
+      deleteMapping: mappings.remove,
     };
   },
 }).mount("#app");

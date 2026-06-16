@@ -1,5 +1,11 @@
 ## 2026-06-16
 
+- 新增 Model Mapping 功能：支持通过 `MODEL_MAPPINGS` JSON、`MODEL_MAPPING_FILE` 文件和后台 UI 管理请求模型改写规则。
+- 新增后台“模型映射”管理页面与 `/admin/model-mappings` 管理接口，规则持久化到 SQLite 并保存后立即同步运行时配置。
+- 代理转发在改写 JSON Body 后会重算并覆盖上游请求的 `Content-Length`；非法 JSON、缺失 `model` 或未命中映射时记录 warning 并原样透传；普通 JSON 与 SSE 响应继续透传。
+
+## 2026-06-16
+
 - 管理后台模型列表移除真实模型与 OpenRouter 匹配 ID 展示，仅保留上下文、价格与能力标签。
 - 模型能力改为中英文标签展示，中文显示“文本、视觉、视频、工具、结构化、推理”。
 - API 密钥支持在后台修改密钥值、标签、权重和代理设置；分组固定为 Go，不在前端配置。

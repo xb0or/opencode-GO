@@ -530,6 +530,17 @@ select:focus {
   margin: 2px 4px 2px 0;
   white-space: nowrap;
 }
+.hint-text {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: -4px 0 16px;
+}
+.mapping-arrow code::before {
+  content: "→ ";
+  color: var(--accent);
+  font-weight: 700;
+}
 
 /* Login */
 .login-wrap {

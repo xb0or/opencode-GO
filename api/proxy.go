@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,25 +63,12 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	}
 	_ = c.Request.Body.Close()
 
-	// Determine the requested model from the body (all three formats use top-level "model").
-	var head struct {
-		Model  string `json:"model"`
-		Stream bool   `json:"stream"`
-	}
-	if err := json.Unmarshal(body, &head); err != nil {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "request body is not valid JSON")
-		return
-	}
-	if head.Model == "" {
-		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "missing 'model' field")
-		return
-	}
+	head := inspectAndMapRequestBody(c.Request.URL.Path, body)
+	upstreamBody := head.Body
 
-	route, ok := config.LookupModel(head.Model)
-	if !ok {
-		writeOpenAIError(c, http.StatusNotFound, "model_not_found_error",
-			fmt.Sprintf("model %q is not registered in the gateway", head.Model))
-		return
+	route, routed := config.LookupModel(head.Model)
+	if !routed {
+		route = passthroughRoute(head.Model, inbound)
 	}
 
 	if tokAny, exists := c.Get("token"); exists {
@@ -101,11 +90,10 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	// If the inbound protocol differs from the upstream model's protocol,
 	// convert the request body through the IR.
 	upstreamProto := route.Protocol
-	upstreamBody := body
-	crossProtocol := inbound != upstreamProto
+	crossProtocol := routed && head.HasModel && inbound != upstreamProto
 
 	if crossProtocol {
-		converted, err := protocol.ConvertRequest(inbound, upstreamProto, body)
+		converted, err := protocol.ConvertRequest(inbound, upstreamProto, upstreamBody)
 		if err != nil {
 			writeOpenAIError(c, http.StatusBadRequest, "conversion_error",
 				fmt.Sprintf("failed to convert request from %s to %s: %v", inbound, upstreamProto, err))
@@ -153,6 +141,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		return
 	}
 	copyForwardHeaders(req.Header, c.Request.Header)
+	setContentLength(req, len(upstreamBody))
 	injectUpstreamAuth(req.Header, key.Value)
 
 	upstreamClient := upstream.NewClientForProxy(key.ProxyURL)
@@ -287,11 +276,80 @@ func upstreamPathFor(proto config.Protocol) string {
 	}
 }
 
+type requestHead struct {
+	Body     []byte
+	Model    string
+	Stream   bool
+	Parsed   bool
+	HasModel bool
+	Mapped   bool
+}
+
+// inspectAndMapRequestBody parses a JSON request body just enough to find
+// top-level "model" and "stream". If a configured model mapping matches, it
+// rewrites the JSON body and returns the mapped model. Invalid JSON or missing
+// model is logged and forwarded unchanged.
+func inspectAndMapRequestBody(path string, body []byte) requestHead {
+	head := requestHead{Body: body}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		log.Printf("warn: model mapping skipped for %s: request body is not valid JSON: %v", path, err)
+		return head
+	}
+	head.Parsed = true
+
+	if stream, ok := m["stream"].(bool); ok {
+		head.Stream = stream
+	}
+
+	model, ok := m["model"].(string)
+	if !ok || strings.TrimSpace(model) == "" {
+		log.Printf("warn: model mapping skipped for %s: request JSON has no string model field", path)
+		return head
+	}
+	head.Model = model
+	head.HasModel = true
+
+	mapped, ok := config.LookupModelMapping(model)
+	if !ok {
+		return head
+	}
+	m["model"] = mapped
+	out, err := json.Marshal(m)
+	if err != nil {
+		log.Printf("warn: model mapping %q -> %q skipped for %s: remarshal failed: %v", model, mapped, path, err)
+		return head
+	}
+	head.Body = out
+	head.Model = mapped
+	head.Mapped = true
+	log.Printf("model mapping applied for %s: %q -> %q", path, model, mapped)
+	return head
+}
+
+func passthroughRoute(model string, inbound config.Protocol) config.ModelRoute {
+	id := strings.TrimSpace(model)
+	if id == "" {
+		id = "passthrough"
+	}
+	return config.ModelRoute{
+		ID:        id,
+		Name:      id,
+		Upstream:  config.UpstreamGo,
+		Protocol:  inbound,
+		RealModel: model,
+		Group:     "go",
+	}
+}
+
 // rewriteModel returns body with the top-level "model" field replaced. It
 // re-marshals compact JSON; on any failure the original body is returned with
 // ok=false so the caller keeps the original (model name may be a prefix match
 // upstream, but that is acceptable degradation).
 func rewriteModel(body []byte, realModel string) ([]byte, bool) {
+	if realModel == "" {
+		return body, false
+	}
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {
 		return body, false
@@ -302,6 +360,12 @@ func rewriteModel(body []byte, realModel string) ([]byte, bool) {
 		return body, false
 	}
 	return out, true
+}
+
+// setContentLength pins the outbound request length after any body rewrite.
+func setContentLength(req *http.Request, n int) {
+	req.ContentLength = int64(n)
+	req.Header.Set("Content-Length", strconv.Itoa(n))
 }
 
 // copyForwardHeaders forwards client headers to the upstream request while

@@ -40,6 +40,9 @@ func MountWithPicker(rg *gin.RouterGroup, p *pool.Picker) {
 //	GET  /admin/models                                                  model route table
 //	POST /admin/models                      add/update route
 //	DELETE /admin/models/:id
+//	GET  /admin/model-mappings                                          model rewrite rules
+//	POST /admin/model-mappings              add/update rule
+//	DELETE /admin/model-mappings/:source    delete rule
 func Mount(rg *gin.RouterGroup) {
 	rg.POST("/login", login)
 
@@ -62,6 +65,9 @@ func Mount(rg *gin.RouterGroup) {
 		authed.GET("/models", listModelsAdmin)
 		authed.POST("/models", upsertModel)
 		authed.DELETE("/models/:id", deleteModel)
+		authed.GET("/model-mappings", listModelMappingsAdmin)
+		authed.POST("/model-mappings", upsertModelMapping)
+		authed.DELETE("/model-mappings/*source", deleteModelMapping)
 	}
 }
 
@@ -338,6 +344,52 @@ func deleteModel(c *gin.Context) {
 	id := c.Param("id")
 	config.RemoveModel(id)
 	store.DeleteModelRoute(id)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// --- Model Mappings ---
+
+func listModelMappingsAdmin(c *gin.Context) {
+	rows, err := store.LoadModelMappings()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": rows})
+}
+
+func upsertModelMapping(c *gin.Context) {
+	var body struct {
+		SourceModel string `json:"source_model" binding:"required"`
+		TargetModel string `json:"target_model" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	source := strings.TrimSpace(body.SourceModel)
+	target := strings.TrimSpace(body.TargetModel)
+	if source == "" || target == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "source_model and target_model are required"})
+		return
+	}
+	row := &store.ModelMappingRow{SourceModel: source, TargetModel: target}
+	if err := store.SaveModelMapping(row); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	config.RegisterModelMapping(source, target)
+	c.JSON(http.StatusOK, row)
+}
+
+func deleteModelMapping(c *gin.Context) {
+	source := strings.Trim(strings.TrimSpace(c.Param("source")), "/")
+	if source == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "source model is required"})
+		return
+	}
+	config.RemoveModelMapping(source)
+	store.DeleteModelMapping(source)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

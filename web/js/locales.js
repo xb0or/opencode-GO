@@ -5,6 +5,7 @@ export const locales = {
       keys: "API 密钥",
       tokens: "访问令牌",
       models: "模型路由",
+      mappings: "模型映射",
       logout: "退出登录",
     },
     errors: {
@@ -80,6 +81,23 @@ export const locales = {
       cancel: "取消",
       select: "请选择",
     },
+    mappings: {
+      title: "模型映射",
+      addMapping: "添加映射",
+      updateMapping: "修改映射",
+      sourceModel: "客户端模型",
+      targetModel: "上游模型",
+      addBtn: "添加",
+      updateBtn: "保存",
+      registered: "已配置映射 ({count})",
+      description:
+        "当客户端请求左侧模型时，网关会在转发前将 JSON Body 中的 model 改写为右侧模型，并自动重算 Content-Length。",
+      modalHint:
+        "示例：客户端模型 gpt-5.5 → 上游模型 glm-51。保存后立即生效并持久化到 SQLite。",
+      settings: "设置",
+      delete: "删除",
+      cancel: "取消",
+    },
     theme: {
       dark: "深色模式",
       light: "浅色模式",
@@ -119,6 +137,11 @@ export const locales = {
         msg: "确定删除模型路由「{name}」？此操作不可撤销。",
         ok: "删除",
       },
+      deleteMapping: {
+        title: "删除模型映射",
+        msg: "确定删除模型映射「{name}」？此操作不可撤销。",
+        ok: "删除",
+      },
     },
     table: {
       time: "时间",
@@ -147,6 +170,9 @@ export const locales = {
       completionPrice: "输出价格",
       cachePrice: "缓存读/写",
       capabilities: "能力",
+      sourceModel: "客户端模型",
+      targetModel: "上游模型",
+      updatedAt: "更新时间",
     },
   },
   en: {
@@ -155,6 +181,7 @@ export const locales = {
       keys: "API Keys",
       tokens: "Tokens",
       models: "Models",
+      mappings: "Mappings",
       logout: "Logout",
     },
     errors: {
@@ -230,6 +257,23 @@ export const locales = {
       cancel: "Cancel",
       select: "Select",
     },
+    mappings: {
+      title: "Model Mappings",
+      addMapping: "Add Mapping",
+      updateMapping: "Edit Mapping",
+      sourceModel: "Client Model",
+      targetModel: "Upstream Model",
+      addBtn: "Add Mapping",
+      updateBtn: "Save",
+      registered: "Configured Mappings ({count})",
+      description:
+        "When the client requests the left model, the gateway rewrites the JSON body model to the right model before forwarding and recalculates Content-Length.",
+      modalHint:
+        "Example: client model gpt-5.5 → upstream model glm-51. Changes take effect immediately and persist in SQLite.",
+      settings: "Settings",
+      delete: "Delete",
+      cancel: "Cancel",
+    },
     theme: {
       dark: "Dark",
       light: "Light",
@@ -269,6 +313,11 @@ export const locales = {
         msg: 'Are you sure you want to delete model route "{name}"? This action cannot be undone.',
         ok: "Delete",
       },
+      deleteMapping: {
+        title: "Delete Model Mapping",
+        msg: 'Are you sure you want to delete model mapping "{name}"? This action cannot be undone.',
+        ok: "Delete",
+      },
     },
     table: {
       time: "Time",
@@ -297,6 +346,9 @@ export const locales = {
       completionPrice: "Output Price",
       cachePrice: "Cache R/W",
       capabilities: "Capabilities",
+      sourceModel: "Client Model",
+      targetModel: "Upstream Model",
+      updatedAt: "Updated",
     },
   },
 };
