@@ -432,3 +432,153 @@ func TestEncodeDecodeMessagesStreamEvent(t *testing.T) {
 		t.Errorf("content_delta: got %q", decoded.ContentDelta)
 	}
 }
+
+// Messages allows content to be a plain string shorthand. The decoder must
+// accept that form; previously it failed with "cannot unmarshal string into
+// []MsgContent" which broke all Anthropic Messages → Chat conversions for
+// clients that use the string shorthand.
+func TestDecodeMessagesRequestAcceptsStringContent(t *testing.T) {
+	body := []byte(`{
+		"model": "claude",
+		"max_tokens": 16,
+		"messages": [
+			{"role": "user", "content": "Hello"},
+			{"role": "assistant", "content": "Hi there"}
+		]
+	}`)
+	ir, err := DecodeMessagesRequest(body)
+	if err != nil {
+		t.Fatalf("string content should decode: %v", err)
+	}
+	if len(ir.Messages) != 2 {
+		t.Fatalf("messages: got %d, want 2", len(ir.Messages))
+	}
+	if ir.Messages[0].Text != "Hello" {
+		t.Errorf("user text: got %q, want %q", ir.Messages[0].Text, "Hello")
+	}
+	if ir.Messages[1].Text != "Hi there" {
+		t.Errorf("assistant text: got %q, want %q", ir.Messages[1].Text, "Hi there")
+	}
+}
+
+// A tool_result block may carry its payload as content: "..." or content:
+// [{type:"text",...}]. The previous decoder dropped that payload entirely,
+// so converting such a Messages request to Chat lost the tool output.
+func TestDecodeMessagesRequestPreservesToolResultContent(t *testing.T) {
+	body := []byte(`{
+		"model": "claude",
+		"max_tokens": 16,
+		"messages": [
+			{"role": "user", "content": "use the tool"},
+			{"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "get", "input": {"q": "x"}}]},
+			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "result text"}]}
+		]
+	}`)
+	ir, err := DecodeMessagesRequest(body)
+	if err != nil {
+		t.Fatalf("tool_result request should decode: %v", err)
+	}
+	var found bool
+	for _, m := range ir.Messages {
+		for _, c := range m.Content {
+			if c.Type == "tool_result" && c.ToolID == "t1" && c.Text == "result text" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("tool_result content text was lost: %#v", ir.Messages)
+	}
+
+	// And the array form of content.
+	bodyArray := []byte(`{
+		"model": "claude",
+		"max_tokens": 16,
+		"messages": [
+			{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type":"text","text":"array result"}]}]}
+		]
+	}`)
+	ir2, err := DecodeMessagesRequest(bodyArray)
+	if err != nil {
+		t.Fatalf("tool_result array content should decode: %v", err)
+	}
+	found = false
+	for _, m := range ir2.Messages {
+		for _, c := range m.Content {
+			if c.Type == "tool_result" && c.ToolID == "t1" && c.Text == "array result" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("tool_result array content text was lost: %#v", ir2.Messages)
+	}
+}
+
+// Converting a Messages request with string content to Chat must succeed end
+// to end and produce a usable Chat body.
+func TestConvertRequest_MessagesToChatStringContent(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-4",
+		"messages": [
+			{"role": "user", "content": "Hello"}
+		],
+		"max_tokens": 512
+	}`)
+	out, err := ConvertRequest(config.ProtocolMessages, config.ProtocolChat, body)
+	if err != nil {
+		t.Fatalf("messages→chat with string content: %v", err)
+	}
+	var req ChatRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("output not valid Chat JSON: %v", err)
+	}
+	if len(req.Messages) != 1 {
+		t.Fatalf("messages: got %d, want 1", len(req.Messages))
+	}
+	if req.Messages[0].Role != "user" {
+		t.Errorf("role: got %q", req.Messages[0].Role)
+	}
+	if s, ok := req.Messages[0].Content.(string); !ok || s != "Hello" {
+		t.Errorf("content: got %#v, want string \"Hello\"", req.Messages[0].Content)
+	}
+}
+
+// DecodeStreamBuffer must reject an upstream payload that is not a valid
+// stream for its protocol (e.g. an HTML gateway error page) so the proxy can
+// surface a clean error instead of an opaque JSON parse failure.
+func TestDecodeStreamBufferRejectsHTMLBody(t *testing.T) {
+	html := []byte("<html><body>502 Bad gateway\x1b[0m</body></html>")
+	if _, err := DecodeStreamBuffer(config.ProtocolChat, html); err == nil {
+		t.Fatalf("expected error decoding HTML as chat stream")
+	}
+}
+
+func TestDecodeStreamBufferRejectsEmptyBody(t *testing.T) {
+	if _, err := DecodeStreamBuffer(config.ProtocolChat, nil); err == nil {
+		t.Fatalf("expected error decoding empty body as chat stream")
+	}
+	if _, err := DecodeStreamBuffer(config.ProtocolChat, []byte{}); err == nil {
+		t.Fatalf("expected error decoding empty byte slice as chat stream")
+	}
+}
+
+// A stream that only contains [DONE] is valid SSE (just an empty response);
+// the proxy should parse it. This differs from HTML which has no data: lines.
+func TestDecodeStreamBufferAcceptsDoneOnlyStream(t *testing.T) {
+	emptyStream := []byte("data: [DONE]\n\n")
+	if _, err := DecodeStreamBuffer(config.ProtocolChat, emptyStream); err != nil {
+		t.Fatalf("unexpected error parsing valid done-only stream: %v", err)
+	}
+}
+
+func TestDecodeStreamBufferAcceptsValidChatStream(t *testing.T) {
+	validStream := []byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+	resp, err := DecodeStreamBuffer(config.ProtocolChat, validStream)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil || resp.Choices[0].Message.Text != "hi" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
