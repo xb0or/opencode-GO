@@ -47,6 +47,22 @@ func NewPicker() *Picker {
 // proportionally more traffic. The returned key's LastUsed/UsageCount are
 // updated. Returns ErrNoAvailableKey if none usable.
 func (p *Picker) Pick(group string) (*store.Key, error) {
+	keys, err := p.PickAttempts(group)
+	if err != nil {
+		return nil, err
+	}
+	chosen := &keys[0]
+	p.MarkUsed(chosen.ID)
+	chosen.UsageCount++
+	now := time.Now()
+	chosen.LastUsed = &now
+	return chosen, nil
+}
+
+// PickAttempts returns all currently available keys for a group. The first key
+// follows the weighted round-robin scheduler, and the remaining keys are
+// returned once each as fallback candidates for the same request.
+func (p *Picker) PickAttempts(group string) ([]store.Key, error) {
 	if group == "" {
 		group = "go"
 	}
@@ -101,28 +117,35 @@ func (p *Picker) Pick(group string) (*store.Key, error) {
 		pos += int64(totalWeight)
 	}
 
-	var chosen *store.Key
+	chosenIndex := -1
 	accumulated := int64(0)
-	for _, c := range candidates {
+	for i, c := range candidates {
 		accumulated += int64(c.weight)
 		if pos < accumulated {
-			chosen = &c.key
+			chosenIndex = i
 			break
 		}
 	}
-	if chosen == nil {
+	if chosenIndex < 0 {
 		// Fallback: pick first candidate.
-		chosen = &candidates[0].key
+		chosenIndex = 0
 	}
 
-	// Update usage bookkeeping.
-	store.DB().Model(&store.Key{}).Where("id = ?", chosen.ID).Updates(map[string]any{
+	attempts := make([]store.Key, 0, len(candidates))
+	for offset := 0; offset < len(candidates); offset++ {
+		c := candidates[(chosenIndex+offset)%len(candidates)]
+		attempts = append(attempts, c.key)
+	}
+	return attempts, nil
+}
+
+// MarkUsed updates usage bookkeeping for a key that is about to be attempted.
+func (p *Picker) MarkUsed(keyID uint) {
+	now := time.Now()
+	store.DB().Model(&store.Key{}).Where("id = ?", keyID).Updates(map[string]any{
 		"last_used":   now,
-		"usage_count": chosen.UsageCount + 1,
+		"usage_count": gorm.Expr("usage_count + ?", 1),
 	})
-	chosen.LastUsed = &now
-	chosen.UsageCount++
-	return chosen, nil
 }
 
 // PickAll returns every available (enabled + not cooled-down) key for a group.
