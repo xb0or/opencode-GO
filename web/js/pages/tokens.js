@@ -1,6 +1,6 @@
 /**
  * 访问令牌管理页面 - 组合式函数
- * 支持模态框创建、复选框选择允许分组
+ * 支持模态框创建和删除
  */
 
 import { validateRequired } from "../api.js";
@@ -12,14 +12,12 @@ export function useTokens(api, showToast, t, showConfirm) {
 
   const newToken = reactive({
     name: "",
-    allowed_groups: [],
     rate_limit: 0,
   });
 
   /** 打开模态框 */
   function openTokenModal() {
     newToken.name = "";
-    newToken.allowed_groups = [];
     newToken.rate_limit = 0;
     showTokenModal.value = true;
   }
@@ -42,10 +40,8 @@ export function useTokens(api, showToast, t, showConfirm) {
     if (!validateRequired(newToken.name, t("tokens.name"), t, showToast))
       return;
     try {
-      // 将分组数组转为逗号分隔字符串发送给后端
       const payload = {
         name: newToken.name,
-        allowed_groups: "",
         rate_limit: newToken.rate_limit,
       };
       await api("/tokens", "POST", payload, t);

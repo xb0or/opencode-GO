@@ -59,7 +59,7 @@ go mod tidy
 go run .
 
 # On first run a bootstrap gateway token is printed to stdout, e.g.:
-#   ocsw-...
+#   sk-...
 ```
 
 Then open the admin panel at `http://localhost:9812/admin` (default password: `admin`).
@@ -74,7 +74,7 @@ curl -X POST localhost:3000/admin/login -H 'Content-Type: application/json' \
 # add a Go key
 curl -X POST localhost:3000/admin/keys \
   -H 'Authorization: Bearer <admin-jwt>' -H 'Content-Type: application/json' \
-  -d '{"value":"opencode_xxxx","group":"go","label":"personal"}'
+  -d '{"value":"opencode_xxxx","label":"personal"}'
 
 # list models
 curl localhost:3000/v1/models
@@ -86,6 +86,13 @@ The default Go catalog includes:
 
 - Chat Completions: `glm-5.1`, `glm-5`, `kimi-k2.7-code`, `kimi-k2.6`, `mimo-v2.5`, `mimo-v2.5-pro`, `deepseek-v4-pro`, `deepseek-v4-flash`
 - Messages: `minimax-m3`, `minimax-m2.7`, `minimax-m2.5`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`
+
+At startup the gateway best-effort enriches the in-memory model catalog from
+`https://openrouter.ai/api/v1/models`. The matching result adds context length,
+architecture metadata, supported parameters, pricing, description, and knowledge
+cutoff to `GET /v1/models` and to the admin model table. Internal upstream
+model ids and OpenRouter match ids are not shown in the admin catalog view. If
+OpenRouter is unavailable, startup continues with the local catalog.
 
 Go usage limits are value-based: 5-hour `$12`, weekly `$30`, and monthly `$60`. Request counts vary by model cost. If limits are reached, the upstream service may fall back to balance usage when enabled in the OpenCode console.
 
@@ -142,7 +149,7 @@ Create `opencode.json` in your project (or `~/.config/opencode/opencode.json`):
 ```
 
 ```bash
-export OCSW_TOKEN=ocsw-...
+export OCSW_TOKEN=sk-...
 ```
 
 > Note: for the Anthropic provider, point `baseURL` at the gateway root (no `/v1`); the SDK appends `/v1/messages` itself. For the OpenAI-compatible provider, include `/v1`.
@@ -152,9 +159,9 @@ export OCSW_TOKEN=ocsw-...
 Access at `http://<gateway>/admin` (default password: `admin`). Features:
 
 - **Dashboard** — total calls, key/token counts, avg latency, calls-by-model chart, calls-by-protocol chart, recent call log
-- **API Keys** — add/remove/toggle keys, set proxy URL, reset cooldown, view fail counts and usage
-- **Tokens** — create/delete gateway tokens with optional group restrictions (checkbox multi-select) and rate limits
-- **Models** — manage the model routing table (add custom models, change upstream/protocol, select real model from dropdown)
+- **API Keys** — add/remove/toggle keys, edit key value/label/weight/proxy settings, reset cooldown, view fail counts and usage
+- **Tokens** — create/delete/copy `sk-` gateway tokens with optional rate limits
+- **Models** — manage the Go model routing table and view OpenRouter-enriched context length, input/output/cache pricing, and capability tags
 
 ### Admin Panel UI
 

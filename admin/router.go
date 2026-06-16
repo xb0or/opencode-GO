@@ -28,7 +28,8 @@ func MountWithPicker(rg *gin.RouterGroup, p *pool.Picker) {
 //	POST /admin/login                       {password}           -> {token}
 //	GET  /admin/health                                                pool health
 //	GET  /admin/keys                                                  -> []Key
-//	POST /admin/keys                       {value,group,label}      -> Key
+//	POST /admin/keys                       {value,label}            -> Key
+//	PATCH /admin/keys/:id                  update key settings
 //	POST /admin/keys/:id/toggle                                      toggle
 //	POST /admin/keys/:id/reset                                        reset cooldown
 //	DELETE /admin/keys/:id
@@ -48,6 +49,7 @@ func Mount(rg *gin.RouterGroup) {
 		authed.GET("/health", poolHealth)
 		authed.GET("/keys", listKeys)
 		authed.POST("/keys", createKey)
+		authed.PATCH("/keys/:id", updateKey)
 		authed.POST("/keys/:id/toggle", toggleKey)
 		authed.POST("/keys/:id/reset", resetKeyCooldown)
 		authed.DELETE("/keys/:id", deleteKey)
@@ -149,7 +151,7 @@ func listKeys(c *gin.Context) {
 func createKey(c *gin.Context) {
 	var body struct {
 		Value    string `json:"value" binding:"required"`
-		Group    string `json:"group" binding:"required"`
+		Group    string `json:"group"`
 		Label    string `json:"label"`
 		Weight   int    `json:"weight"`
 		ProxyURL string `json:"proxy_url"`
@@ -182,6 +184,51 @@ func createKey(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	c.JSON(http.StatusOK, k)
+}
+
+func updateKey(c *gin.Context) {
+	var k store.Key
+	if err := store.DB().First(&k, c.Param("id")).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+
+	var body struct {
+		Value    string `json:"value"`
+		Label    string `json:"label"`
+		Weight   *int   `json:"weight"`
+		ProxyURL string `json:"proxy_url"`
+		Enabled  *bool  `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	updates := map[string]any{
+		"label":     body.Label,
+		"proxy_url": strings.TrimSpace(body.ProxyURL),
+	}
+	if body.Weight != nil {
+		weight := *body.Weight
+		if weight <= 0 {
+			weight = 1
+		}
+		updates["weight"] = weight
+	}
+	if value := strings.TrimSpace(body.Value); value != "" {
+		updates["value"] = value
+	}
+	if body.Enabled != nil {
+		updates["enabled"] = *body.Enabled
+	}
+	if err := store.DB().Model(&store.Key{}).Where("id = ?", k.ID).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	store.DB().First(&k, k.ID)
+	k.Value = maskSecret(k.Value)
 	c.JSON(http.StatusOK, k)
 }
 
@@ -221,9 +268,6 @@ func listTokens(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
-	}
-	for i := range ts {
-		ts[i].Token = maskSecret(ts[i].Token)
 	}
 	c.JSON(http.StatusOK, gin.H{"data": ts})
 }

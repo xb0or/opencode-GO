@@ -7,7 +7,7 @@ import { validateRequired } from "../api.js";
 const { ref, reactive, computed, watch } = Vue;
 
 /**
- * 根据上游可选的真实模型列表
+ * 根据 Go 可选模型列表生成路由
  */
 const GO_MODELS = [
   { id: "glm-5.1", name: "GLM-5.1", protocol: "chat" },
@@ -36,14 +36,13 @@ export function useModels(api, showToast, t, showConfirm) {
     upstream: "go",
     protocol: "chat",
     real_model: "",
-    group: "go",
     context_len: 0,
   });
 
   /** 当前上游可选的模型列表 */
   const availableModels = computed(() => GO_MODELS);
 
-  /** 当真实模型变化时，自动同步模型 ID、名称与协议。 */
+  /** 当 Go 模型变化时，自动同步模型 ID、名称与协议。 */
   watch(
     () => newModel.real_model,
     (val) => {
@@ -53,7 +52,6 @@ export function useModels(api, showToast, t, showConfirm) {
       newModel.name = found.name;
       newModel.protocol = found.protocol;
       newModel.upstream = "go";
-      newModel.group = "go";
     }
   );
 
@@ -82,7 +80,6 @@ export function useModels(api, showToast, t, showConfirm) {
     newModel.upstream = "go";
     newModel.protocol = "chat";
     newModel.real_model = "";
-    newModel.group = "go";
     newModel.context_len = 0;
     showModal.value = true;
   }
@@ -110,7 +107,6 @@ export function useModels(api, showToast, t, showConfirm) {
       return;
     try {
       newModel.upstream = "go";
-      newModel.group = "go";
       await api("/models", "POST", newModel, t);
       showToast(t("models.addBtn") + " ✓");
       closeModal();

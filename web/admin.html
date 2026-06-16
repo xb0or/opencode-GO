@@ -304,6 +304,12 @@
                           {{t('keys.reset')}}
                         </button>
                         <button
+                          class="btn btn-ghost btn-sm"
+                          @click="openKeySettings(k)"
+                        >
+                          {{t('keys.settings')}}
+                        </button>
+                        <button
                           class="btn btn-danger btn-sm"
                           @click="deleteKey(k.id)"
                         >
@@ -348,6 +354,12 @@
                       </td>
                       <td>
                         <button
+                          class="btn btn-ghost btn-sm"
+                          @click="copyText(tk.token)"
+                        >
+                          {{t('tokens.copy')}}
+                        </button>
+                        <button
                           class="btn btn-danger btn-sm"
                           @click="deleteToken(tk.id)"
                         >
@@ -376,16 +388,35 @@
                       <th>{{t('table.id')}}</th>
                       <th>{{t('table.name')}}</th>
                       <th>{{t('table.protocol')}}</th>
-                      <th>{{t('table.realModel')}}</th>
                       <th>{{t('table.context')}}</th>
+                      <th>{{t('table.promptPrice')}}</th>
+                      <th>{{t('table.completionPrice')}}</th>
+                      <th>{{t('table.cachePrice')}}</th>
+                      <th>{{t('table.capabilities')}}</th>
                       <th>{{t('table.actions')}}</th>
                     </tr>
                     <tr v-for="m in models" :key="m.id">
                       <td><code>{{m.id}}</code></td>
                       <td>{{m.name}}</td>
                       <td>{{m.protocol}}</td>
-                      <td style="font-size: 12px">{{m.real_model}}</td>
-                      <td>{{m.context_len||'—'}}</td>
+                      <td>{{fmtNumber(m.context_len || m.context_length)}}</td>
+                      <td>{{fmtPrice(m.pricing, 'prompt')}}</td>
+                      <td>{{fmtPrice(m.pricing, 'completion')}}</td>
+                      <td style="font-size: 12px">
+                        <div>{{fmtPrice(m.pricing, 'input_cache_read')}}</div>
+                        <div style="color: var(--muted)">
+                          {{fmtPrice(m.pricing, 'input_cache_write')}}
+                        </div>
+                      </td>
+                      <td>
+                        <span
+                          v-for="cap in fmtCapabilities(m)"
+                          :key="m.id + '-' + cap"
+                          class="badge badge-accent capability-badge"
+                        >
+                          {{capabilityLabel(cap)}}
+                        </span>
+                      </td>
                       <td>
                         <button
                           class="btn btn-danger btn-sm"
@@ -432,7 +463,7 @@
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label>{{t('models.realModel')}}</label>
+              <label>{{t('models.goModel')}}</label>
               <select v-model="newModel.real_model">
                 <option value="" disabled>
                   — {{t('models.select') || '请选择'}} —
@@ -508,11 +539,14 @@
         @click.self="closeKeyModal"
       >
         <div class="modal">
-          <h2>{{t('keys.addKey')}}</h2>
+          <h2>{{editingKeyId?t('keys.updateKey'):t('keys.addKey')}}</h2>
           <div class="form-row">
             <div class="form-group">
               <label>{{t('keys.keyValue')}}</label>
-              <input v-model="newKey.value" placeholder="sk-..." />
+              <input
+                v-model="newKey.value"
+                :placeholder="editingKeyId?t('keys.keepExisting'):'opencode_xxxx'"
+              />
             </div>
           </div>
           <div class="form-row">
@@ -544,7 +578,7 @@
               {{t('keys.cancel') || '取消'}}
             </button>
             <button class="btn btn-primary" @click="addKey">
-              {{t('keys.addBtn')}}
+              {{editingKeyId?t('keys.updateBtn'):t('keys.addBtn')}}
             </button>
           </div>
         </div>

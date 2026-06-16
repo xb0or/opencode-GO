@@ -526,6 +526,10 @@ select:focus {
   background: rgba(99, 102, 241, 0.15);
   color: var(--accent);
 }
+.capability-badge {
+  margin: 2px 4px 2px 0;
+  white-space: nowrap;
+}
 
 /* Login */
 .login-wrap {

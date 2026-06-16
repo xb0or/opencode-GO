@@ -46,6 +46,49 @@ createApp({
       setTimeout(() => (toast.show = false), duration);
     }
 
+    function fmtNumber(n) {
+      if (n === null || n === undefined || n === "") return "—";
+      const value = Number(n);
+      if (!Number.isFinite(value) || value <= 0) return "—";
+      return value.toLocaleString();
+    }
+
+    function fmtPrice(pricing, key) {
+      if (!pricing || !pricing[key]) return "—";
+      const perToken = Number(pricing[key]);
+      if (!Number.isFinite(perToken)) return pricing[key];
+      if (perToken < 0) return "—";
+      return "$" + (perToken * 1000000).toFixed(3) + "/1M";
+    }
+
+    function fmtCapabilities(model) {
+      const modalities = model.architecture?.input_modalities || [];
+      const params = model.supported_parameters || [];
+      const caps = [];
+      if (!modalities.length || modalities.includes("text")) caps.push("text");
+      if (modalities.includes("image")) caps.push("vision");
+      if (modalities.includes("video")) caps.push("video");
+      if (params.includes("tools")) caps.push("tools");
+      if (params.includes("structured_outputs") || params.includes("response_format"))
+        caps.push("structured");
+      if (params.includes("reasoning") || params.includes("include_reasoning"))
+        caps.push("reasoning");
+      return caps.length ? caps : ["text"];
+    }
+
+    function capabilityLabel(capability) {
+      return t("capabilities." + capability);
+    }
+
+    async function copyText(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(t("common.copied") + " ✓");
+      } catch (e) {
+        showToast(t("common.copyFailed"), "error");
+      }
+    }
+
     // ─── 国际化 ───────────────────────────────────────
     function t(key, params) {
       const keys = key.split(".");
@@ -170,6 +213,11 @@ createApp({
       confirmOk,
       showToast,
       fmtTime,
+      fmtNumber,
+      fmtPrice,
+      fmtCapabilities,
+      capabilityLabel,
+      copyText,
 
       // 仪表盘
       stats: dashboard.stats,
@@ -177,8 +225,10 @@ createApp({
       // 密钥管理
       keys: keys.keys,
       newKey: keys.newKey,
+      editingKeyId: keys.editingKeyId,
       showKeyModal: keys.showKeyModal,
       openKeyModal: keys.openKeyModal,
+      openKeySettings: keys.openKeySettings,
       closeKeyModal: keys.closeKeyModal,
       loadKeys: keys.load,
       addKey: keys.add,

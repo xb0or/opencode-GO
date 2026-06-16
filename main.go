@@ -27,6 +27,7 @@ func main() {
 
 	// Load model routes from DB; seed defaults if DB is empty.
 	loadModelRoutes()
+	config.EnrichModelsFromOpenRouter()
 
 	// Release mode in production.
 	if os.Getenv("GIN_MODE") == "" {

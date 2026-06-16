@@ -15,13 +15,19 @@ func listModels(c *gin.Context) {
 	out := make([]gin.H, 0, len(all))
 	for _, m := range all {
 		out = append(out, gin.H{
-			"id":       m.ID,
-			"object":   "model",
-			"created":  0,
-			"owned_by": "opencode-sw",
-			"upstream": string(m.Upstream),
-			"protocol": string(m.Protocol),
-			"group":    m.Group,
+			"id":                   m.ID,
+			"object":               "model",
+			"created":              0,
+			"owned_by":             "opencode-sw",
+			"name":                 m.Name,
+			"protocol":             string(m.Protocol),
+			"context_length":       m.ContextLen,
+			"context_len":          m.ContextLen,
+			"architecture":         m.Architecture,
+			"pricing":              m.Pricing,
+			"supported_parameters": m.SupportedParameters,
+			"description":          m.Description,
+			"knowledge_cutoff":     m.KnowledgeCutoff,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{

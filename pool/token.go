@@ -13,7 +13,7 @@ import (
 func GenerateToken() string {
 	b := make([]byte, 20)
 	_, _ = rand.Read(b)
-	return "ocsw-" + hex.EncodeToString(b)
+	return "sk-" + hex.EncodeToString(b)
 }
 
 // FindToken loads a gateway token by its value; returns nil if not found.

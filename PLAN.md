@@ -5,7 +5,7 @@
 构建一个 **Go + Gin** 实现的 OpenCode Go 多 KEY 聚合网关，部署在 **Zeabur**。核心价值：
 - 把 **Go（订阅套餐）** 上游、多账号多 KEY 聚合成**统一的通用端点**
 - 客户端用任意一种协议（Claude `/v1/messages`、OpenAI `/v1/chat/completions`、OpenAI Responses `/v1/responses`）调用，网关自动路由到正确上游并完成**全协议互转（含流式）**
-- 提供 **Web 管理面板**（增删 KEY、分组、统计、健康检查）和**多用户 Token 鉴权**
+- 提供 **Web 管理面板**（增删改 KEY、统计、健康检查）和**多用户 Token 鉴权**
 
 ---
 
@@ -89,16 +89,17 @@ opencode-sw/
 
 - 可在 Web 面板编辑，写回 SQLite，热生效
 - 客户端用任意协议请求任一模型，网关查表确定真实上游协议并转码
+- 启动时会尽力从 `https://openrouter.ai/api/v1/models` 按 model id/name/slug 匹配并补全上下文长度、价格、架构、能力参数等元数据；拉取失败不影响本地目录启动
 
 ### 3. KEY 池（`pool/key.go`）
 
-- 按 `分组(Go) × 模型` 维度组织；同一 KEY 可归属多组
+- 当前管理面板固定使用 Go KEY 池；后端仍按 group 字段调度，默认值为 `go`
 - 调度策略：轮询 / 加权 / 最少使用 / 故障优先回避
 - 健康检查：失败计数达阈值→冷却（退避）→自动探活恢复；并发安全（`sync.Mutex`）
 
 ### 4. 多用户 Token 鉴权（`api/middleware.go`）
 
-- 每个网关 Token：`{token, name, enabled, rate_limit, allowed_groups[], expires_at}`
+- 每个网关 Token：`{token, name, enabled, rate_limit, expires_at}`；新生成 token 使用 `sk-` 前缀
 - 客户端 `Authorization: Bearer <gateway_token>` 访问（也兼容 `x-api-key`）
 - 中间件校验→注入用户上下文→按限流放行→记录用量
 
@@ -106,7 +107,7 @@ opencode-sw/
 
 - 后端：JWT 登录；KEY/Token/模型/统计 的 REST API
 - 前端：轻量 SPA（Vite + Vue3），`go:embed` 打进单二进制
-- 页面：登录 / Dashboard（调用数/成功率/延迟）/ KEY 管理（增删改、分组、测试连通性）/ Token 管理 / 模型路由表 / 调用日志
+- 页面：登录 / Dashboard（调用数/成功率/延迟）/ KEY 管理（增删改、设置、冷却重置）/ Token 管理（创建、复制、删除）/ 模型路由表 / 调用日志
 
 ### 6. 通用端点
 
