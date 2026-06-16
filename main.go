@@ -27,6 +27,7 @@ func main() {
 
 	// Load model routes from DB; seed defaults if DB is empty.
 	loadModelRoutes()
+	loadModelMappings()
 	config.EnrichModelsFromOpenRouter()
 
 	// Release mode in production.
@@ -56,9 +57,29 @@ func main() {
 	log.Printf("opencode-sw listening on %s", addr)
 	log.Printf("  go  base url : %s", cfg.GoBaseURL)
 	log.Printf("  models       : %d registered", len(config.AllModels()))
+	log.Printf("  mappings     : %d configured", len(config.AllModelMappings()))
 	if err := root.Run(addr); err != nil {
 		log.Fatalf("server failed: %v", err)
 	}
+}
+
+// loadModelMappings loads persisted model rewrite rules, then overlays optional
+// env/file rules so runtime config can override DB-managed defaults.
+func loadModelMappings() {
+	rows, err := store.LoadModelMappings()
+	if err != nil {
+		log.Printf("warn: cannot load model mappings: %v", err)
+		config.LoadModelMappings()
+		return
+	}
+	mappings := map[string]string{}
+	for _, r := range rows {
+		mappings[r.SourceModel] = r.TargetModel
+	}
+	if len(mappings) > 0 {
+		config.RegisterModelMappings(mappings)
+	}
+	config.LoadModelMappings()
 }
 
 // loadModelRoutes loads model routes from DB, seeding defaults if empty.

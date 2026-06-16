@@ -24,6 +24,8 @@
     { "key": "ADMIN_PASSWORD", "description": "Admin panel password (default: admin)" },
     { "key": "JWT_SECRET", "description": "Secret for admin JWT signing" },
     { "key": "GO_BASE_URL", "value": "https://opencode.ai/zen/go" },
+    { "key": "MODEL_MAPPINGS", "description": "Optional JSON object for model rewriting, e.g. {\"gpt-5.5\":\"glm-51\"}" },
+    { "key": "MODEL_MAPPING_FILE", "description": "Optional path to a JSON model mapping file" },
     { "key": "UPSTREAM_TIMEOUT", "value": "120" }
   ]
 }

@@ -145,6 +145,13 @@
                 <span class="icon" v-html="icons.model"></span
                 ><span>{{t('nav.models')}}</span>
               </a>
+              <a
+                :class="{active:page==='mappings'}"
+                @click="page='mappings';loadMappings()"
+              >
+                <span class="icon" v-html="icons.mapping"></span
+                ><span>{{t('nav.mappings')}}</span>
+              </a>
             </nav>
           </aside>
 
@@ -430,9 +437,96 @@
                 </div>
               </div>
             </div>
+
+            <!-- Model Mappings -->
+            <div v-if="page==='mappings'">
+              <h1 class="page-title">
+                {{t('mappings.title')}}
+                <button class="btn btn-primary" @click="openMappingModal">
+                  {{t('mappings.addMapping')}}
+                </button>
+              </h1>
+              <div class="card">
+                <h2>{{t('mappings.registered',{count:mappings.length})}}</h2>
+                <p class="hint-text">{{t('mappings.description')}}</p>
+                <div class="table-wrap">
+                  <table>
+                    <tr>
+                      <th>{{t('table.sourceModel')}}</th>
+                      <th>{{t('table.targetModel')}}</th>
+                      <th>{{t('table.updatedAt')}}</th>
+                      <th>{{t('table.actions')}}</th>
+                    </tr>
+                    <tr v-for="m in mappings" :key="m.source_model">
+                      <td><code>{{m.source_model}}</code></td>
+                      <td>
+                        <span class="mapping-arrow">
+                          <code>{{m.target_model}}</code>
+                        </span>
+                      </td>
+                      <td style="font-size: 12px">
+                        {{fmtTime(m.updated_at)}}
+                      </td>
+                      <td class="btn-group">
+                        <button
+                          class="btn btn-ghost btn-sm"
+                          @click="openMappingSettings(m)"
+                        >
+                          {{t('mappings.settings')}}
+                        </button>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          @click="deleteMapping(m.source_model)"
+                        >
+                          {{t('mappings.delete')}}
+                        </button>
+                      </td>
+                    </tr>
+                  </table>
+                </div>
+              </div>
+            </div>
           </main>
         </div>
         <!-- /app-body -->
+      </div>
+
+      <!-- Model Mapping Add/Edit Modal -->
+      <div
+        v-if="showMappingModal"
+        class="modal-overlay"
+        @click.self="closeMappingModal"
+      >
+        <div class="modal">
+          <h2>
+            {{editingSource?t('mappings.updateMapping'):t('mappings.addMapping')}}
+          </h2>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('mappings.sourceModel')}}</label>
+              <input
+                v-model="newMapping.source_model"
+                placeholder="gpt-5.5"
+              />
+            </div>
+            <div class="form-group">
+              <label>{{t('mappings.targetModel')}}</label>
+              <input
+                v-model="newMapping.target_model"
+                placeholder="glm-51"
+              />
+            </div>
+          </div>
+          <p class="hint-text">{{t('mappings.modalHint')}}</p>
+          <div class="btn-group">
+            <button class="btn btn-ghost" @click="closeMappingModal">
+              {{t('mappings.cancel')}}
+            </button>
+            <button class="btn btn-primary" @click="addMapping">
+              {{editingSource?t('mappings.updateBtn'):t('mappings.addBtn')}}
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Model Add Modal -->
