@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -34,6 +35,22 @@ func TestUpstreamAuthInjectionReplacesClientAuth(t *testing.T) {
 	}
 	if got := dst.Get("Api-Key"); got != "" {
 		t.Fatalf("Api-Key should not be forwarded, got %q", got)
+	}
+	if got, want := dst.Get("Content-Type"), "application/json"; got != want {
+		t.Fatalf("Content-Type = %q, want %q", got, want)
+	}
+}
+
+func TestCopyForwardHeadersDropsAcceptEncoding(t *testing.T) {
+	src := http.Header{}
+	src.Set("Accept-Encoding", "gzip, br")
+	src.Set("Content-Type", "application/json")
+
+	dst := http.Header{}
+	copyForwardHeaders(dst, src)
+
+	if got := dst.Get("Accept-Encoding"); got != "" {
+		t.Fatalf("Accept-Encoding should not be forwarded, got %q", got)
 	}
 	if got, want := dst.Get("Content-Type"), "application/json"; got != want {
 		t.Fatalf("Content-Type = %q, want %q", got, want)
@@ -338,6 +355,68 @@ func TestProxyInvalidJSONIsForwardedUnchanged(t *testing.T) {
 	}
 	if got := w.Header().Get("Content-Type"); got != "text/event-stream" {
 		t.Fatalf("Content-Type = %q, want text/event-stream", got)
+	}
+}
+
+func TestProxyStripsAcceptEncodingAndDecodesGzipUpstreamResponse(t *testing.T) {
+	if err := store.InitForTest("file:api_gzip_decode?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept-Encoding"); got == "" {
+			t.Log("transport added Accept-Encoding automatically")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		gz := gzip.NewWriter(w)
+		_, _ = gz.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+		_ = gz.Close()
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "gzip-chat-model",
+		Name:      "Gzip Chat Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	tok, err := pool.CreateToken("gzip-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "upstream-key",
+		Group:   "go",
+		Label:   "test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"gzip-chat-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"content":"hello"`) {
+		t.Fatalf("gzip upstream response was not decoded: %s", w.Body.String())
 	}
 }
 
