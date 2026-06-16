@@ -120,78 +120,207 @@
         <div class="app-body">
           <aside class="sidebar">
             <nav>
-              <a :class="{active:page==='dashboard'}" @click="page='dashboard'">
-                <span class="icon" v-html="icons.dashboard"></span
-                ><span>{{t('nav.dashboard')}}</span>
+              <a :class="{active:page==='dashboard'}" @click="openPage('dashboard')">
+                <span class="icon" v-html="icons.dashboard"></span><span>{{t('nav.dashboard')}}</span>
               </a>
-              <a
-                :class="{active:page==='keys'}"
-                @click="page='keys';loadKeys()"
-              >
-                <span class="icon" v-html="icons.key"></span
-                ><span>{{t('nav.keys')}}</span>
+              <a :class="{active:page==='ops'}" @click="openPage('ops')">
+                <span class="icon" v-html="icons.ops"></span><span>{{t('nav.ops')}}</span>
               </a>
-              <a
-                :class="{active:page==='tokens'}"
-                @click="page='tokens';loadTokens()"
-              >
-                <span class="icon" v-html="icons.token"></span
-                ><span>{{t('nav.tokens')}}</span>
+              <a :class="{active:page==='usage'}" @click="openPage('usage')">
+                <span class="icon" v-html="icons.usage"></span><span>{{t('nav.usage')}}</span>
               </a>
-              <a
-                :class="{active:page==='models'}"
-                @click="page='models';loadModels()"
-              >
-                <span class="icon" v-html="icons.model"></span
-                ><span>{{t('nav.models')}}</span>
+              <a :class="{active:page==='keys'}" @click="openPage('keys')">
+                <span class="icon" v-html="icons.key"></span><span>{{t('nav.keys')}}</span>
+              </a>
+              <a :class="{active:page==='tokens'}" @click="openPage('tokens')">
+                <span class="icon" v-html="icons.token"></span><span>{{t('nav.tokens')}}</span>
+              </a>
+              <a :class="{active:page==='models'}" @click="openPage('models')">
+                <span class="icon" v-html="icons.model"></span><span>{{t('nav.models')}}</span>
+              </a>
+              <a :class="{active:page==='mappings'}" @click="openPage('mappings')">
+                <span class="icon" v-html="icons.mapping"></span><span>{{t('nav.mappings')}}</span>
               </a>
             </nav>
           </aside>
 
           <main class="main">
             <!-- Dashboard -->
-            <div v-if="page==='dashboard'">
-              <h1>{{t('dashboard.title')}}</h1>
-              <div class="stats-grid">
-                <div class="stat-card">
-                  <div class="label">{{t('dashboard.totalCalls')}}</div>
-                  <div class="value accent">{{stats.total_calls||0}}</div>
+            <div v-if="page==='dashboard'" class="dashboard-page">
+              <div class="page-hero">
+                <div>
+                  <div class="eyebrow">{{t('dashboard.eyebrow')}}</div>
+                  <h1>{{t('dashboard.title')}}</h1>
+                  <p>{{t('dashboard.subtitle')}}</p>
                 </div>
-                <div class="stat-card">
-                  <div class="label">{{t('dashboard.apiKeys')}}</div>
-                  <div class="value green">{{stats.keys||0}}</div>
+                <button class="btn btn-primary" @click="openPage('dashboard')">
+                  {{t('common.refresh')}}
+                </button>
+              </div>
+
+              <div class="ops-score-card">
+                <div class="score-ring" :style="{'--score': healthScore(stats)}">
+                  <span>{{healthScore(stats)}}</span>
                 </div>
-                <div class="stat-card">
-                  <div class="label">{{t('dashboard.tokens')}}</div>
-                  <div class="value blue">{{stats.tokens||0}}</div>
+                <div>
+                  <div class="label">{{t('dashboard.healthScore')}}</div>
+                  <div class="score-title">{{healthScore(stats)>=90?t('dashboard.healthy'):healthScore(stats)>=70?t('dashboard.degraded'):t('dashboard.unstable')}}</div>
+                  <p>{{t('dashboard.healthHint')}}</p>
                 </div>
-                <div class="stat-card">
-                  <div class="label">{{t('dashboard.avgDuration')}}</div>
-                  <div class="value yellow">
-                    {{(stats.avg_duration_ms||0).toFixed(0)}}ms
+                <div class="score-metrics">
+                  <span>{{t('dashboard.successRate')}} <b>{{formatPercent(stats.success_rate)}}</b></span>
+                  <span>{{t('dashboard.errorRate')}} <b>{{formatPercent(stats.error_rate)}}</b></span>
+                  <span>RPM <b>{{stats.rpm||0}}</b></span>
+                </div>
+              </div>
+
+              <div class="stats-grid stats-grid-dense">
+                <div class="stat-card stat-card-rich dashboard-metric-card">
+                  <div class="metric-card-head">
+                    <div class="stat-icon blue" v-html="icons.token"></div>
+                    <div class="metric-card-copy">
+                      <div class="label">{{t('dashboard.gatewayTokens')}}</div>
+                      <div class="value blue">{{stats.tokens||0}}</div>
+                      <div class="hint">{{stats.enabled_tokens||0}} {{t('dashboard.enabled')}}</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="stat-card stat-card-rich dashboard-metric-card">
+                  <div class="metric-card-head">
+                    <div class="stat-icon blue" v-html="icons.key"></div>
+                    <div class="metric-card-copy">
+                      <div class="label">{{t('dashboard.apiKeys')}}</div>
+                      <div class="value">{{stats.keys||0}}</div>
+                      <div class="hint green">{{stats.enabled_keys||0}} {{t('dashboard.enabled')}}</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="stat-card stat-card-rich dashboard-metric-card">
+                  <div class="metric-card-head">
+                    <div class="stat-icon green" v-html="icons.usage"></div>
+                    <div class="metric-card-copy">
+                      <div class="label">{{t('dashboard.todayRequests')}}</div>
+                      <div class="value">{{compactNumber(stats.today_calls)}}</div>
+                      <div class="hint">{{t('dashboard.total')}}: {{compactNumber(stats.total_calls)}}</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="stat-card stat-card-rich dashboard-metric-card">
+                  <div class="metric-card-head">
+                    <div class="stat-icon purple">$</div>
+                    <div class="metric-card-copy">
+                      <div class="label">{{t('dashboard.todaySpend')}}</div>
+                      <div class="value metric-pair">
+                        <span class="accent">{{formatCost(stats.today_actual_cost)}}</span>
+                        <small>/ {{formatCost(stats.today_account_cost)}}</small>
+                      </div>
+                      <div class="hint">{{t('dashboard.total')}}: {{formatCost(stats.total_actual_cost)}} / {{formatCost(stats.total_account_cost)}}</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="stat-card stat-card-rich dashboard-metric-card">
+                  <div class="metric-card-head">
+                    <div class="stat-icon yellow">▧</div>
+                    <div class="metric-card-copy">
+                      <div class="label">{{t('dashboard.todayToken')}}</div>
+                      <div class="value">{{formatTokens(stats.today_total_tokens)}}</div>
+                      <div class="hint metric-stack">
+                        <span>{{t('dashboard.input')}}: {{formatTokens(stats.today_input_tokens)}} / {{t('dashboard.output')}}: {{formatTokens(stats.today_output_tokens)}}</span>
+                        <span>{{t('dashboard.cache')}}: {{formatTokens(stats.today_cache_tokens)}}（{{t('dashboard.cacheRead')}} {{formatTokens(stats.today_cache_read_tokens)}} / {{t('dashboard.cacheWrite')}} {{formatTokens(stats.today_cache_creation_tokens)}}）</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="stat-card stat-card-rich dashboard-metric-card">
+                  <div class="metric-card-head">
+                    <div class="stat-icon purple">◉</div>
+                    <div class="metric-card-copy">
+                      <div class="label">{{t('dashboard.totalToken')}}</div>
+                      <div class="value">{{formatTokens(stats.total_tokens)}}</div>
+                      <div class="hint metric-stack">
+                        <span>{{t('dashboard.input')}}: {{formatTokens(stats.total_input_tokens)}} / {{t('dashboard.output')}}: {{formatTokens(stats.total_output_tokens)}}</span>
+                        <span>{{t('dashboard.cache')}}: {{formatTokens(stats.total_cache_tokens)}}（{{t('dashboard.cacheRead')}} {{formatTokens(stats.total_cache_read_tokens)}} / {{t('dashboard.cacheWrite')}} {{formatTokens(stats.total_cache_creation_tokens)}}）</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="stat-card stat-card-rich dashboard-metric-card">
+                  <div class="metric-card-head">
+                    <div class="stat-icon purple">⚡</div>
+                    <div class="metric-card-copy">
+                      <div class="label">{{t('dashboard.performance')}}</div>
+                      <div class="value metric-with-unit"><span>{{stats.rpm||0}}</span><small>RPM</small></div>
+                      <div class="hint"><span class="accent">{{formatTokens(stats.tpm)}}</span> TPM</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="stat-card stat-card-rich dashboard-metric-card">
+                  <div class="metric-card-head">
+                    <div class="stat-icon red">◷</div>
+                    <div class="metric-card-copy">
+                      <div class="label">{{t('dashboard.averageResponse')}}</div>
+                      <div class="value">{{formatDuration(stats.avg_duration_ms)}}</div>
+                      <div class="hint">{{t('dashboard.averageTime')}}</div>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              <div
-                style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px"
-              >
-                <div class="card">
-                  <h2>{{t('dashboard.callsByModel')}}</h2>
-                  <div class="chart-container">
-                    <canvas id="chartModel"></canvas>
+              <div class="chart-grid wide-left">
+                <div class="card chart-card">
+                  <div class="card-title-row">
+                    <h2>{{t('dashboard.trafficTrend')}}</h2>
+                    <span class="pill">24h</span>
+                  </div>
+                  <div class="chart-container chart-tall">
+                    <canvas id="chartTraffic"></canvas>
                   </div>
                 </div>
-                <div class="card">
-                  <h2>{{t('dashboard.callsByProtocol')}}</h2>
-                  <div class="chart-container">
+                <div class="card chart-card">
+                  <div class="card-title-row">
+                    <h2>{{t('dashboard.callsByProtocol')}}</h2>
+                    <span class="pill">{{t('dashboard.protocolMix')}}</span>
+                  </div>
+                  <div class="chart-container chart-tall">
                     <canvas id="chartProtocol"></canvas>
                   </div>
                 </div>
               </div>
 
-              <div class="card" style="margin-top: 20px">
-                <h2>{{t('dashboard.recentCalls')}}</h2>
+              <div class="chart-grid">
+                <div class="card chart-card">
+                  <div class="card-title-row">
+                    <h2>{{t('dashboard.callsByModel')}}</h2>
+                    <span class="pill">Top 10</span>
+                  </div>
+                  <div class="chart-container chart-tall">
+                    <canvas id="chartModel"></canvas>
+                  </div>
+                </div>
+                <div class="card">
+                  <div class="card-title-row">
+                    <h2>{{t('dashboard.errorRadar')}}</h2>
+                    <button class="btn btn-ghost btn-sm" @click="openPage('ops')">{{t('nav.ops')}}</button>
+                  </div>
+                  <div v-if="recentErrors(stats).length" class="event-list compact-events">
+                    <div class="event-item" v-for="l in recentErrors(stats)" :key="'err-'+l.id">
+                      <span class="event-dot danger"></span>
+                      <div>
+                        <b>{{l.model||'?'}}</b>
+                        <p>{{l.error||statusLabel(l.status_code)}}</p>
+                      </div>
+                      <span class="badge badge-red">{{l.status_code}}</span>
+                    </div>
+                  </div>
+                  <div v-else class="empty-state">{{t('dashboard.noErrors')}}</div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-title-row">
+                  <h2>{{t('dashboard.recentCalls')}}</h2>
+                  <button class="btn btn-ghost btn-sm" @click="openPage('usage')">{{t('dashboard.viewAll')}}</button>
+                </div>
                 <div class="table-wrap">
                   <table>
                     <tr>
@@ -201,37 +330,260 @@
                       <th>{{t('table.status')}}</th>
                       <th>{{t('table.duration')}}</th>
                       <th>{{t('table.stream')}}</th>
+                      <th>{{t('table.tokens')}}</th>
                       <th>{{t('table.token')}}</th>
                       <th>{{t('table.error')}}</th>
                     </tr>
-                    <tr v-for="l in (stats.recent||[])" :key="l.id">
-                      <td style="white-space: nowrap; font-size: 12px">
-                        {{fmtTime(l.created_at)}}
+                    <tr v-for="l in (stats.recent||[]).slice(0,12)" :key="l.id">
+                      <td class="nowrap muted-cell">{{fmtTime(l.created_at, locale)}}</td>
+                      <td><span class="badge badge-blue">{{l.model||'?'}}</span></td>
+                      <td>{{l.protocol||'?'}}</td>
+                      <td><span :class="'badge '+(l.status_code<400?'badge-green':'badge-red')">{{l.status_code}}</span></td>
+                      <td>{{formatDuration(l.duration_ms)}}</td>
+                      <td>{{l.stream?'?':'?'}}</td>
+                      <td class="token-cell">
+                        <b>{{formatTokens(l.total_tokens)}}</b>
+                        <small>I {{formatTokens(l.input_tokens)}} / O {{formatTokens(l.output_tokens)}} / C {{formatTokens(l.cache_tokens)}}</small>
                       </td>
-                      <td><span class="badge badge-blue">{{l.model}}</span></td>
-                      <td>{{l.protocol}}</td>
-                      <td>
-                        <span
-                          :class="'badge '+(l.status_code<400?'badge-green':'badge-red')"
-                          >{{l.status_code}}</span
-                        >
-                      </td>
-                      <td>{{l.duration_ms}}ms</td>
-                      <td>{{l.stream?'✓':'—'}}</td>
-                      <td style="font-size: 12px">{{l.token_name||'—'}}</td>
-                      <td
-                        style="
-                          max-width: 200px;
-                          overflow: hidden;
-                          text-overflow: ellipsis;
-                          font-size: 12px;
-                          color: var(--red);
-                        "
-                      >
-                        {{l.error}}
-                      </td>
+                      <td class="muted-cell">{{l.token_name||'?'}}</td>
+                      <td class="error-cell">{{l.error||'?'}}</td>
                     </tr>
                   </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Ops Monitoring -->
+            <div v-if="page==='ops'" class="ops-page">
+              <div class="page-hero ops-hero">
+                <div>
+                  <div class="eyebrow">{{t('ops.eyebrow')}}</div>
+                  <h1>{{t('ops.title')}}</h1>
+                  <p>{{t('ops.subtitle')}}</p>
+                </div>
+                <div class="hero-actions">
+                  <span class="pill">{{t('ops.updated')}} {{opsUpdatedLabel(locale)}}</span>
+                  <button class="btn btn-primary" @click="loadOps" :disabled="opsLoading">{{opsLoading?t('ops.loading'):t('common.refresh')}}</button>
+                </div>
+              </div>
+
+              <div class="ops-score-card">
+                <div class="score-ring" :style="{'--score': opsHealthScore()}">
+                  <span>{{opsHealthScore()}}</span>
+                </div>
+                <div>
+                  <div class="label">{{t('ops.gatewayHealth')}}</div>
+                  <div class="score-title">{{opsHealthScore()>=90?t('dashboard.healthy'):opsHealthScore()>=70?t('dashboard.degraded'):t('dashboard.unstable')}}</div>
+                  <p>{{t('ops.healthHint')}}</p>
+                </div>
+                <div class="score-metrics">
+                  <span>{{t('ops.availableKeys')}} <b>{{opsPool().available||0}}/{{opsPool().total||0}}</b></span>
+                  <span>{{t('ops.cooldownKeys')}} <b>{{opsPool().cooldown||0}}</b></span>
+                  <span>{{t('ops.errorRate')}} <b>{{opsPercent(opsStats.error_rate)}}</b></span>
+                </div>
+              </div>
+
+              <div class="stats-grid stats-grid-dense">
+                <div class="stat-card stat-card-rich">
+                  <div class="stat-icon green">SLA</div>
+                  <div class="label">{{t('ops.successRate')}}</div>
+                  <div class="value green">{{opsPercent(opsStats.success_rate)}}</div>
+                  <div class="hint">{{opsStats.success_calls||0}} / {{opsStats.total_calls||0}}</div>
+                </div>
+                <div class="stat-card stat-card-rich">
+                  <div class="stat-icon blue">QPS</div>
+                  <div class="label">{{t('ops.realtimeTraffic')}}</div>
+                  <div class="value blue">{{opsRate(opsStats.qps)}}</div>
+                  <div class="hint">RPM {{opsStats.rpm||0}}</div>
+                </div>
+                <div class="stat-card stat-card-rich">
+                  <div class="stat-icon yellow">P99</div>
+                  <div class="label">{{t('ops.tailLatency')}}</div>
+                  <div class="value yellow">{{opsDuration(opsStats.p99_duration_ms)}}</div>
+                  <div class="hint">P50 {{opsDuration(opsStats.p50_duration_ms)}} ? P95 {{opsDuration(opsStats.p95_duration_ms)}}</div>
+                </div>
+                <div class="stat-card stat-card-rich">
+                  <div class="stat-icon red">ERR</div>
+                  <div class="label">{{t('ops.errorCount')}}</div>
+                  <div class="value red">{{opsStats.error_calls||0}}</div>
+                  <div class="hint">{{t('ops.recentWindow')}}</div>
+                </div>
+              </div>
+
+              <div class="chart-grid wide-left">
+                <div class="card chart-card">
+                  <div class="card-title-row">
+                    <h2>{{t('ops.throughputTrend')}}</h2>
+                    <span class="pill">success / errors</span>
+                  </div>
+                  <div class="chart-container chart-tall"><canvas id="chartOpsThroughput"></canvas></div>
+                </div>
+                <div class="card chart-card">
+                  <div class="card-title-row">
+                    <h2>{{t('ops.errorDistribution')}}</h2>
+                    <span class="pill">HTTP</span>
+                  </div>
+                  <div class="chart-container chart-tall"><canvas id="chartErrors"></canvas></div>
+                </div>
+              </div>
+
+              <div class="chart-grid">
+                <div class="card chart-card">
+                  <div class="card-title-row">
+                    <h2>{{t('ops.latencyHistogram')}}</h2>
+                    <span class="pill">duration_ms</span>
+                  </div>
+                  <div class="chart-container chart-tall"><canvas id="chartLatency"></canvas></div>
+                </div>
+                <div class="card">
+                  <div class="card-title-row">
+                    <h2>{{t('ops.errorEvents')}}</h2>
+                    <button class="btn btn-ghost btn-sm" @click="openPage('usage')">{{t('nav.usage')}}</button>
+                  </div>
+                  <div v-if="opsRecentErrors().length" class="event-list">
+                    <div class="event-item" v-for="l in opsRecentErrors()" :key="'ops-'+l.id">
+                      <span class="event-dot danger"></span>
+                      <div>
+                        <b>{{l.model||'?'}} ? {{l.protocol||'?'}}</b>
+                        <p>{{l.error||('HTTP '+l.status_code)}}</p>
+                        <small>{{fmtTime(l.created_at, locale)}} ? {{opsDuration(l.duration_ms)}}</small>
+                      </div>
+                      <span class="badge badge-red">{{l.status_code}}</span>
+                    </div>
+                  </div>
+                  <div v-else class="empty-state">{{t('ops.noErrorEvents')}}</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Usage Records -->
+            <div v-if="page==='usage'" class="usage-page">
+              <div class="page-hero">
+                <div>
+                  <div class="eyebrow">{{t('usage.eyebrow')}}</div>
+                  <h1>{{t('usage.title')}}</h1>
+                  <p>{{t('usage.subtitle')}}</p>
+                </div>
+                <button class="btn btn-primary" @click="loadUsage" :disabled="usageLoading">{{usageLoading?t('usage.loading'):t('common.refresh')}}</button>
+              </div>
+
+              <div class="stats-grid stats-grid-dense">
+                <div class="stat-card stat-card-rich">
+                  <div class="label">{{t('usage.visibleRows')}}</div>
+                  <div class="value accent">{{usageSummary.visible}}</div>
+                </div>
+                <div class="stat-card stat-card-rich">
+                  <div class="label">{{t('usage.successRows')}}</div>
+                  <div class="value green">{{usageSummary.success}}</div>
+                </div>
+                <div class="stat-card stat-card-rich">
+                  <div class="label">{{t('usage.errorRows')}}</div>
+                  <div class="value red">{{usageSummary.errors}}</div>
+                </div>
+                <div class="stat-card stat-card-rich">
+                  <div class="label">{{t('usage.pageAvgLatency')}}</div>
+                  <div class="value yellow">{{usageDuration(usageSummary.avg_duration_ms)}}</div>
+                </div>
+                <div class="stat-card stat-card-rich">
+                  <div class="label">{{t('usage.pageTokens')}}</div>
+                  <div class="value blue">{{usageTokens(usageSummary.total_tokens)}}</div>
+                  <div class="hint">{{t('dashboard.input')}} {{usageTokens(usageSummary.input_tokens)}} / {{t('dashboard.output')}} {{usageTokens(usageSummary.output_tokens)}}</div>
+                </div>
+                <div class="stat-card stat-card-rich">
+                  <div class="label">{{t('usage.pageCacheTokens')}}</div>
+                  <div class="value accent">{{usageTokens(usageSummary.cache_tokens)}}</div>
+                  <div class="hint">{{t('dashboard.cacheRead')}} {{usageTokens(usageSummary.cache_read_tokens)}} / {{t('dashboard.cacheWrite')}} {{usageTokens(usageSummary.cache_creation_tokens)}}</div>
+                </div>
+                <div class="stat-card stat-card-rich">
+                  <div class="label">{{t('usage.pageCost')}}</div>
+                  <div class="value accent">{{usageCost(usageSummary.total_cost)}}</div>
+                  <div class="hint">{{t('dashboard.todaySpend')}} {{usageCost(usageSummary.actual_cost)}} / {{usageCost(usageSummary.account_cost)}}</div>
+                </div>
+              </div>
+
+              <div class="card filter-card">
+                <div class="form-row usage-filter-row">
+                  <div class="form-group">
+                    <label>{{t('usage.search')}}</label>
+                    <input v-model="usageFilters.q" :placeholder="t('usage.searchPlaceholder')" @keyup.enter="applyUsageFilters" />
+                  </div>
+                  <div class="form-group compact-select">
+                    <label>{{t('usage.status')}}</label>
+                    <select v-model="usageFilters.status" @change="applyUsageFilters">
+                      <option value="">{{t('usage.all')}}</option>
+                      <option value="success">{{t('usage.success')}}</option>
+                      <option value="error">{{t('usage.error')}}</option>
+                    </select>
+                  </div>
+                  <div class="form-group compact-select">
+                    <label>{{t('table.protocol')}}</label>
+                    <input v-model="usageFilters.protocol" placeholder="chat/messages" @keyup.enter="applyUsageFilters" />
+                  </div>
+                  <div class="form-group compact-select">
+                    <label>{{t('table.stream')}}</label>
+                    <select v-model="usageFilters.stream" @change="applyUsageFilters">
+                      <option value="">{{t('usage.all')}}</option>
+                      <option value="true">stream</option>
+                      <option value="false">sync</option>
+                    </select>
+                  </div>
+                  <div class="form-group compact-select">
+                    <label>{{t('usage.pageSize')}}</label>
+                    <select v-model.number="usageFilters.pageSize" @change="applyUsageFilters">
+                      <option :value="25">25</option>
+                      <option :value="50">50</option>
+                      <option :value="100">100</option>
+                    </select>
+                  </div>
+                  <div class="btn-group filter-actions">
+                    <button class="btn btn-primary" @click="applyUsageFilters">{{t('usage.apply')}}</button>
+                    <button class="btn btn-ghost" @click="resetUsageFilters">{{t('usage.reset')}}</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-title-row">
+                  <h2>{{t('usage.records')}}</h2>
+                  <span class="pill">{{usagePageRange()}}</span>
+                </div>
+                <div class="table-wrap">
+                  <table>
+                    <tr>
+                      <th>{{t('table.time')}}</th>
+                      <th>{{t('table.model')}}</th>
+                      <th>{{t('table.protocol')}}</th>
+                      <th>{{t('table.status')}}</th>
+                      <th>{{t('table.duration')}}</th>
+                      <th>{{t('table.stream')}}</th>
+                      <th>{{t('table.tokens')}}</th>
+                      <th>{{t('table.cost')}}</th>
+                      <th>{{t('table.token')}}</th>
+                      <th>{{t('table.error')}}</th>
+                    </tr>
+                    <tr v-for="l in usageLogs" :key="'usage-'+l.id">
+                      <td class="nowrap muted-cell">{{fmtTime(l.created_at, locale)}}</td>
+                      <td><span class="badge badge-blue">{{l.model||'?'}}</span></td>
+                      <td>{{l.protocol||'?'}}</td>
+                      <td><span :class="'badge '+(l.status_code<400?'badge-green':'badge-red')">{{l.status_code}}</span></td>
+                      <td>{{usageDuration(l.duration_ms)}}</td>
+                      <td>{{l.stream?'?':'?'}}</td>
+                      <td class="token-cell">
+                        <b>{{usageTokens(l.total_tokens)}}</b>
+                        <small>{{t('dashboard.input')}} {{usageTokens(l.input_tokens)}} / {{t('dashboard.output')}} {{usageTokens(l.output_tokens)}}</small>
+                        <small>{{t('dashboard.cache')}} {{usageTokens(l.cache_tokens)}} · {{t('dashboard.cacheRead')}} {{usageTokens(l.cache_read_tokens)}} / {{t('dashboard.cacheWrite')}} {{usageTokens(l.cache_creation_tokens)}}</small>
+                      </td>
+                      <td class="nowrap muted-cell">{{usageCost(l.total_cost)}}</td>
+                      <td class="muted-cell">{{l.token_name||'?'}}</td>
+                      <td class="error-cell">{{l.error||'?'}}</td>
+                    </tr>
+                  </table>
+                  <div v-if="!usageLoading && usageLogs.length===0" class="empty-state">{{t('usage.noRecords')}}</div>
+                </div>
+                <div class="pagination-bar">
+                  <button class="btn btn-ghost btn-sm" @click="usagePrevPage" :disabled="usagePagination.page<=1">{{t('usage.prev')}}</button>
+                  <span>{{usagePageRange()}}</span>
+                  <button class="btn btn-ghost btn-sm" @click="usageNextPage" :disabled="usagePagination.page*usagePagination.page_size>=usagePagination.total">{{t('usage.next')}}</button>
                 </div>
               </div>
             </div>
@@ -430,9 +782,96 @@
                 </div>
               </div>
             </div>
+
+            <!-- Model Mappings -->
+            <div v-if="page==='mappings'">
+              <h1 class="page-title">
+                {{t('mappings.title')}}
+                <button class="btn btn-primary" @click="openMappingModal">
+                  {{t('mappings.addMapping')}}
+                </button>
+              </h1>
+              <div class="card">
+                <h2>{{t('mappings.registered',{count:mappings.length})}}</h2>
+                <p class="hint-text">{{t('mappings.description')}}</p>
+                <div class="table-wrap">
+                  <table>
+                    <tr>
+                      <th>{{t('table.sourceModel')}}</th>
+                      <th>{{t('table.targetModel')}}</th>
+                      <th>{{t('table.updatedAt')}}</th>
+                      <th>{{t('table.actions')}}</th>
+                    </tr>
+                    <tr v-for="m in mappings" :key="m.source_model">
+                      <td><code>{{m.source_model}}</code></td>
+                      <td>
+                        <span class="mapping-arrow">
+                          <code>{{m.target_model}}</code>
+                        </span>
+                      </td>
+                      <td style="font-size: 12px">
+                        {{fmtTime(m.updated_at)}}
+                      </td>
+                      <td class="btn-group">
+                        <button
+                          class="btn btn-ghost btn-sm"
+                          @click="openMappingSettings(m)"
+                        >
+                          {{t('mappings.settings')}}
+                        </button>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          @click="deleteMapping(m.source_model)"
+                        >
+                          {{t('mappings.delete')}}
+                        </button>
+                      </td>
+                    </tr>
+                  </table>
+                </div>
+              </div>
+            </div>
           </main>
         </div>
         <!-- /app-body -->
+      </div>
+
+      <!-- Model Mapping Add/Edit Modal -->
+      <div
+        v-if="showMappingModal"
+        class="modal-overlay"
+        @click.self="closeMappingModal"
+      >
+        <div class="modal">
+          <h2>
+            {{editingSource?t('mappings.updateMapping'):t('mappings.addMapping')}}
+          </h2>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('mappings.sourceModel')}}</label>
+              <input
+                v-model="newMapping.source_model"
+                placeholder="gpt-5.5"
+              />
+            </div>
+            <div class="form-group">
+              <label>{{t('mappings.targetModel')}}</label>
+              <input
+                v-model="newMapping.target_model"
+                placeholder="glm-51"
+              />
+            </div>
+          </div>
+          <p class="hint-text">{{t('mappings.modalHint')}}</p>
+          <div class="btn-group">
+            <button class="btn btn-ghost" @click="closeMappingModal">
+              {{t('mappings.cancel')}}
+            </button>
+            <button class="btn btn-primary" @click="addMapping">
+              {{editingSource?t('mappings.updateBtn'):t('mappings.addBtn')}}
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Model Add Modal -->

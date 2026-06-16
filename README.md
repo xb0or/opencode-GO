@@ -13,6 +13,7 @@ It aggregates many OpenCode Go API keys behind a single set of universal endpoin
   - Use `/v1/responses` to talk to DeepSeek (Chat protocol)
   - All conversions work with **streaming SSE** too
 - 🧭 **Model routing table** mapping gateway model ids → real upstream model + protocol
+- 🗺️ **Model Mapping** — optionally rewrite requested `model` names before upstream forwarding (with Admin UI and recalculated `Content-Length`)
 - 🌐 **Universal endpoints**:
   - `POST /v1/chat/completions` — OpenAI Chat Completions
   - `POST /v1/messages` — Anthropic Messages
@@ -109,6 +110,41 @@ Any client protocol can reach any upstream model. The gateway automatically conv
 
 Streaming SSE is fully supported in all combinations.
 
+## Model Mapping
+
+Model Mapping lets the gateway rewrite the client-requested `model` before
+forwarding to the upstream provider. For example, a client can send
+`"model":"gpt-5.5"` while the upstream receives `"model":"glm-51"`.
+
+Configure rules either directly in an environment variable:
+
+```bash
+MODEL_MAPPINGS='{"gpt-5.5":"glm-51","gpt-5.5-mini":"glm-5.1"}'
+```
+
+or through a JSON file:
+
+```json
+{
+  "gpt-5.5": "glm-51"
+}
+```
+
+```bash
+MODEL_MAPPING_FILE=./config/model-mapping.example.json
+```
+
+When a request body is valid JSON and has a string top-level `model`, the
+gateway applies the mapping if present, re-serializes the body, and overwrites
+the outbound `Content-Length`. If the body is not valid JSON, has no `model`,
+or the model is not mapped, the request is forwarded unchanged with a warning
+log for malformed/missing-model bodies. Standard JSON responses and
+`stream: true` SSE responses are still proxied transparently.
+
+You can also manage mappings from the admin panel: open `/admin`, then go to
+**Model Mappings** to add, edit, or delete client-model → upstream-model rules.
+UI-managed rules are persisted in SQLite and take effect immediately.
+
 ## Configure opencode to use the gateway
 
 Create `opencode.json` in your project (or `~/.config/opencode/opencode.json`):
@@ -162,6 +198,7 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 - **API Keys** — add/remove/toggle keys, edit key value/label/weight/proxy settings, reset cooldown, view fail counts and usage
 - **Tokens** — create/delete/copy `sk-` gateway tokens with optional rate limits
 - **Models** — manage the Go model routing table and view OpenRouter-enriched context length, input/output/cache pricing, and capability tags
+- **Model Mappings** — manage client model → upstream model rewrite rules, persisted in SQLite and applied immediately
 
 ### Admin Panel UI
 
@@ -190,6 +227,8 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 | `JWT_SECRET`       | (built-in)                   | Secret for admin JWT                                     |
 | `DB_PATH`          | `./data/opencode-sw.db`      | SQLite file path                                         |
 | `GO_BASE_URL`      | `https://opencode.ai/zen/go` | Go upstream base                                         |
+| `MODEL_MAPPINGS`  | empty                        | Optional JSON object mapping requested model → upstream model |
+| `MODEL_MAPPING_FILE` | empty                     | Optional JSON file path for model mappings               |
 | `UPSTREAM_TIMEOUT` | `120`                        | Upstream call timeout (seconds)                          |
 
 ## Project structure

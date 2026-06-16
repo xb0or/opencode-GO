@@ -219,3 +219,41 @@ func TestPicker_UsageCountIncremented(t *testing.T) {
 		t.Errorf("usage_count: got %d, want 5", updated.UsageCount)
 	}
 }
+
+func TestPickAttemptsStartsWithWeightedChoice(t *testing.T) {
+	setupTestDB(t)
+
+	for _, value := range []string{"attempt-key-1", "attempt-key-2", "attempt-key-3"} {
+		if err := store.DB().Create(&store.Key{
+			Value:   value,
+			Group:   "attempts",
+			Enabled: true,
+			Weight:  1,
+		}).Error; err != nil {
+			t.Fatalf("create key %s: %v", value, err)
+		}
+	}
+
+	p := NewPicker()
+	first, err := p.PickAttempts("attempts")
+	if err != nil {
+		t.Fatalf("first PickAttempts: %v", err)
+	}
+	second, err := p.PickAttempts("attempts")
+	if err != nil {
+		t.Fatalf("second PickAttempts: %v", err)
+	}
+
+	if len(first) != 3 || len(second) != 3 {
+		t.Fatalf("attempt list lengths = %d and %d, want 3", len(first), len(second))
+	}
+	if first[0].Value != "attempt-key-1" {
+		t.Fatalf("first attempt starts with %q, want attempt-key-1", first[0].Value)
+	}
+	if second[0].Value != "attempt-key-2" {
+		t.Fatalf("second attempt starts with %q, want attempt-key-2", second[0].Value)
+	}
+	if first[1].Value != "attempt-key-2" || first[2].Value != "attempt-key-3" {
+		t.Fatalf("first fallback order = %#v", []string{first[0].Value, first[1].Value, first[2].Value})
+	}
+}

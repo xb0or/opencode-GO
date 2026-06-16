@@ -11,6 +11,9 @@ import { useDashboard } from "./pages/dashboard.js";
 import { useKeys } from "./pages/keys.js";
 import { useTokens } from "./pages/tokens.js";
 import { useModels } from "./pages/models.js";
+import { useMappings } from "./pages/mappings.js";
+import { useOps } from "./pages/ops.js";
+import { useUsage } from "./pages/usage.js";
 
 const { createApp, reactive, ref, watch } = Vue;
 
@@ -168,6 +171,12 @@ createApp({
         confirm.okText = t("confirm.deleteModel.ok");
         confirm.danger = true;
         confirm.onOk = item;
+      } else if (type === "deleteMapping") {
+        confirm.title = t("confirm.deleteMapping.title");
+        confirm.msg = t("confirm.deleteMapping.msg", { name: name || "" });
+        confirm.okText = t("confirm.deleteMapping.ok");
+        confirm.danger = true;
+        confirm.onOk = item;
       }
       confirm.show = true;
     }
@@ -182,12 +191,26 @@ createApp({
 
     // ─── 页面组合式函数 ───────────────────────────────
     const dashboard = useDashboard(api, showToast, t);
+    const ops = useOps(api, showToast, t);
+    const usage = useUsage(api, showToast, t);
     const keys = useKeys(api, showToast, t, showConfirm);
     const tokens = useTokens(api, showToast, t, showConfirm);
     const models = useModels(api, showToast, t, showConfirm);
+    const mappings = useMappings(api, showToast, t, showConfirm);
 
     // ─── 初始化 ───────────────────────────────────────
     if (token.value) dashboard.load();
+
+    function openPage(nextPage) {
+      page.value = nextPage;
+      if (nextPage === "dashboard") dashboard.load();
+      else if (nextPage === "ops") ops.load();
+      else if (nextPage === "usage") usage.load();
+      else if (nextPage === "keys") keys.load();
+      else if (nextPage === "tokens") tokens.load();
+      else if (nextPage === "models") models.load();
+      else if (nextPage === "mappings") mappings.load();
+    }
 
     // ─── 暴露给模板 ───────────────────────────────────
     return {
@@ -207,6 +230,7 @@ createApp({
       t,
       login,
       logout,
+      openPage,
       toggleTheme,
       showConfirm,
       confirmCancel,
@@ -221,6 +245,43 @@ createApp({
 
       // 仪表盘
       stats: dashboard.stats,
+      compactNumber: dashboard.compactNumber,
+      formatTokens: dashboard.formatTokens,
+      formatCost: dashboard.formatCost,
+      formatPercent: dashboard.formatPercent,
+      formatDuration: dashboard.formatDuration,
+      healthScore: dashboard.healthScore,
+      statusLabel: dashboard.statusLabel,
+      recentErrors: dashboard.recentErrors,
+
+      // 运维监控
+      opsStats: ops.stats,
+      opsHealth: ops.health,
+      opsLoading: ops.loading,
+      loadOps: ops.load,
+      opsPercent: ops.formatPercent,
+      opsDuration: ops.formatDuration,
+      opsRate: ops.formatRate,
+      opsPool: ops.pool,
+      opsHealthScore: ops.healthScore,
+      opsRecentErrors: ops.recentErrors,
+      opsUpdatedLabel: ops.updatedLabel,
+
+      // 使用记录
+      usageLogs: usage.logs,
+      usageLoading: usage.loading,
+      usageFilters: usage.filters,
+      usagePagination: usage.pagination,
+      usageSummary: usage.summary,
+      loadUsage: usage.load,
+      applyUsageFilters: usage.apply,
+      resetUsageFilters: usage.reset,
+      usageNextPage: usage.nextPage,
+      usagePrevPage: usage.prevPage,
+      usageDuration: usage.formatDuration,
+      usageTokens: usage.formatTokens,
+      usageCost: usage.formatCost,
+      usagePageRange: usage.pageRange,
 
       // 密钥管理
       keys: keys.keys,
@@ -256,6 +317,18 @@ createApp({
       loadModels: models.load,
       addModel: models.add,
       deleteModel: models.remove,
+
+      // 模型映射管理
+      mappings: mappings.mappings,
+      newMapping: mappings.newMapping,
+      editingSource: mappings.editingSource,
+      showMappingModal: mappings.showMappingModal,
+      openMappingModal: mappings.openMappingModal,
+      openMappingSettings: mappings.openMappingSettings,
+      closeMappingModal: mappings.closeMappingModal,
+      loadMappings: mappings.load,
+      addMapping: mappings.add,
+      deleteMapping: mappings.remove,
     };
   },
 }).mount("#app");
