@@ -47,6 +47,7 @@ func TestShouldMarkUpstreamFailure(t *testing.T) {
 	}{
 		{status: http.StatusOK, want: false},
 		{status: http.StatusBadRequest, want: false},
+		{status: http.StatusPaymentRequired, want: true},
 		{status: http.StatusUnauthorized, want: true},
 		{status: http.StatusForbidden, want: true},
 		{status: http.StatusTooManyRequests, want: true},

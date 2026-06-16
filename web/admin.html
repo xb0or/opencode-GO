@@ -141,6 +141,13 @@
               <a :class="{active:page==='mappings'}" @click="openPage('mappings')">
                 <span class="icon" v-html="icons.mapping"></span><span>{{t('nav.mappings')}}</span>
               </a>
+              <a
+                :class="{active:page==='mappings'}"
+                @click="page='mappings';loadMappings()"
+              >
+                <span class="icon" v-html="icons.mapping"></span
+                ><span>{{t('nav.mappings')}}</span>
+              </a>
             </nav>
           </aside>
 
