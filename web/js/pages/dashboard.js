@@ -19,7 +19,14 @@ export function useDashboard(api, showToast, t) {
       await nextTick();
       renderCharts(d);
     } catch (e) {
-      showToast(e.message, "error");
+      // Silent on 401/unauthorized → token expired, login form shows automatically
+      if (
+        e.message &&
+        !e.message.includes("unauthorized") &&
+        !e.message.includes("401")
+      ) {
+        showToast(e.message, "error");
+      }
     }
   }
 

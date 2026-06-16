@@ -75,15 +75,21 @@ export function useKeys(api, showToast, t, showConfirm) {
   }
 
   async function remove(id) {
-    showConfirm("deleteKey", async () => {
-      try {
-        await api("/keys/" + id, "DELETE", null, t);
-        showToast(t("keys.delete") + " ✓");
-        load();
-      } catch (e) {
-        showToast(e.message, "error");
-      }
-    });
+    const item = keys.value.find((k) => k.id === id);
+    const name = item ? item.label || item.value : "";
+    showConfirm(
+      "deleteKey",
+      async () => {
+        try {
+          await api("/keys/" + id, "DELETE", null, t);
+          showToast(t("keys.delete") + " ✓");
+          load();
+        } catch (e) {
+          showToast(e.message, "error");
+        }
+      },
+      name
+    );
   }
 
   return {

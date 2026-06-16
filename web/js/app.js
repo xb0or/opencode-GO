@@ -99,7 +99,7 @@ createApp({
     }
 
     // ─── 确认弹窗 ─────────────────────────────────────
-    function showConfirm(type, item) {
+    function showConfirm(type, item, name) {
       confirm.cancelText = t("confirm.cancel");
       if (type === "logout") {
         confirm.title = t("confirm.logout.title");
@@ -109,19 +109,19 @@ createApp({
         confirm.onOk = () => logout();
       } else if (type === "deleteKey") {
         confirm.title = t("confirm.deleteKey.title");
-        confirm.msg = t("confirm.deleteKey.msg");
+        confirm.msg = t("confirm.deleteKey.msg", { name: name || "" });
         confirm.okText = t("confirm.deleteKey.ok");
         confirm.danger = true;
         confirm.onOk = item;
       } else if (type === "deleteToken") {
         confirm.title = t("confirm.deleteToken.title");
-        confirm.msg = t("confirm.deleteToken.msg");
+        confirm.msg = t("confirm.deleteToken.msg", { name: name || "" });
         confirm.okText = t("confirm.deleteToken.ok");
         confirm.danger = true;
         confirm.onOk = item;
       } else if (type === "deleteModel") {
         confirm.title = t("confirm.deleteModel.title");
-        confirm.msg = t("confirm.deleteModel.msg");
+        confirm.msg = t("confirm.deleteModel.msg", { name: name || "" });
         confirm.okText = t("confirm.deleteModel.ok");
         confirm.danger = true;
         confirm.onOk = item;

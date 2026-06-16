@@ -93,17 +93,17 @@ export const locales = {
       },
       deleteKey: {
         title: "删除密钥",
-        msg: "确定删除此 API 密钥？此操作不可撤销。",
+        msg: "确定删除 API 密钥「{name}」？此操作不可撤销。",
         ok: "删除",
       },
       deleteToken: {
         title: "删除令牌",
-        msg: "确定删除此访问令牌？此操作不可撤销。",
+        msg: "确定删除访问令牌「{name}」？此操作不可撤销。",
         ok: "删除",
       },
       deleteModel: {
         title: "删除模型",
-        msg: "确定删除此模型路由？此操作不可撤销。",
+        msg: "确定删除模型路由「{name}」？此操作不可撤销。",
         ok: "删除",
       },
     },
@@ -232,17 +232,17 @@ export const locales = {
       },
       deleteKey: {
         title: "Delete Key",
-        msg: "Are you sure you want to delete this API key? This action cannot be undone.",
+        msg: 'Are you sure you want to delete API key "{name}"? This action cannot be undone.',
         ok: "Delete",
       },
       deleteToken: {
         title: "Delete Token",
-        msg: "Are you sure you want to delete this token? This action cannot be undone.",
+        msg: 'Are you sure you want to delete token "{name}"? This action cannot be undone.',
         ok: "Delete",
       },
       deleteModel: {
         title: "Delete Model",
-        msg: "Are you sure you want to delete this model route? This action cannot be undone.",
+        msg: 'Are you sure you want to delete model route "{name}"? This action cannot be undone.',
         ok: "Delete",
       },
     },
