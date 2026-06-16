@@ -554,6 +554,13 @@ func TestDecodeStreamBufferRejectsHTMLBody(t *testing.T) {
 	}
 }
 
+func TestConvertResponseRejectsCompressedBody(t *testing.T) {
+	compressed := []byte{0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x3c, 0x00}
+	if _, err := ConvertResponse(config.ProtocolChat, config.ProtocolMessages, compressed); err == nil {
+		t.Fatalf("expected error converting compressed body")
+	}
+}
+
 func TestDecodeStreamBufferRejectsEmptyBody(t *testing.T) {
 	if _, err := DecodeStreamBuffer(config.ProtocolChat, nil); err == nil {
 		t.Fatalf("expected error decoding empty body as chat stream")

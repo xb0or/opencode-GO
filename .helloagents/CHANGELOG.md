@@ -1,5 +1,7 @@
 ## 2026-06-16
 
+- 修复代理转发时透传客户端 `Accept-Encoding` 导致上游压缩响应未被 Go Transport 自动解压的问题；跨协议与同协议响应现在都能正确解码上游压缩体，避免 `invalid character '\\x1b'` 之类的乱码 JSON 解析失败。
+- 新增 `Accept-Encoding` 过滤与 gzip 上游响应回归测试，验证代理能正确处理压缩后的 JSON/SSE 响应。
 - 修复管理后台侧边栏“模型映射”菜单重复渲染，仅保留单一入口。
 - 修复 `page-hero` 装饰伪元素拦截点击导致刷新按钮无反应的问题，并将流式/空错误显示从问号改为明确状态与空值占位。
 - 流式同协议响应现在会透传 SSE 的同时捕获最终 usage；Chat 流式请求自动追加 `stream_options.include_usage=true`，调用记录可写入输入/输出/总 Token。

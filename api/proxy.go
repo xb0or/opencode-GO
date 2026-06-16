@@ -523,11 +523,12 @@ func setContentLength(req *http.Request, n int) {
 // stripping hop-by-hop and client auth headers.
 func copyForwardHeaders(dst, src http.Header) {
 	skip := map[string]bool{
-		"Authorization":  true,
-		"X-Api-Key":      true,
-		"Api-Key":        true,
-		"Content-Length": true,
-		"Host":           true,
+		"Authorization":   true,
+		"X-Api-Key":       true,
+		"Api-Key":         true,
+		"Content-Length":  true,
+		"Host":            true,
+		"Accept-Encoding": true,
 	}
 	for k, vs := range src {
 		if skip[http.CanonicalHeaderKey(k)] || isHopHeader(k) {
