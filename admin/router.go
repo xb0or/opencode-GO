@@ -2,6 +2,7 @@ package admin
 
 import (
 	"crypto/subtle"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -282,10 +283,12 @@ func upsertModel(c *gin.Context) {
 	}
 	config.RegisterModel(body)
 	// Persist to DB.
+	capsJSON, _ := json.Marshal(body.Capabilities)
 	store.SaveModelRoute(&store.ModelRouteRow{
 		ID: body.ID, Name: body.Name, Upstream: string(body.Upstream),
 		Protocol: string(body.Protocol), RealModel: body.RealModel,
 		Group: body.Group, ContextLen: body.ContextLen,
+		Capabilities: string(capsJSON),
 	})
 	c.JSON(http.StatusOK, body)
 }

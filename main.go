@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -76,6 +77,7 @@ func loadModelRoutes() {
 				ID: m.ID, Name: m.Name, Upstream: string(m.Upstream),
 				Protocol: string(m.Protocol), RealModel: m.RealModel,
 				Group: m.Group, ContextLen: m.ContextLen,
+				Capabilities: encodeCaps(m.Capabilities),
 			})
 		}
 		config.RegisterModels(defaults)
@@ -92,6 +94,7 @@ func loadModelRoutes() {
 			ID: r.ID, Name: r.Name, Upstream: config.Upstream(r.Upstream),
 			Protocol: config.Protocol(r.Protocol), RealModel: r.RealModel,
 			Group: r.Group, ContextLen: r.ContextLen,
+			Capabilities: decodeCaps(r.Capabilities),
 		})
 	}
 	if len(routes) == 0 {
@@ -132,4 +135,23 @@ func ensureBootstrapToken() {
 	fmt.Printf("   %s\n", t.Token)
 	fmt.Println(" Use this as the api key in opencode / clients.")
 	fmt.Println("==================================================")
+}
+
+// encodeCaps serializes a string slice to JSON for DB storage.
+func encodeCaps(caps []string) string {
+	if len(caps) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(caps)
+	return string(b)
+}
+
+// decodeCaps deserializes capabilities from DB.
+func decodeCaps(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var caps []string
+	json.Unmarshal([]byte(s), &caps)
+	return caps
 }

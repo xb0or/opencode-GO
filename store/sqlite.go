@@ -44,13 +44,14 @@ type Token struct {
 
 // ModelRouteRow persists a model route in the database.
 type ModelRouteRow struct {
-	ID         string `gorm:"primaryKey;size:128" json:"id"`
-	Name       string `gorm:"size:128" json:"name"`
-	Upstream   string `gorm:"size:32;not null" json:"upstream"`
-	Protocol   string `gorm:"size:32;not null" json:"protocol"`
-	RealModel  string `gorm:"size:255;not null" json:"real_model"`
-	Group      string `gorm:"size:32;not null" json:"group"`
-	ContextLen int    `json:"context_len"`
+	ID           string `gorm:"primaryKey;size:128" json:"id"`
+	Name         string `gorm:"size:128" json:"name"`
+	Upstream     string `gorm:"size:32;not null" json:"upstream"`
+	Protocol     string `gorm:"size:32;not null" json:"protocol"`
+	RealModel    string `gorm:"size:255;not null" json:"real_model"`
+	Group        string `gorm:"size:32;not null" json:"group"`
+	ContextLen   int    `json:"context_len"`
+	Capabilities string `gorm:"size:512" json:"capabilities"` // JSON array string
 }
 
 // UsageLog records a single proxied request.

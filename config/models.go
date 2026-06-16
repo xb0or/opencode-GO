@@ -23,13 +23,14 @@ const (
 
 // ModelRoute maps a gateway-facing model id to its real upstream location.
 type ModelRoute struct {
-	ID         string   `json:"id"`          // gateway-facing model id, e.g. "glm-4.6"
-	Name       string   `json:"name"`        // display name
-	Upstream   Upstream `json:"upstream"`    // go
-	Protocol   Protocol `json:"protocol"`    // chat | messages | responses | google
-	RealModel  string   `json:"real_model"`  // upstream model id, e.g. "glm/glm-4.6"
-	Group      string   `json:"group"`       // logical KEY-pool group, e.g. "go"
-	ContextLen int      `json:"context_len"` // optional context window hint
+	ID           string   `json:"id"`           // gateway-facing model id, e.g. "glm-4.6"
+	Name         string   `json:"name"`         // display name
+	Upstream     Upstream `json:"upstream"`     // go
+	Protocol     Protocol `json:"protocol"`     // chat | messages | responses | google
+	RealModel    string   `json:"real_model"`   // upstream model id, e.g. "glm/glm-4.6"
+	Group        string   `json:"group"`        // logical KEY-pool group, e.g. "go"
+	ContextLen   int      `json:"context_len"`  // optional context window hint
+	Capabilities []string `json:"capabilities"` // e.g. ["streaming","vision","function_calling"]
 }
 
 var (
@@ -95,8 +96,8 @@ func BaseURLFor(u Upstream) string {
 func DefaultModels() []ModelRoute {
 	return []ModelRoute{
 		// --- OpenAI Chat Completions (Go subscription) ---
-		{ID: "go-glm-4.6", Name: "GLM 4.6 (Go)", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "zai/glm-4.6", Group: "go"},
-		{ID: "go-deepseek-v3.2", Name: "DeepSeek V3.2 (Go)", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "deepseek/deepseek-v3.2", Group: "go"},
-		{ID: "go-kimi-k2", Name: "Kimi K2 (Go)", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "moonshot/kimi-k2", Group: "go"},
+		{ID: "go-glm-4.6", Name: "GLM 4.6 (Go)", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "zai/glm-4.6", Group: "go", Capabilities: []string{"streaming", "function_calling"}},
+		{ID: "go-deepseek-v3.2", Name: "DeepSeek V3.2 (Go)", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "deepseek/deepseek-v3.2", Group: "go", Capabilities: []string{"streaming", "function_calling"}},
+		{ID: "go-kimi-k2", Name: "Kimi K2 (Go)", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "moonshot/kimi-k2", Group: "go", Capabilities: []string{"streaming", "function_calling"}},
 	}
 }
