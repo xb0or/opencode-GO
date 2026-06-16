@@ -625,6 +625,49 @@ func TestProxyLogsFinalUpstreamErrorBody(t *testing.T) {
 	}
 }
 
+func TestPreviewBodySanitizesControlChars(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+		want  string
+	}{
+		{
+			name:  "strips ANSI escape sequences",
+			input: []byte("<html>502 Bad gateway\x1b[31m error\x1b[0m</html>"),
+			want:  "<html>502 Bad gateway [31m error [0m</html>",
+		},
+		{
+			name:  "preserves newlines and tabs as spaces (Fields normalization)",
+			input: []byte("line1\nline2\ttab"),
+			want:  "line1 line2 tab",
+		},
+		{
+			name:  "replaces invalid UTF-8 with replacement character",
+			input: []byte{0xff, 0xfe, 'o', 'k'},
+			want:  "\ufffdok",
+		},
+		{
+			name:  "truncates long bodies",
+			input: []byte(strings.Repeat("x", 600)),
+			want:  strings.Repeat("x", 512) + "…",
+		},
+		{
+			name:  "strips ANSI escape sequences (control chars replaced)",
+			input: []byte("<html>502 Bad gateway\x1berror</html>"),
+			want:  "<html>502 Bad gateway error</html>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := previewBody(tt.input)
+			if got != tt.want {
+				t.Errorf("previewBody() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestInspectAndMapRequestBodyKeepsUnmappedAndMissingModelBodies(t *testing.T) {
 	config.RegisterModelMappings(map[string]string{"gpt-5.5": "glm-51"})
 	defer config.RegisterModelMappings(map[string]string{})

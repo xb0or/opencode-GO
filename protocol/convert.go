@@ -1,8 +1,10 @@
 package protocol
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/opencode-sw/gateway/config"
 )
@@ -106,6 +108,55 @@ func encodeResponse(proto config.Protocol, ir *IRResponse) ([]byte, error) {
 func StreamConverter(dst io.Writer, src io.Reader, from, to config.Protocol) error {
 	_, err := StreamConverterWithUsage(dst, src, from, to)
 	return err
+}
+
+// DecodeStreamBuffer decodes a fully-buffered upstream stream payload into an
+// IRResponse without writing anything. It lets callers detect an undecodable
+// upstream payload (e.g. an HTML gateway error page served with HTTP 200)
+// before they commit a response status to the client.
+func DecodeStreamBuffer(proto config.Protocol, buf []byte) (*IRResponse, error) {
+	// Quick sanity check: if the buffer doesn't look like an SSE stream at
+	// all (no "data: " prefix lines), skip the expensive decode and fail
+	// fast. This catches upstream HTML error pages served with HTTP 200.
+	if !bytes.Contains(buf, []byte("data: ")) {
+		return nil, fmt.Errorf("response does not appear to be an SSE stream (no data: lines found); first %d bytes: %s",
+			min(len(buf), 128), sanitizePreview(buf, 128))
+	}
+	resp, err := bufferStream(proto, bytes.NewReader(buf))
+	if err != nil {
+		return nil, fmt.Errorf("stream convert: buffer upstream: %w", err)
+	}
+	// Even if decode succeeded, if we got zero content back the upstream
+	// likely sent something that isn't a valid stream for this protocol.
+	if len(resp.Choices) == 0 && resp.Usage == nil {
+		return nil, fmt.Errorf("stream decode produced empty response; first %d bytes: %s",
+			min(len(buf), 128), sanitizePreview(buf, 128))
+	}
+	return resp, nil
+}
+
+// sanitizePreview returns a preview of data with control characters stripped
+// and truncated to maxLen bytes, for inclusion in error messages.
+func sanitizePreview(data []byte, maxLen int) string {
+	if len(data) > maxLen {
+		data = data[:maxLen]
+	}
+	var b strings.Builder
+	b.Grow(len(data))
+	for _, r := range string(data) {
+		if r >= 0x20 && r != 0x7f { // printable ASCII + wide chars
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// EmitStreamResponse writes a buffered IRResponse as an SSE stream in the
+// target protocol format. It is the exported form of emitStreamResponse so
+// callers that pre-decoded via DecodeStreamBuffer can emit after setting
+// response headers.
+func EmitStreamResponse(dst io.Writer, proto config.Protocol, resp *IRResponse) error {
+	return emitStreamResponse(dst, proto, resp)
 }
 
 // StreamConverterWithUsage is StreamConverter plus the buffered IR response

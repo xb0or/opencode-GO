@@ -289,15 +289,44 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 	if stream {
 		// Streaming cross-protocol: buffer the full upstream SSE stream,
 		// then re-emit in the target protocol format.
+		//
+		// We must buffer the body before writing the SSE headers, because if
+		// the upstream returned an error page (e.g. a Cloudflare 502 HTML
+		// page served with HTTP 200) we cannot decode it and must surface a
+		// meaningful error instead of a confusing "invalid character" message
+		// after having already committed a 200 status to the client.
+		upstreamBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			p.MarkFailure(key.ID)
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, err.Error())
+			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream response")
+			return
+		}
+
+		// Decode the upstream stream first so we can report a clean error to
+		// the client (without having already committed a 200 status) when the
+		// upstream payload is not a valid SSE/JSON stream — e.g. an HTML
+		// gateway error page served with HTTP 200.
+		streamResp, convErr := protocol.DecodeStreamBuffer(upstreamProto, upstreamBody)
+		if convErr != nil {
+			p.MarkFailure(key.ID)
+			errMsg := fmt.Sprintf("upstream %s stream response could not be decoded: %v; body: %s",
+				upstreamProto, convErr, previewBody(upstreamBody))
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, errMsg)
+			writeOpenAIError(c, http.StatusBadGateway, "upstream_error",
+				"upstream returned a non-streaming response that could not be decoded")
+			return
+		}
+
+		// Commit the SSE headers only after a successful decode.
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.WriteHeader(http.StatusOK)
-
-		streamResp, err := protocol.StreamConverterWithUsage(c.Writer, resp.Body, upstreamProto, inbound)
-		if err != nil {
-			p.MarkFailure(key.ID)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, err.Error())
+		if emitErr := protocol.EmitStreamResponse(c.Writer, inbound, streamResp); emitErr != nil {
+			// Headers/body already partially written; just log.
+			markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
+				usageFromIRUsage(streamResp), "stream emit error: "+emitErr.Error())
 			return
 		}
 		p.MarkSuccess(key.ID)
@@ -314,10 +343,15 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 
 		converted, err := protocol.ConvertResponse(upstreamProto, inbound, upstreamBody)
 		if err != nil {
+			// Upstream returned a body that is not valid JSON for its protocol
+			// (commonly an HTML error page from an upstream proxy/CDN). Report
+			// the real cause instead of the opaque JSON parse error.
 			p.MarkFailure(key.ID)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "conversion_error",
-				fmt.Sprintf("failed to convert response from %s to %s: %v", upstreamProto, inbound, err))
+			errMsg := fmt.Sprintf("upstream %s response could not be decoded: %v; body: %s",
+				upstreamProto, err, previewBody(upstreamBody))
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, errMsg)
+			writeOpenAIError(c, http.StatusBadGateway, "upstream_error",
+				"upstream returned a non-JSON response that could not be decoded")
 			return
 		}
 
@@ -334,6 +368,25 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		p.MarkSuccess(key.ID)
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usageFromResponse(inbound, converted), "")
 	}
+}
+
+// previewBody returns a compact, redacted, length-limited preview of an
+// upstream response body for inclusion in error logs. It collapses whitespace
+// and strips control characters so HTML error pages are readable.
+func previewBody(body []byte) string {
+	const maxPreview = 512
+	s := strings.ToValidUTF8(string(body), "�")
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 && r != '\n' && r != '\t' {
+			return ' '
+		}
+		return r
+	}, s)
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > maxPreview {
+		s = s[:maxPreview] + "…"
+	}
+	return s
 }
 
 // upstreamPathFor returns the canonical upstream path for a protocol.

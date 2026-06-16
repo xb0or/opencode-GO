@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // ──────────────────────── Anthropic Messages ─────────────────────────
@@ -27,8 +28,8 @@ type MsgSystemBlock struct {
 }
 
 type MsgMessage struct {
-	Role    string       `json:"role"` // user | assistant
-	Content []MsgContent `json:"content"`
+	Role    string          `json:"role"` // user | assistant
+	Content json.RawMessage `json:"content"`
 }
 
 type MsgContent struct {
@@ -384,15 +385,36 @@ func EncodeMessagesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 
 // ──────────────────────── helpers ───────────────────────────────────
 
+// parseMsgMessageContent parses a MsgMessage content field which may be a
+// string shorthand or an array of content blocks.
+func parseMsgMessageContent(raw json.RawMessage) ([]MsgContent, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return []MsgContent{{Type: "text", Text: s}}, nil
+	}
+	var blocks []MsgContent
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil, err
+	}
+	return blocks, nil
+}
+
 func msgMsgToIR(m MsgMessage) IRMessage {
+	content, _ := parseMsgMessageContent(m.Content)
 	ir := IRMessage{Role: m.Role}
-	for _, c := range m.Content {
+	for _, c := range content {
 		switch c.Type {
 		case "text":
 			ir.Content = append(ir.Content, IRContent{Type: "text", Text: c.Text})
 		case "thinking":
 			ir.Content = append(ir.Content, IRContent{Type: "thinking", Text: c.Thinking})
 		case "image":
+			if c.Source == nil {
+				continue
+			}
 			ir.Content = append(ir.Content, IRContent{
 				Type: "image",
 				Source: &IRImageSource{
@@ -415,11 +437,29 @@ func msgMsgToIR(m MsgMessage) IRMessage {
 				Arguments: string(c.Input),
 			})
 		case "tool_result":
-			ir.Content = append(ir.Content, IRContent{
+			irContent := IRContent{
 				Type:    "tool_result",
 				ToolID:  c.ToolUseID,
 				IsError: c.IsError,
-			})
+			}
+			if c.Content != nil {
+				if s, ok := c.Content.(string); ok {
+					irContent.Text = s
+				} else {
+					b, _ := json.Marshal(c.Content)
+					var blocks []MsgContent
+					if json.Unmarshal(b, &blocks) == nil {
+						var parts []string
+						for _, block := range blocks {
+							if block.Type == "text" {
+								parts = append(parts, block.Text)
+							}
+						}
+						irContent.Text = strings.Join(parts, "")
+					}
+				}
+			}
+			ir.Content = append(ir.Content, irContent)
 			ir.ToolCallID = c.ToolUseID
 		}
 	}
@@ -438,37 +478,44 @@ func irMsgToMsg(m IRMessage) MsgMessage {
 	}
 	// Text shorthand
 	if m.Text != "" && len(m.Content) == 0 && len(m.ToolCalls) == 0 {
-		mm.Content = []MsgContent{{Type: "text", Text: m.Text}}
+		mm.Content, _ = json.Marshal(m.Text)
 		return mm
 	}
+	var blocks []MsgContent
 	for _, c := range m.Content {
 		switch c.Type {
 		case "text":
-			mm.Content = append(mm.Content, MsgContent{Type: "text", Text: c.Text})
+			blocks = append(blocks, MsgContent{Type: "text", Text: c.Text})
 		case "thinking":
-			mm.Content = append(mm.Content, MsgContent{Type: "thinking", Thinking: c.Text})
+			blocks = append(blocks, MsgContent{Type: "thinking", Thinking: c.Text})
 		case "image":
 			if c.Source != nil {
-				mm.Content = append(mm.Content, MsgContent{
+				blocks = append(blocks, MsgContent{
 					Type:   "image",
 					Source: &MsgImageSource{Type: c.Source.Type, MediaType: c.Source.MediaType, Data: c.Source.Data, URL: c.Source.URL},
 				})
 			}
 		case "tool_use":
-			mm.Content = append(mm.Content, MsgContent{
+			blocks = append(blocks, MsgContent{
 				Type:  "tool_use",
 				ID:    c.ID,
 				Name:  c.Name,
 				Input: c.Input,
 			})
 		case "tool_result":
-			mm.Content = append(mm.Content, MsgContent{
+			var content any
+			if c.Text != "" {
+				content = c.Text
+			}
+			blocks = append(blocks, MsgContent{
 				Type:      "tool_result",
 				ToolUseID: c.ToolID,
 				IsError:   c.IsError,
+				Content:   content,
 			})
 		}
 	}
+	mm.Content, _ = json.Marshal(blocks)
 	return mm
 }
 
