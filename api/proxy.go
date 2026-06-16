@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -108,7 +109,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		head.Stream = h.Stream
 	}
 
-	key, err := p.Pick(route.Group)
+	attempts, err := p.PickAttempts(route.Group)
 	if err != nil {
 		writeOpenAIError(c, http.StatusServiceUnavailable, "no_upstream_key_error",
 			"no available upstream key for group "+route.Group)
@@ -134,47 +135,89 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	ctx, cancel := context.WithTimeout(c.Request.Context(), upstream.Timeout())
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, c.Request.Method, target, bytes.NewReader(upstreamBody))
-	if err != nil {
-		markAndLog(c, p, key, route, inbound, http.StatusInternalServerError, start, head.Stream, err.Error())
-		writeOpenAIError(c, http.StatusInternalServerError, "internal_error", "failed to build upstream request")
+	var lastErrMsg string
+	for i := range attempts {
+		key := &attempts[i]
+		p.MarkUsed(key.ID)
+
+		req, err := http.NewRequestWithContext(ctx, c.Request.Method, target, bytes.NewReader(upstreamBody))
+		if err != nil {
+			markAndLog(c, p, key, route, inbound, http.StatusInternalServerError, start, head.Stream, err.Error())
+			writeOpenAIError(c, http.StatusInternalServerError, "internal_error", "failed to build upstream request")
+			return
+		}
+		copyForwardHeaders(req.Header, c.Request.Header)
+		setContentLength(req, len(upstreamBody))
+		injectUpstreamAuth(req.Header, key.Value)
+
+		upstreamClient := upstream.NewClientForProxy(key.ProxyURL)
+		resp, err := upstreamClient.Do(req)
+		if err != nil {
+			p.MarkFailure(key.ID)
+			lastErrMsg = "failed to reach upstream: " + err.Error()
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, lastErrMsg)
+			if i+1 < len(attempts) {
+				continue
+			}
+			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", lastErrMsg)
+			return
+		}
+
+		if shouldRetryWithNextKey(resp.StatusCode) && i+1 < len(attempts) {
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			p.MarkFailure(key.ID)
+			if readErr != nil {
+				lastErrMsg = "failed to read upstream error response: " + readErr.Error()
+				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, lastErrMsg)
+			} else {
+				lastErrMsg = summarizeUpstreamError(resp.StatusCode, body)
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, lastErrMsg)
+			}
+			continue
+		}
+
+		defer resp.Body.Close()
+		if crossProtocol {
+			// Buffer the upstream response and convert it back to the inbound protocol.
+			proxyCrossProtocolResponse(c, resp, head.Stream, inbound, upstreamProto, p, key, route, start)
+		} else {
+			// Same-protocol: stream verbatim.
+			proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start)
+		}
 		return
 	}
-	copyForwardHeaders(req.Header, c.Request.Header)
-	setContentLength(req, len(upstreamBody))
-	injectUpstreamAuth(req.Header, key.Value)
 
-	upstreamClient := upstream.NewClientForProxy(key.ProxyURL)
-	resp, err := upstreamClient.Do(req)
-	if err != nil {
-		p.MarkFailure(key.ID)
-		markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, err.Error())
-		writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to reach upstream: "+err.Error())
-		return
+	if lastErrMsg == "" {
+		lastErrMsg = "all upstream keys failed"
 	}
-	defer resp.Body.Close()
-
-	if crossProtocol {
-		// Buffer the upstream response and convert it back to the inbound protocol.
-		proxyCrossProtocolResponse(c, resp, head.Stream, inbound, upstreamProto, p, key, route, start)
-	} else {
-		// Same-protocol: stream verbatim.
-		proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start)
-	}
+	writeOpenAIError(c, http.StatusBadGateway, "upstream_error", lastErrMsg)
 }
 
 // proxySameProtocolResponse streams the upstream response verbatim to the client.
 func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 	p *pool.Picker, key *store.Key, route config.ModelRoute, inbound config.Protocol, start time.Time) {
 
-	for k, vs := range resp.Header {
-		for _, v := range vs {
-			if isHopHeader(k) {
-				continue
-			}
-			c.Writer.Header().Add(k, v)
+	if resp.StatusCode >= 400 {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			p.MarkFailure(key.ID)
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, err.Error())
+			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream error response")
+			return
 		}
+		copyResponseHeaders(c, resp)
+		c.Writer.WriteHeader(resp.StatusCode)
+		_, _ = c.Writer.Write(body)
+		errMsg := summarizeUpstreamError(resp.StatusCode, body)
+		if shouldMarkUpstreamFailure(resp.StatusCode) {
+			p.MarkFailure(key.ID)
+		}
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, errMsg)
+		return
 	}
+
+	copyResponseHeaders(c, resp)
 	c.Writer.WriteHeader(resp.StatusCode)
 	_, copyErr := io.Copy(c.Writer, resp.Body)
 
@@ -183,9 +226,9 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, "")
 	} else if shouldMarkUpstreamFailure(resp.StatusCode) {
 		p.MarkFailure(key.ID)
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, "")
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, copyErrString(copyErr))
 	} else {
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, "")
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, copyErrString(copyErr))
 	}
 }
 
@@ -197,20 +240,20 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 
 	if resp.StatusCode >= 400 {
 		// Don't convert error responses; pass them through.
-		for k, vs := range resp.Header {
-			for _, v := range vs {
-				if isHopHeader(k) {
-					continue
-				}
-				c.Writer.Header().Add(k, v)
-			}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			p.MarkFailure(key.ID)
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, err.Error())
+			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream error response")
+			return
 		}
+		copyResponseHeaders(c, resp)
 		c.Writer.WriteHeader(resp.StatusCode)
-		io.Copy(c.Writer, resp.Body)
+		_, _ = c.Writer.Write(body)
 		if shouldMarkUpstreamFailure(resp.StatusCode) {
 			p.MarkFailure(key.ID)
 		}
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, "")
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, summarizeUpstreamError(resp.StatusCode, body))
 		return
 	}
 
@@ -403,11 +446,17 @@ func injectUpstreamAuth(h http.Header, keyValue string) {
 // key failure and trigger cooldown bookkeeping.
 func shouldMarkUpstreamFailure(status int) bool {
 	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+	case http.StatusPaymentRequired, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
 		return true
 	default:
 		return status >= 500
 	}
+}
+
+// shouldRetryWithNextKey reports whether a failed upstream response should be
+// retried with another available key before returning it to the client.
+func shouldRetryWithNextKey(status int) bool {
+	return shouldMarkUpstreamFailure(status)
 }
 
 // isHopHeader reports whether a header should be stripped on proxy hop.
@@ -418,6 +467,100 @@ func isHopHeader(k string) bool {
 		return true
 	}
 	return false
+}
+
+func copyResponseHeaders(c *gin.Context, resp *http.Response) {
+	for k, vs := range resp.Header {
+		if isHopHeader(k) {
+			continue
+		}
+		for _, v := range vs {
+			c.Writer.Header().Add(k, v)
+		}
+	}
+}
+
+func copyErrString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+const maxUsageErrorLen = 2048
+
+var sensitiveErrorPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+\-/=]+`),
+	regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|credential)["'\s:=]+)([^"'\s,}]+)`),
+}
+
+// summarizeUpstreamError extracts a compact, redacted error message from an
+// upstream error response body for admin usage logs.
+func summarizeUpstreamError(status int, body []byte) string {
+	msg := extractUpstreamErrorMessage(body)
+	if msg == "" {
+		msg = strings.TrimSpace(strings.ToValidUTF8(string(body), "�"))
+	}
+	msg = strings.Join(strings.Fields(msg), " ")
+	if msg == "" {
+		msg = http.StatusText(status)
+	}
+	return trimUsageError(fmt.Sprintf("upstream returned HTTP %d: %s", status, redactUsageError(msg)))
+}
+
+func extractUpstreamErrorMessage(body []byte) string {
+	var payload any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return ""
+	}
+	if msg := findErrorMessage(payload); msg != "" {
+		return msg
+	}
+	compact, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(compact)
+}
+
+func findErrorMessage(v any) string {
+	switch x := v.(type) {
+	case map[string]any:
+		for _, key := range []string{"error", "message", "detail", "error_description", "code", "type"} {
+			if val, ok := x[key]; ok {
+				if msg := findErrorMessage(val); msg != "" {
+					return msg
+				}
+			}
+		}
+	case []any:
+		var parts []string
+		for _, item := range x {
+			if msg := findErrorMessage(item); msg != "" {
+				parts = append(parts, msg)
+			}
+		}
+		return strings.Join(parts, "; ")
+	case string:
+		return strings.TrimSpace(x)
+	case float64, bool, nil:
+		return fmt.Sprint(x)
+	}
+	return ""
+}
+
+func redactUsageError(s string) string {
+	for _, pattern := range sensitiveErrorPatterns {
+		s = pattern.ReplaceAllString(s, "${1}[redacted]")
+	}
+	return s
+}
+
+func trimUsageError(s string) string {
+	if len(s) <= maxUsageErrorLen {
+		return s
+	}
+	return s[:maxUsageErrorLen-1] + "…"
 }
 
 // markAndLog writes a usage log row. It never blocks the response path on DB errors.
