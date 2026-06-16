@@ -145,10 +145,11 @@ func listKeys(c *gin.Context) {
 
 func createKey(c *gin.Context) {
 	var body struct {
-		Value  string `json:"value" binding:"required"`
-		Group  string `json:"group" binding:"required"`
-		Label  string `json:"label"`
-		Weight int    `json:"weight"`
+		Value    string `json:"value" binding:"required"`
+		Group    string `json:"group" binding:"required"`
+		Label    string `json:"label"`
+		Weight   int    `json:"weight"`
+		ProxyURL string `json:"proxy_url"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -159,11 +160,12 @@ func createKey(c *gin.Context) {
 		w = 1
 	}
 	k := &store.Key{
-		Value:   strings.TrimSpace(body.Value),
-		Group:   strings.TrimSpace(body.Group),
-		Label:   body.Label,
-		Enabled: true,
-		Weight:  w,
+		Value:    strings.TrimSpace(body.Value),
+		Group:    strings.TrimSpace(body.Group),
+		Label:    body.Label,
+		Enabled:  true,
+		Weight:   w,
+		ProxyURL: strings.TrimSpace(body.ProxyURL),
 	}
 	if err := store.DB().Create(k).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

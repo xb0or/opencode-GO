@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/opencode-sw/gateway/admin"
@@ -38,7 +40,16 @@ func main() {
 	admin.MountWithPicker(root.Group("/admin"), picker)
 
 	// Serve the admin SPA at /admin (the HTML page).
+	// NoRoute fallback serves admin.html for any unknown /admin/* sub-path,
+	// both for static files (css, js) and SPA client-side routing.
 	root.GET("/admin", gin.WrapH(web.AdminHandler()))
+	root.NoRoute(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/admin") {
+			web.AdminHandler().ServeHTTP(c.Writer, c.Request)
+			return
+		}
+		c.Writer.WriteHeader(http.StatusNotFound)
+	})
 
 	addr := ":" + cfg.Port
 	log.Printf("opencode-sw listening on %s", addr)

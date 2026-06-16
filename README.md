@@ -2,7 +2,7 @@
 
 A multi-key management gateway for **OpenCode Zen / Go** services, written in Go + Gin and ready to deploy on **Zeabur**.
 
-It aggregates many OpenCode API keys (Zen pay-as-you-go *and* Go subscription) behind a single set of universal endpoints, so any OpenAI- / Anthropic-compatible client (including opencode itself) can consume them with one gateway token.
+It aggregates many OpenCode API keys (Zen pay-as-you-go _and_ Go subscription) behind a single set of universal endpoints, so any OpenAI- / Anthropic-compatible client (including opencode itself) can consume them with one gateway token.
 
 ## Features
 
@@ -20,7 +20,7 @@ It aggregates many OpenCode API keys (Zen pay-as-you-go *and* Go subscription) b
   - `GET  /v1/models` — catalog discovery
 - 🛡️ **Gateway token auth** (`Authorization: Bearer <token>`, also accepts `x-api-key`)
 - ⏱️ **Per-token rate limiting** (sliding window, configurable req/min)
-- 🖥️ **Web admin panel** (`/admin`) — Vue 3 SPA with dashboard, charts, KEY/Token/Model CRUD
+- 🖥️ **Web admin panel** (`/admin`) — Vue 3 SPA with dashboard, charts, KEY/Token/Model CRUD, dark/light theme, top bar with dropdown menus
 - 🛠️ **Admin REST API** (`/admin/*`) for programmatic management
 - 🗄️ **Embedded SQLite** (GORM), persisted to a Zeabur volume
 - 🐳 Single-binary Docker image, one-click Zeabur deploy
@@ -62,7 +62,7 @@ go run .
 #   ocsw-...
 ```
 
-Then open the admin panel at `http://localhost:3000/admin` (default password: `admin`).
+Then open the admin panel at `http://localhost:9812/admin` (default password: `admin`).
 
 Or use the REST API:
 
@@ -84,12 +84,12 @@ curl localhost:3000/v1/models
 
 Any client protocol can reach any upstream model. The gateway automatically converts through the IR (Intermediate Representation):
 
-| Client calls | Model speaks | What happens |
-|---|---|---|
-| `/v1/chat/completions` | `messages` (Claude) | Chat → IR → Messages, response Messages → IR → Chat |
-| `/v1/messages` | `chat` (DeepSeek) | Messages → IR → Chat, response Chat → IR → Messages |
-| `/v1/responses` | `messages` (Claude) | Responses → IR → Messages, response Messages → IR → Responses |
-| Same protocol | Same protocol | Transparent passthrough (no buffering) |
+| Client calls           | Model speaks        | What happens                                                  |
+| ---------------------- | ------------------- | ------------------------------------------------------------- |
+| `/v1/chat/completions` | `messages` (Claude) | Chat → IR → Messages, response Messages → IR → Chat           |
+| `/v1/messages`         | `chat` (DeepSeek)   | Messages → IR → Chat, response Chat → IR → Messages           |
+| `/v1/responses`        | `messages` (Claude) | Responses → IR → Messages, response Messages → IR → Responses |
+| Same protocol          | Same protocol       | Transparent passthrough (no buffering)                        |
 
 Streaming SSE is fully supported in all combinations.
 
@@ -109,9 +109,9 @@ Create `opencode.json` in your project (or `~/.config/opencode/opencode.json`):
         "apiKey": "{env:OCSW_TOKEN}"
       },
       "models": {
-        "glm-4.6":      { "name": "GLM 4.6" },
-        "deepseek-v3.2":{ "name": "DeepSeek V3.2" },
-        "kimi-k2":      { "name": "Kimi K2" }
+        "glm-4.6": { "name": "GLM 4.6" },
+        "deepseek-v3.2": { "name": "DeepSeek V3.2" },
+        "kimi-k2": { "name": "Kimi K2" }
       }
     },
     "opencode-sw-messages": {
@@ -139,12 +139,20 @@ export OCSW_TOKEN=ocsw-...
 
 ## Admin panel
 
-Access at `http://<gateway>/admin`. Features:
+Access at `http://<gateway>/admin` (default password: `admin`). Features:
 
 - **Dashboard** — total calls, key/token counts, avg latency, calls-by-model chart, calls-by-protocol chart, recent call log
-- **API Keys** — add/remove/toggle keys, reset cooldown, view fail counts and usage
-- **Tokens** — create/delete gateway tokens with optional group restrictions and rate limits
-- **Models** — manage the model routing table (add custom models, change upstream/protocol)
+- **API Keys** — add/remove/toggle keys, set proxy URL, reset cooldown, view fail counts and usage
+- **Tokens** — create/delete gateway tokens with optional group restrictions (checkbox multi-select) and rate limits
+- **Models** — manage the model routing table (add custom models, change upstream/protocol, select real model from dropdown)
+
+### Admin Panel UI
+
+- 🌓 **Dark/Light theme** — toggle via the top bar dropdown, preference saved to localStorage
+- 🌐 **Language switch** — Chinese/English dropdown in the top bar
+- 📋 **Custom confirm dialogs** — replaces native `confirm()` for all delete operations and logout
+- 🔽 **Dropdown menus** — language and theme selectors with smooth animation
+- ⚡ **Modular architecture** — Vue 3 SPA with ES modules (no build step required)
 
 ## Deploy on Zeabur
 
@@ -158,15 +166,15 @@ Access at `http://<gateway>/admin`. Features:
 
 ## Environment variables
 
-| Var | Default | Description |
-|---|---|---|
-| `PORT` | `3000` | HTTP listen port (Zeabur injects) |
-| `ADMIN_PASSWORD` | `admin` | Admin login password |
-| `JWT_SECRET` | (built-in) | Secret for admin JWT |
-| `DB_PATH` | `./data/opencode-sw.db` | SQLite file path |
-| `ZEN_BASE_URL` | `https://opencode.ai/zen` | Zen upstream base |
-| `GO_BASE_URL` | `https://opencode.ai/zen/go` | Go upstream base |
-| `UPSTREAM_TIMEOUT` | `120` | Upstream call timeout (seconds) |
+| Var                | Default                      | Description                                              |
+| ------------------ | ---------------------------- | -------------------------------------------------------- |
+| `PORT`             | `9812`                       | HTTP listen port (use env to override, e.g. `PORT=3000`) |
+| `ADMIN_PASSWORD`   | `admin`                      | Admin login password                                     |
+| `JWT_SECRET`       | (built-in)                   | Secret for admin JWT                                     |
+| `DB_PATH`          | `./data/opencode-sw.db`      | SQLite file path                                         |
+| `ZEN_BASE_URL`     | `https://opencode.ai/zen`    | Zen upstream base                                        |
+| `GO_BASE_URL`      | `https://opencode.ai/zen/go` | Go upstream base                                         |
+| `UPSTREAM_TIMEOUT` | `120`                        | Upstream call timeout (seconds)                          |
 
 ## Project structure
 
@@ -198,9 +206,21 @@ Access at `http://<gateway>/admin`. Features:
 │   └── ratelimit.go     # Per-token rate limiter
 ├── admin/               # Admin REST API
 │   └── router.go
-├── web/                 # Embedded admin SPA
-│   ├── embed.go
-│   └── admin.html
+├── web/                 # Embedded admin SPA (modular ES modules)
+│   ├── embed.go         # embed.FS multi-file server
+│   ├── admin.html       # Vue template (slim, ~490 lines)
+│   ├── css/
+│   │   └── admin.css    # Styles with dark/light theme variables
+│   └── js/
+│       ├── app.js       # Vue 3 app entry
+│       ├── icons.js     # SVG icons
+│       ├── locales.js   # i18n (zh/en)
+│       ├── api.js       # API client
+│       └── pages/       # Page composables
+│           ├── dashboard.js
+│           ├── keys.js
+│           ├── tokens.js
+│           └── models.js
 ├── upstream/            # HTTP client for upstream calls
 │   └── client.go
 ├── Dockerfile
