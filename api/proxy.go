@@ -323,14 +323,17 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.WriteHeader(http.StatusOK)
+		usage := usageFromSSEBuffer(upstreamProto, upstreamBody)
+		if usage == nil {
+			usage = usageFromIRUsage(streamResp)
+		}
 		if emitErr := protocol.EmitStreamResponse(c.Writer, inbound, streamResp); emitErr != nil {
 			// Headers/body already partially written; just log.
-			markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
-				usageFromIRUsage(streamResp), "stream emit error: "+emitErr.Error())
+			markAndLog(c, p, key, route, inbound, http.StatusOK, start, true, usage, "stream emit error: "+emitErr.Error())
 			return
 		}
 		p.MarkSuccess(key.ID)
-		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true, usageFromIRUsage(streamResp), "")
+		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true, usage, "")
 	} else {
 		// Non-streaming: buffer, convert, write.
 		upstreamBody, err := io.ReadAll(resp.Body)
@@ -366,7 +369,11 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		c.Writer.Write(converted)
 
 		p.MarkSuccess(key.ID)
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usageFromResponse(inbound, converted), "")
+		usage := usageFromResponse(upstreamProto, upstreamBody)
+		if usage == nil {
+			usage = usageFromResponse(inbound, converted)
+		}
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, "")
 	}
 }
 
@@ -718,6 +725,7 @@ type usageAccounting struct {
 	CacheCreationTokens  int
 	TotalTokens          int
 	CacheIncludedInInput bool
+	TotalExplicit        bool
 }
 
 func usageFromResponse(proto config.Protocol, body []byte) *usageAccounting {
@@ -735,13 +743,12 @@ func usageFromIRUsage(resp *protocol.IRResponse) *usageAccounting {
 	}
 	u := resp.Usage
 	acct := &usageAccounting{
-		InputTokens:  u.PromptTokens,
-		OutputTokens: u.CompletionTokens,
-		TotalTokens:  u.TotalTokens,
+		InputTokens:   u.PromptTokens,
+		OutputTokens:  u.CompletionTokens,
+		TotalTokens:   u.TotalTokens,
+		TotalExplicit: u.TotalTokens > 0,
 	}
-	if acct.TotalTokens == 0 {
-		acct.TotalTokens = acct.InputTokens + acct.OutputTokens
-	}
+	acct.recomputeTotalIfNeeded()
 	if acct.InputTokens == 0 && acct.OutputTokens == 0 && acct.TotalTokens == 0 {
 		return nil
 	}
@@ -789,16 +796,36 @@ func mergeUsageAccounting(base, next *usageAccounting) *usageAccounting {
 	if next.CacheCreationTokens > 0 {
 		base.CacheCreationTokens = next.CacheCreationTokens
 	}
-	if next.TotalTokens > 0 {
+	base.CacheIncludedInInput = base.CacheIncludedInInput || next.CacheIncludedInInput
+	if next.TotalExplicit {
 		base.TotalTokens = next.TotalTokens
+		base.TotalExplicit = true
 	} else {
-		base.TotalTokens = base.InputTokens + base.OutputTokens
-		if !base.CacheIncludedInInput {
-			base.TotalTokens += base.CacheTokens
+		base.recomputeTotalIfNeeded()
+	}
+	return base
+}
+
+func (u *usageAccounting) recomputeTotalIfNeeded() {
+	if u == nil || u.TotalExplicit {
+		return
+	}
+	u.TotalTokens = u.InputTokens + u.OutputTokens
+	if !u.CacheIncludedInInput {
+		u.TotalTokens += u.CacheTokens
+	}
+}
+
+func usageFromSSEBuffer(proto config.Protocol, body []byte) *usageAccounting {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	var usage *usageAccounting
+	for scanner.Scan() {
+		if next := usageFromSSELine(proto, scanner.Bytes()); next != nil {
+			usage = mergeUsageAccounting(usage, next)
 		}
 	}
-	base.CacheIncludedInInput = base.CacheIncludedInInput || next.CacheIncludedInInput
-	return base
+	return usage
 }
 
 func usageFromSSELine(proto config.Protocol, line []byte) *usageAccounting {
@@ -809,82 +836,49 @@ func usageFromSSELine(proto config.Protocol, line []byte) *usageAccounting {
 	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 		return nil
 	}
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return nil
+	}
 	switch proto {
 	case config.ProtocolChat:
-		var chunk protocol.ChatStreamChunk
-		if err := json.Unmarshal(payload, &chunk); err != nil || chunk.Usage == nil {
-			return nil
-		}
-		return usageFromRawMap(map[string]any{
-			"prompt_tokens":     chunk.Usage.PromptTokens,
-			"completion_tokens": chunk.Usage.CompletionTokens,
-			"total_tokens":      chunk.Usage.TotalTokens,
-		}, proto)
+		return usageFromRawMap(objectField(raw, "usage"), proto)
 	case config.ProtocolMessages:
-		var ev protocol.MsgStreamEvent
-		if err := json.Unmarshal(payload, &ev); err != nil {
-			return nil
+		if usage := usageFromRawMap(objectField(raw, "usage"), proto); usage != nil {
+			return usage
 		}
-		if ev.Type == "message_stop" && ev.Usage != nil {
-			return usageFromRawMap(map[string]any{
-				"input_tokens":  ev.Usage.InputTokens,
-				"output_tokens": ev.Usage.OutputTokens,
-			}, proto)
-		}
-		if ev.Type == "message_start" && ev.Message != nil && ev.Message.Usage != nil {
-			return usageFromRawMap(map[string]any{
-				"input_tokens":  ev.Message.Usage.InputTokens,
-				"output_tokens": ev.Message.Usage.OutputTokens,
-			}, proto)
-		}
-		if ev.Usage != nil {
-			return usageFromRawMap(map[string]any{
-				"output_tokens": ev.Usage.OutputTokens,
-			}, proto)
+		if msg := objectField(raw, "message"); msg != nil {
+			return usageFromRawMap(objectField(msg, "usage"), proto)
 		}
 	case config.ProtocolResponses:
-		var ev protocol.RespStreamEvent
-		if err := json.Unmarshal(payload, &ev); err != nil || ev.Response == nil || ev.Response.Usage == nil {
-			return nil
+		if response := objectField(raw, "response"); response != nil {
+			if usage := usageFromRawMap(objectField(response, "usage"), proto); usage != nil {
+				return usage
+			}
 		}
-		return usageFromRawMap(map[string]any{
-			"input_tokens":  ev.Response.Usage.InputTokens,
-			"output_tokens": ev.Response.Usage.OutputTokens,
-			"total_tokens":  ev.Response.Usage.TotalTokens,
-		}, proto)
+		return usageFromRawMap(objectField(raw, "usage"), proto)
 	}
 	return nil
 }
 
-func usageFromRawMap(u map[string]any, proto config.Protocol) *usageAccounting {
+func usageFromRawMap(u map[string]any, _ config.Protocol) *usageAccounting {
 	if len(u) == 0 {
 		return nil
 	}
 	acct := &usageAccounting{}
-	switch proto {
-	case config.ProtocolMessages, config.ProtocolResponses:
-		acct.InputTokens = numberField(u, "input_tokens")
-		acct.OutputTokens = numberField(u, "output_tokens")
-	default:
-		acct.InputTokens = numberField(u, "prompt_tokens")
-		acct.OutputTokens = numberField(u, "completion_tokens")
-	}
+	acct.InputTokens = firstNumberField(u, "prompt_tokens", "input_tokens")
+	acct.OutputTokens = firstNumberField(u, "completion_tokens", "output_tokens")
 	acct.CacheReadTokens, acct.CacheIncludedInInput = cacheReadTokens(u)
-	acct.CacheCreationTokens = cacheCreationTokens(u)
+	var cacheCreationIncluded bool
+	acct.CacheCreationTokens, cacheCreationIncluded = cacheCreationTokens(u)
+	acct.CacheIncludedInInput = acct.CacheIncludedInInput || cacheCreationIncluded
 	acct.CacheTokens = firstNumberField(u, "cache_tokens", "cached_tokens", "total_cache_tokens")
 	if separate := acct.CacheReadTokens + acct.CacheCreationTokens; acct.CacheTokens < separate {
 		acct.CacheTokens = separate
 	}
 	acct.TotalTokens = numberField(u, "total_tokens")
-	if acct.TotalTokens == 0 {
-		acct.TotalTokens = acct.InputTokens + acct.OutputTokens
-		if !acct.CacheIncludedInInput {
-			acct.TotalTokens += acct.CacheTokens
-		}
-	}
-	if acct.InputTokens == 0 && acct.OutputTokens == 0 && acct.CacheTokens == 0 && acct.TotalTokens == 0 {
-		return nil
-	}
+	acct.TotalExplicit = acct.TotalTokens > 0
+	acct.recomputeTotalIfNeeded()
 	return acct
 }
 
@@ -894,11 +888,19 @@ func cacheReadTokens(u map[string]any) (int, bool) {
 		"input_cache_read_tokens",
 		"cache_read_tokens",
 		"prompt_cache_hit_tokens",
+		"prompt_cache_read_tokens",
+		"cached_tokens",
 	)
 	nested := 0
 	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
 		if details := objectField(u, key); details != nil {
-			nested = maxInt(nested, numberField(details, "cached_tokens"))
+			nested = maxInt(nested, firstNumberField(details,
+				"cached_tokens",
+				"cache_read_tokens",
+				"cache_read_input_tokens",
+				"input_cache_read_tokens",
+				"read_tokens",
+			))
 		}
 	}
 	if nested > 0 {
@@ -907,25 +909,44 @@ func cacheReadTokens(u map[string]any) (int, bool) {
 	return direct, false
 }
 
-func cacheCreationTokens(u map[string]any) int {
+func cacheCreationTokens(u map[string]any) (int, bool) {
 	total := firstNumberField(u,
 		"cache_creation_input_tokens",
 		"cache_write_input_tokens",
 		"input_cache_write_tokens",
 		"cache_creation_tokens",
 		"prompt_cache_miss_tokens",
+		"prompt_cache_write_tokens",
 	)
+	detailTotal := 0
 	if details := objectField(u, "cache_creation"); details != nil {
 		for _, v := range details {
-			total += numberValue(v)
+			detailTotal += numberValue(v)
 		}
 	}
 	if details := objectField(u, "cache_creation_input_tokens_details"); details != nil {
 		for _, v := range details {
-			total += numberValue(v)
+			detailTotal += numberValue(v)
 		}
 	}
-	return total
+	total = maxInt(total, detailTotal)
+	nested := 0
+	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
+		if details := objectField(u, key); details != nil {
+			nested = maxInt(nested, firstNumberField(details,
+				"cache_creation_tokens",
+				"cache_creation_input_tokens",
+				"cache_write_tokens",
+				"cache_write_input_tokens",
+				"input_cache_write_tokens",
+				"created_tokens",
+			))
+		}
+	}
+	if nested > 0 {
+		return maxInt(total, nested), true
+	}
+	return total, false
 }
 
 func numberField(m map[string]any, key string) int {
@@ -958,6 +979,9 @@ func numberValue(v any) int {
 		return int(value)
 	case json.Number:
 		n, _ := value.Int64()
+		return int(n)
+	case string:
+		n, _ := strconv.ParseFloat(strings.TrimSpace(value), 64)
 		return int(n)
 	default:
 		return 0

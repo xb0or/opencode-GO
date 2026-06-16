@@ -111,6 +111,32 @@ func TestUsageFromResponseIncludesCacheTokens(t *testing.T) {
 	}
 }
 
+func TestUsageFromResponseAcceptsAlternateTokenFieldNames(t *testing.T) {
+	chat := usageFromResponse(config.ProtocolChat, []byte(`{
+		"usage":{
+			"input_tokens":3,
+			"output_tokens":2,
+			"input_tokens_details":{"cache_creation_tokens":4}
+		}
+	}`))
+	if chat == nil {
+		t.Fatal("chat usage should be parsed from input/output token fields")
+	}
+	if chat.InputTokens != 3 || chat.OutputTokens != 2 || chat.CacheCreationTokens != 4 || chat.CacheTokens != 4 || chat.TotalTokens != 5 {
+		t.Fatalf("unexpected alternate chat usage: %#v", chat)
+	}
+
+	zero := usageFromResponse(config.ProtocolChat, []byte(`{
+		"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}
+	}`))
+	if zero == nil {
+		t.Fatal("explicit zero usage should be preserved instead of treated as missing")
+	}
+	if zero.TotalTokens != 0 {
+		t.Fatalf("zero usage total = %d, want 0", zero.TotalTokens)
+	}
+}
+
 func TestEnableStreamUsageForOpenAIProtocols(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[],"stream":true}`)
 	out, ok := enableStreamUsage(body, config.ProtocolChat, true)
@@ -151,6 +177,16 @@ func TestUsageFromSSELineParsesStreamUsage(t *testing.T) {
 	messages := usageFromSSELine(config.ProtocolMessages, []byte(`data: {"type":"message_stop","usage":{"input_tokens":17,"output_tokens":9}}`))
 	if messages == nil || messages.InputTokens != 17 || messages.OutputTokens != 9 || messages.TotalTokens != 26 {
 		t.Fatalf("unexpected messages stream usage: %#v", messages)
+	}
+
+	messagesCache := usageFromSSELine(config.ProtocolMessages, []byte(`data: {"type":"message_delta","usage":{"output_tokens":4,"cache_read_input_tokens":7,"cache_creation_input_tokens":3}}`))
+	if messagesCache == nil || messagesCache.OutputTokens != 4 || messagesCache.CacheReadTokens != 7 || messagesCache.CacheCreationTokens != 3 || messagesCache.CacheTokens != 10 || messagesCache.TotalTokens != 14 {
+		t.Fatalf("unexpected messages cache stream usage: %#v", messagesCache)
+	}
+
+	chatCache := usageFromSSELine(config.ProtocolChat, []byte(`data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":2}}}`))
+	if chatCache == nil || chatCache.InputTokens != 5 || chatCache.OutputTokens != 1 || chatCache.CacheReadTokens != 2 || chatCache.CacheTokens != 2 || chatCache.TotalTokens != 6 {
+		t.Fatalf("unexpected chat cache stream usage: %#v", chatCache)
 	}
 }
 
@@ -551,6 +587,80 @@ func TestProxyLogsSameProtocolStreamUsage(t *testing.T) {
 	}
 	if !logRow.Stream || logRow.InputTokens != 12 || logRow.OutputTokens != 8 || logRow.TotalTokens != 20 {
 		t.Fatalf("unexpected stream usage log: %#v", logRow)
+	}
+}
+
+func TestProxyLogsRawCrossProtocolCacheUsage(t *testing.T) {
+	if err := store.InitForTest("file:api_cross_protocol_cache_usage?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"msg_1",
+			"type":"message",
+			"role":"assistant",
+			"model":"m",
+			"content":[{"type":"text","text":"hello"}],
+			"stop_reason":"end_turn",
+			"usage":{
+				"input_tokens":100,
+				"output_tokens":25,
+				"cache_read_input_tokens":60,
+				"cache_creation_input_tokens":10
+			}
+		}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "cross-cache-model",
+		Name:      "Cross Cache Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolMessages,
+		RealModel: "m",
+		Group:     "go",
+	})
+	tok, err := pool.CreateToken("cross-cache-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "upstream-key",
+		Group:   "go",
+		Label:   "test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"cross-cache-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var logRow store.UsageLog
+	if err := store.DB().First(&logRow).Error; err != nil {
+		t.Fatalf("load usage log: %v", err)
+	}
+	if logRow.InputTokens != 100 || logRow.OutputTokens != 25 ||
+		logRow.CacheTokens != 70 || logRow.CacheReadTokens != 60 ||
+		logRow.CacheCreationTokens != 10 || logRow.TotalTokens != 195 {
+		t.Fatalf("unexpected cross-protocol usage log: %#v", logRow)
 	}
 }
 

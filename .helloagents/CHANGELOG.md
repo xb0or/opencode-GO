@@ -1,3 +1,9 @@
+## 2026-06-17
+
+- 修复 issue #11：usage 响应即使显式返回 0 token 也会被识别为有效 usage，不再误判为缺失统计。
+- 扩展网关 token 用量解析，兼容 `input_tokens`/`output_tokens`、多种 cache read/write 字段以及字符串数值字段，流式与非流式均可记录缓存 Token。
+- 跨协议响应日志优先使用上游原始 usage 统计，避免转换到 IR 后丢失缓存 Token 细分，并补充回归测试。
+
 ## 2026-06-16
 
 - 修复代理转发时透传客户端 `Accept-Encoding` 导致上游压缩响应未被 Go Transport 自动解压的问题；跨协议与同协议响应现在都能正确解码上游压缩体，避免 `invalid character '\\x1b'` 之类的乱码 JSON 解析失败。
@@ -83,3 +89,4 @@
 - 修复代理遇到上游 KEY 相关错误时直接返回的问题：`401/402/403/429/5xx` 会先记录失败 KEY，再自动尝试同组其它可用 KEY。
 - 最近调用记录现在会从上游非 2xx 响应体提取并脱敏错误摘要，写入 `UsageLog.Error`，便于后台定位具体失败原因。
 - 新增 API 与 KEY 池回归测试，覆盖 fallback 成功、最终上游错误展示、候选 KEY 顺序。
+
