@@ -21,17 +21,17 @@ type ChatRequest struct {
 }
 
 type ChatMessage struct {
-	Role       string          `json:"role"`
-	Content    any             `json:"content,omitempty"` // string | []ChatContent
-	Name       string          `json:"name,omitempty"`
-	ToolCalls  []ChatToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
+	Role       string         `json:"role"`
+	Content    any            `json:"content,omitempty"` // string | []ChatContent
+	Name       string         `json:"name,omitempty"`
+	ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
 }
 
 type ChatContent struct {
-	Type     string         `json:"type"`
-	Text     string         `json:"text,omitempty"`
-	ImageURL *ChatImageURL  `json:"image_url,omitempty"`
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *ChatImageURL `json:"image_url,omitempty"`
 }
 
 type ChatImageURL struct {
@@ -51,9 +51,9 @@ type ChatToolFunction struct {
 }
 
 type ChatToolCall struct {
-	ID       string             `json:"id"`
-	Type     string             `json:"type"` // function
-	Function ChatToolCallFunc   `json:"function"`
+	ID       string           `json:"id"`
+	Type     string           `json:"type"` // function
+	Function ChatToolCallFunc `json:"function"`
 }
 
 type ChatToolCallFunc struct {
@@ -72,9 +72,9 @@ type ChatResponse struct {
 }
 
 type ChatChoice struct {
-	Index        int          `json:"index"`
-	Message      ChatMessage  `json:"message"`
-	FinishReason string       `json:"finish_reason,omitempty"`
+	Index        int         `json:"index"`
+	Message      ChatMessage `json:"message"`
+	FinishReason string      `json:"finish_reason,omitempty"`
 }
 
 type ChatUsage struct {
@@ -235,6 +235,13 @@ func DecodeChatStreamChunk(data []byte) (*IRStreamEvent, error) {
 		return nil, fmt.Errorf("chat: decode stream chunk: %w", err)
 	}
 	ev := &IRStreamEvent{Type: "completion"}
+	if chunk.Usage != nil {
+		ev.Response = &IRResponse{Model: chunk.Model, Usage: &IRUsage{
+			PromptTokens:     chunk.Usage.PromptTokens,
+			CompletionTokens: chunk.Usage.CompletionTokens,
+			TotalTokens:      chunk.Usage.TotalTokens,
+		}}
+	}
 	for _, ch := range chunk.Choices {
 		msg := chatMsgToIR(ch.Delta)
 		fin := ""
@@ -258,8 +265,22 @@ func EncodeChatStreamChunk(ev *IRStreamEvent) ([]byte, error) {
 		Object:  "chat.completion.chunk",
 		Created: 0,
 	}
+	if ev.Response != nil {
+		chunk.ID = ev.Response.ID
+		chunk.Model = ev.Response.Model
+		if ev.Response.Usage != nil {
+			chunk.Usage = &ChatUsage{
+				PromptTokens:     ev.Response.Usage.PromptTokens,
+				CompletionTokens: ev.Response.Usage.CompletionTokens,
+				TotalTokens:      ev.Response.Usage.TotalTokens,
+			}
+		}
+	}
 	if ev.Choice != nil {
-		delta := irMsgToChat(*ev.Choice.Delta)
+		delta := ChatMessage{}
+		if ev.Choice.Delta != nil {
+			delta = irMsgToChat(*ev.Choice.Delta)
+		}
 		sc := ChatStreamChoice{Index: ev.Choice.Index, Delta: delta}
 		if ev.Choice.FinishReason != "" {
 			fin := ev.Choice.FinishReason

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -120,6 +121,9 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	// Rewrite the model field in the body to the upstream's real model id.
 	rewritten, ok := rewriteModel(upstreamBody, route.RealModel)
 	if ok {
+		upstreamBody = rewritten
+	}
+	if rewritten, ok := enableStreamUsage(upstreamBody, upstreamProto, head.Stream); ok {
 		upstreamBody = rewritten
 	}
 
@@ -244,16 +248,16 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 
 	copyResponseHeaders(c, resp)
 	c.Writer.WriteHeader(resp.StatusCode)
-	_, copyErr := io.Copy(c.Writer, resp.Body)
+	usage, copyErr := proxyStreamAndCaptureUsage(c.Writer, resp.Body, inbound)
 
 	if resp.StatusCode < 400 && copyErr == nil {
 		p.MarkSuccess(key.ID)
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, "")
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, "")
 	} else if shouldMarkUpstreamFailure(resp.StatusCode) {
 		p.MarkFailure(key.ID)
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, copyErrString(copyErr))
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, copyErrString(copyErr))
 	} else {
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, copyErrString(copyErr))
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, copyErrString(copyErr))
 	}
 }
 
@@ -290,14 +294,14 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.WriteHeader(http.StatusOK)
 
-		err := protocol.StreamConverter(c.Writer, resp.Body, upstreamProto, inbound)
+		streamResp, err := protocol.StreamConverterWithUsage(c.Writer, resp.Body, upstreamProto, inbound)
 		if err != nil {
 			p.MarkFailure(key.ID)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, err.Error())
 			return
 		}
 		p.MarkSuccess(key.ID)
-		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true, nil, "")
+		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true, usageFromIRUsage(streamResp), "")
 	} else {
 		// Non-streaming: buffer, convert, write.
 		upstreamBody, err := io.ReadAll(resp.Body)
@@ -423,6 +427,32 @@ func rewriteModel(body []byte, realModel string) ([]byte, bool) {
 		return body, false
 	}
 	m["model"] = realModel
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
+// enableStreamUsage asks upstream protocols that support it to include final
+// usage accounting in SSE streams so admin usage logs can record token counts.
+func enableStreamUsage(body []byte, proto config.Protocol, stream bool) ([]byte, bool) {
+	if !stream {
+		return body, false
+	}
+	if proto != config.ProtocolChat {
+		return body, false
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body, false
+	}
+	opts := objectField(m, "stream_options")
+	if opts == nil {
+		opts = map[string]any{}
+	}
+	opts["include_usage"] = true
+	m["stream_options"] = opts
 	out, err := json.Marshal(m)
 	if err != nil {
 		return body, false
@@ -642,6 +672,137 @@ func usageFromResponse(proto config.Protocol, body []byte) *usageAccounting {
 		return nil
 	}
 	u, _ := raw["usage"].(map[string]any)
+	return usageFromRawMap(u, proto)
+}
+
+func usageFromIRUsage(resp *protocol.IRResponse) *usageAccounting {
+	if resp == nil || resp.Usage == nil {
+		return nil
+	}
+	u := resp.Usage
+	acct := &usageAccounting{
+		InputTokens:  u.PromptTokens,
+		OutputTokens: u.CompletionTokens,
+		TotalTokens:  u.TotalTokens,
+	}
+	if acct.TotalTokens == 0 {
+		acct.TotalTokens = acct.InputTokens + acct.OutputTokens
+	}
+	if acct.InputTokens == 0 && acct.OutputTokens == 0 && acct.TotalTokens == 0 {
+		return nil
+	}
+	return acct
+}
+
+func proxyStreamAndCaptureUsage(dst io.Writer, src io.Reader, proto config.Protocol) (*usageAccounting, error) {
+	scanner := bufio.NewScanner(src)
+	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
+	var usage *usageAccounting
+	for scanner.Scan() {
+		line := append([]byte(nil), scanner.Bytes()...)
+		if _, err := dst.Write(append(line, '\n')); err != nil {
+			return usage, err
+		}
+		if nextUsage := usageFromSSELine(proto, line); nextUsage != nil {
+			usage = mergeUsageAccounting(usage, nextUsage)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return usage, err
+	}
+	return usage, nil
+}
+
+func mergeUsageAccounting(base, next *usageAccounting) *usageAccounting {
+	if base == nil {
+		return next
+	}
+	if next == nil {
+		return base
+	}
+	if next.InputTokens > 0 {
+		base.InputTokens = next.InputTokens
+	}
+	if next.OutputTokens > 0 {
+		base.OutputTokens = next.OutputTokens
+	}
+	if next.CacheTokens > 0 {
+		base.CacheTokens = next.CacheTokens
+	}
+	if next.CacheReadTokens > 0 {
+		base.CacheReadTokens = next.CacheReadTokens
+	}
+	if next.CacheCreationTokens > 0 {
+		base.CacheCreationTokens = next.CacheCreationTokens
+	}
+	if next.TotalTokens > 0 {
+		base.TotalTokens = next.TotalTokens
+	} else {
+		base.TotalTokens = base.InputTokens + base.OutputTokens
+		if !base.CacheIncludedInInput {
+			base.TotalTokens += base.CacheTokens
+		}
+	}
+	base.CacheIncludedInInput = base.CacheIncludedInInput || next.CacheIncludedInInput
+	return base
+}
+
+func usageFromSSELine(proto config.Protocol, line []byte) *usageAccounting {
+	if !bytes.HasPrefix(line, []byte("data: ")) {
+		return nil
+	}
+	payload := bytes.TrimSpace(line[6:])
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return nil
+	}
+	switch proto {
+	case config.ProtocolChat:
+		var chunk protocol.ChatStreamChunk
+		if err := json.Unmarshal(payload, &chunk); err != nil || chunk.Usage == nil {
+			return nil
+		}
+		return usageFromRawMap(map[string]any{
+			"prompt_tokens":     chunk.Usage.PromptTokens,
+			"completion_tokens": chunk.Usage.CompletionTokens,
+			"total_tokens":      chunk.Usage.TotalTokens,
+		}, proto)
+	case config.ProtocolMessages:
+		var ev protocol.MsgStreamEvent
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			return nil
+		}
+		if ev.Type == "message_stop" && ev.Usage != nil {
+			return usageFromRawMap(map[string]any{
+				"input_tokens":  ev.Usage.InputTokens,
+				"output_tokens": ev.Usage.OutputTokens,
+			}, proto)
+		}
+		if ev.Type == "message_start" && ev.Message != nil && ev.Message.Usage != nil {
+			return usageFromRawMap(map[string]any{
+				"input_tokens":  ev.Message.Usage.InputTokens,
+				"output_tokens": ev.Message.Usage.OutputTokens,
+			}, proto)
+		}
+		if ev.Usage != nil {
+			return usageFromRawMap(map[string]any{
+				"output_tokens": ev.Usage.OutputTokens,
+			}, proto)
+		}
+	case config.ProtocolResponses:
+		var ev protocol.RespStreamEvent
+		if err := json.Unmarshal(payload, &ev); err != nil || ev.Response == nil || ev.Response.Usage == nil {
+			return nil
+		}
+		return usageFromRawMap(map[string]any{
+			"input_tokens":  ev.Response.Usage.InputTokens,
+			"output_tokens": ev.Response.Usage.OutputTokens,
+			"total_tokens":  ev.Response.Usage.TotalTokens,
+		}, proto)
+	}
+	return nil
+}
+
+func usageFromRawMap(u map[string]any, proto config.Protocol) *usageAccounting {
 	if len(u) == 0 {
 		return nil
 	}

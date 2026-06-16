@@ -777,6 +777,11 @@ select:focus {
   height: 100px;
   background: repeating-linear-gradient(90deg, transparent 0 18px, rgba(255, 255, 255, 0.08) 18px 19px);
   transform: rotate(-4deg);
+  pointer-events: none;
+}
+.page-hero > * {
+  position: relative;
+  z-index: 1;
 }
 .page-hero h1 {
   margin: 4px 0 8px;

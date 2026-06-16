@@ -56,6 +56,20 @@ createApp({
       return value.toLocaleString();
     }
 
+    function emptyLabel(value) {
+      if (value === null || value === undefined) return "—";
+      if (typeof value === "string" && value.trim() === "") return "—";
+      return value;
+    }
+
+    function streamLabel(stream) {
+      return stream ? t("table.streamYes") : t("table.streamNo");
+    }
+
+    function streamBadgeClass(stream) {
+      return "badge " + (stream ? "badge-accent" : "badge-blue");
+    }
+
     function fmtPrice(pricing, key) {
       if (!pricing || !pricing[key]) return "—";
       const perToken = Number(pricing[key]);
@@ -238,6 +252,9 @@ createApp({
       showToast,
       fmtTime,
       fmtNumber,
+      emptyLabel,
+      streamLabel,
+      streamBadgeClass,
       fmtPrice,
       fmtCapabilities,
       capabilityLabel,

@@ -94,6 +94,49 @@ func TestUsageFromResponseIncludesCacheTokens(t *testing.T) {
 	}
 }
 
+func TestEnableStreamUsageForOpenAIProtocols(t *testing.T) {
+	body := []byte(`{"model":"m","messages":[],"stream":true}`)
+	out, ok := enableStreamUsage(body, config.ProtocolChat, true)
+	if !ok {
+		t.Fatal("enableStreamUsage should rewrite chat stream request")
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("rewritten body is not JSON: %v", err)
+	}
+	opts, _ := got["stream_options"].(map[string]any)
+	if opts["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage = %#v, want true", opts["include_usage"])
+	}
+
+	out, ok = enableStreamUsage(body, config.ProtocolMessages, true)
+	if ok || string(out) != string(body) {
+		t.Fatalf("messages stream request should not be rewritten: ok=%v body=%s", ok, string(out))
+	}
+
+	out, ok = enableStreamUsage([]byte(`{"model":"m","input":"hi","stream":true}`), config.ProtocolResponses, true)
+	if ok {
+		t.Fatalf("responses stream request should not be rewritten because Responses API usage is emitted by default: body=%s", string(out))
+	}
+}
+
+func TestUsageFromSSELineParsesStreamUsage(t *testing.T) {
+	chat := usageFromSSELine(config.ProtocolChat, []byte(`data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}}`))
+	if chat == nil || chat.InputTokens != 11 || chat.OutputTokens != 7 || chat.TotalTokens != 18 {
+		t.Fatalf("unexpected chat stream usage: %#v", chat)
+	}
+
+	responses := usageFromSSELine(config.ProtocolResponses, []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":13,"output_tokens":5,"total_tokens":18}}}`))
+	if responses == nil || responses.InputTokens != 13 || responses.OutputTokens != 5 || responses.TotalTokens != 18 {
+		t.Fatalf("unexpected responses stream usage: %#v", responses)
+	}
+
+	messages := usageFromSSELine(config.ProtocolMessages, []byte(`data: {"type":"message_stop","usage":{"input_tokens":17,"output_tokens":9}}`))
+	if messages == nil || messages.InputTokens != 17 || messages.OutputTokens != 9 || messages.TotalTokens != 26 {
+		t.Fatalf("unexpected messages stream usage: %#v", messages)
+	}
+}
+
 func TestEstimateUsageCostSeparatesCachedPromptTokens(t *testing.T) {
 	route := config.ModelRoute{
 		Pricing: map[string]string{
@@ -361,6 +404,74 @@ func TestProxyMappedStreamResponseIsPassedThrough(t *testing.T) {
 	}
 	if got["model"] != "glm-51" || got["stream"] != true {
 		t.Fatalf("upstream body = %#v, want mapped stream request", got)
+	}
+	opts, _ := got["stream_options"].(map[string]any)
+	if opts["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage = %#v, want true; body=%s", opts["include_usage"], string(upstreamBody))
+	}
+}
+
+func TestProxyLogsSameProtocolStreamUsage(t *testing.T) {
+	if err := store.InitForTest("file:api_stream_usage?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "stream-usage-model",
+		Name:      "Stream Usage Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "stream-usage-model",
+		Group:     "go",
+	})
+	tok, err := pool.CreateToken("stream-usage-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "upstream-key",
+		Group:   "go",
+		Label:   "test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"stream-usage-model","messages":[],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"usage"`) {
+		t.Fatalf("stream usage chunk was not forwarded: %s", w.Body.String())
+	}
+	var logRow store.UsageLog
+	if err := store.DB().First(&logRow).Error; err != nil {
+		t.Fatalf("load usage log: %v", err)
+	}
+	if !logRow.Stream || logRow.InputTokens != 12 || logRow.OutputTokens != 8 || logRow.TotalTokens != 20 {
+		t.Fatalf("unexpected stream usage log: %#v", logRow)
 	}
 }
 
