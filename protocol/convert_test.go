@@ -666,6 +666,45 @@ func TestStreamConverterWithUsageReturnsBufferedUsage(t *testing.T) {
 	}
 }
 
+func TestStreamConverterChatToolCallToResponsesFunctionCall(t *testing.T) {
+	src := strings.NewReader(
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"\"}}]}}]}\n\n" +
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n" +
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+			"data: [DONE]\n\n")
+	var dst bytes.Buffer
+	resp, err := StreamConverterWithUsage(&dst, src, config.ProtocolChat, config.ProtocolResponses)
+	if err != nil {
+		t.Fatalf("StreamConverterWithUsage error: %v", err)
+	}
+	if resp == nil || len(resp.Choices) != 1 || resp.Choices[0].Message == nil || len(resp.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("buffered response missing tool call: %#v", resp)
+	}
+	tc := resp.Choices[0].Message.ToolCalls[0]
+	if tc.ID != "call_1" || tc.Name != "read_file" || tc.Arguments != `{"path":"README.md"}` {
+		t.Fatalf("buffered tool call = %#v", tc)
+	}
+	out := dst.String()
+	for _, want := range []string{
+		`"type":"function_call"`,
+		`"call_id":"call_1"`,
+		`"name":"read_file"`,
+		`"arguments":"{\"path\":\"README.md\"}"`,
+		`"type":"response.function_call_arguments.delta"`,
+		`"type":"response.function_call_arguments.done"`,
+		`"type":"response.output_item.done"`,
+		`"type":"response.completed"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("responses stream missing %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `"type":"message","role":"assistant","content":null`) {
+		t.Fatalf("responses stream should not emit an empty message item before tool call:\n%s", out)
+	}
+}
+
 func TestEncodeDecodeMessagesStreamEvent(t *testing.T) {
 	ev := &IRStreamEvent{
 		Type:         "content_block_delta",

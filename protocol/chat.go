@@ -51,6 +51,7 @@ type ChatToolFunction struct {
 }
 
 type ChatToolCall struct {
+	Index    int              `json:"index,omitempty"`
 	ID       string           `json:"id"`
 	Type     string           `json:"type"` // function
 	Function ChatToolCallFunc `json:"function"`
@@ -322,6 +323,7 @@ func chatMsgToIR(m ChatMessage) IRMessage {
 	}
 	for _, tc := range m.ToolCalls {
 		ir.ToolCalls = append(ir.ToolCalls, IRToolCall{
+			Index:     tc.Index,
 			ID:        tc.ID,
 			Name:      tc.Function.Name,
 			Arguments: tc.Function.Arguments,
@@ -354,10 +356,11 @@ func irMsgToChat(m IRMessage) ChatMessage {
 	} else {
 		cm.Content = ""
 	}
-	for _, tc := range cleanIRToolCalls(m.ToolCalls) {
+	for idx, tc := range cleanIRToolCalls(m.ToolCalls) {
 		cm.ToolCalls = append(cm.ToolCalls, ChatToolCall{
-			ID:   tc.ID,
-			Type: "function",
+			Index: idx,
+			ID:    tc.ID,
+			Type:  "function",
 			Function: ChatToolCallFunc{
 				Name:      tc.Name,
 				Arguments: tc.Arguments,

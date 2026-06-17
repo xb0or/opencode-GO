@@ -81,10 +81,18 @@ func DecodeChatSSE(r io.Reader) (*IRResponse, error) {
 			}
 			if len(ch.Delta.ToolCalls) > 0 {
 				tc := ch.Delta.ToolCalls[0]
-				if len(msg.ToolCalls) == 0 {
-					msg.ToolCalls = append(msg.ToolCalls, IRToolCall{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments})
-				} else {
-					msg.ToolCalls[0].Arguments += tc.Arguments
+				idx := tc.Index
+				for len(msg.ToolCalls) <= idx {
+					msg.ToolCalls = append(msg.ToolCalls, IRToolCall{})
+				}
+				if tc.ID != "" {
+					msg.ToolCalls[idx].ID = tc.ID
+				}
+				if tc.Name != "" {
+					msg.ToolCalls[idx].Name = tc.Name
+				}
+				if tc.Arguments != "" {
+					msg.ToolCalls[idx].Arguments += tc.Arguments
 				}
 			}
 		}
@@ -97,6 +105,7 @@ func DecodeChatSSE(r io.Reader) (*IRResponse, error) {
 		return nil, err
 	}
 	msg.Role = "assistant"
+	msg.ToolCalls = cleanIRToolCalls(msg.ToolCalls)
 	resp.Choices = []IRChoice{{Index: 0, Message: &msg, FinishReason: finishReason}}
 	return resp, nil
 }

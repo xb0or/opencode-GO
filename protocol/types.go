@@ -73,6 +73,7 @@ type IRTool struct {
 
 // IRToolCall is a tool invocation made by the assistant.
 type IRToolCall struct {
+	Index    int    `json:"index,omitempty"`
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Arguments string `json:"arguments"` // JSON string

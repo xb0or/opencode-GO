@@ -447,6 +447,9 @@ func emitMessagesStream(dst io.Writer, resp *IRResponse) error {
 // emitResponsesStream writes a buffered IRResponse as a Responses API SSE stream.
 func emitResponsesStream(dst io.Writer, resp *IRResponse) error {
 	enc := NewResponsesStreamEncoder(dst)
+	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
+		return enc.WriteDone()
+	}
 	msg := resp.Choices[0].Message
 
 	// response.created
@@ -458,42 +461,68 @@ func emitResponsesStream(dst io.Writer, resp *IRResponse) error {
 		return err
 	}
 
-	// response.output_item.added
-	itemAdded := &IRStreamEvent{
-		Type:   "response.output_item.added",
-		Choice: &IRChoice{Index: 0, Delta: &IRMessage{Role: "assistant"}},
-	}
-	if err := enc.WriteEvent(itemAdded); err != nil {
-		return err
-	}
-
+	outputIndex := 0
 	// Text delta.
 	if msg.Text != "" {
+		itemAdded := &IRStreamEvent{
+			Type:   "response.output_item.added",
+			Choice: &IRChoice{Index: outputIndex, Delta: &IRMessage{Role: "assistant"}},
+		}
+		if err := enc.WriteEvent(itemAdded); err != nil {
+			return err
+		}
 		deltaEv := &IRStreamEvent{
 			Type:         "response.output_text.delta",
 			ContentDelta: msg.Text,
-			Choice:       &IRChoice{Index: 0},
+			Choice:       &IRChoice{Index: outputIndex},
 		}
 		if err := enc.WriteEvent(deltaEv); err != nil {
 			return err
 		}
 		doneEv := &IRStreamEvent{
 			Type:   "response.output_text.done",
-			Choice: &IRChoice{Index: 0},
+			Choice: &IRChoice{Index: outputIndex},
 		}
 		if err := enc.WriteEvent(doneEv); err != nil {
 			return err
 		}
+		textDone := &IRStreamEvent{
+			Type: "response.output_item.done",
+			Choice: &IRChoice{
+				Index:   outputIndex,
+				Message: &IRMessage{Role: "assistant", Text: msg.Text},
+			},
+		}
+		if err := enc.WriteEvent(textDone); err != nil {
+			return err
+		}
+		outputIndex++
 	}
 
 	// Tool calls.
-	for _, tc := range msg.ToolCalls {
+	for _, tc := range cleanIRToolCalls(msg.ToolCalls) {
+		added := &IRStreamEvent{
+			Type: "response.output_item.added",
+			Choice: &IRChoice{
+				Index: outputIndex,
+				Delta: &IRMessage{
+					ToolCalls: []IRToolCall{{ID: tc.ID, Name: tc.Name}},
+				},
+			},
+		}
+		if err := enc.WriteEvent(added); err != nil {
+			return err
+		}
 		// function_call_arguments.delta
 		if tc.Arguments != "" {
 			deltaEv := &IRStreamEvent{
 				Type:         "response.function_call_arguments.delta",
 				ContentDelta: tc.Arguments,
-				Choice:       &IRChoice{Index: 0},
+				ToolCallDelta: &IRToolCallDelta{
+					Index:     outputIndex,
+					Arguments: tc.Arguments,
+				},
+				Choice: &IRChoice{Index: outputIndex},
 			}
 			if err := enc.WriteEvent(deltaEv); err != nil {
 				return err
@@ -502,26 +531,24 @@ func emitResponsesStream(dst io.Writer, resp *IRResponse) error {
 		doneEv := &IRStreamEvent{
 			Type: "response.function_call_arguments.done",
 			Choice: &IRChoice{
-				Index:   0,
+				Index:   outputIndex,
 				Message: &IRMessage{ToolCalls: []IRToolCall{{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}}},
 			},
 		}
 		if err := enc.WriteEvent(doneEv); err != nil {
 			return err
 		}
-	}
-
-	// response.output_item.done
-	finReason := "stop"
-	if len(resp.Choices) > 0 && resp.Choices[0].FinishReason != "" {
-		finReason = resp.Choices[0].FinishReason
-	}
-	itemDone := &IRStreamEvent{
-		Type:   "response.output_item.done",
-		Choice: &IRChoice{Index: 0, Message: msg, FinishReason: finReason},
-	}
-	if err := enc.WriteEvent(itemDone); err != nil {
-		return err
+		itemDone := &IRStreamEvent{
+			Type: "response.output_item.done",
+			Choice: &IRChoice{
+				Index:   outputIndex,
+				Message: &IRMessage{ToolCalls: []IRToolCall{{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}}},
+			},
+		}
+		if err := enc.WriteEvent(itemDone); err != nil {
+			return err
+		}
+		outputIndex++
 	}
 
 	// response.completed

@@ -1,5 +1,11 @@
 ## 2026-06-17
 
+- 修复 Chat SSE 转 Responses SSE 的工具调用输出语义：工具调用现在输出完整 `function_call` item，不再先发空 assistant message，避免 Codex 工具调用时出现空回复。
+- Chat 流式 tool call 聚合支持 `index`、分片参数、name/id 回填，并过滤无效 tool call。
+- 补充 Chat 工具调用流转换为 Responses `function_call` 事件的回归测试，验证 `go test ./...` 通过。
+
+## 2026-06-17
+
 - 审计并修复 Responses/Chat/Messages 请求转换中的工具兼容问题：仅透传有效函数工具，过滤内置工具、空名/非法名/重复工具，并同步省略悬空 `tool_choice`。
 - 过滤空名或非法名 tool call，避免转换后的 Chat 请求继续触发上游 `function.name` 校验错误。
 - 补充 Responses 内置工具、非法工具、悬空工具选择和空 tool call 的跨协议回归测试，验证 `go test ./...` 通过。

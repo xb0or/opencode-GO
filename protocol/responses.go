@@ -341,17 +341,32 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 
 	case "response.function_call_arguments.done":
 		idx := 0
+		var item *RespOutputItem
 		if ev.Choice != nil {
 			idx = ev.Choice.Index
+			if ev.Choice.Message != nil && len(ev.Choice.Message.ToolCalls) > 0 {
+				tc := ev.Choice.Message.ToolCalls[0]
+				item = &RespOutputItem{
+					Type:      "function_call",
+					Name:      tc.Name,
+					CallID:    tc.ID,
+					Arguments: tc.Arguments,
+				}
+			}
 		}
-		return json.Marshal(RespStreamEvent{Type: "response.function_call_arguments.done", OutputIndex: idx})
+		return json.Marshal(RespStreamEvent{Type: "response.function_call_arguments.done", OutputIndex: idx, Item: item})
 
 	case "response.output_item.done":
 		idx := 0
+		var item *RespOutputItem
 		if ev.Choice != nil {
 			idx = ev.Choice.Index
+			if ev.Choice.Message != nil {
+				itemVal := irMsgToRespOutput(*ev.Choice.Message)
+				item = &itemVal
+			}
 		}
-		return json.Marshal(RespStreamEvent{Type: "response.output_item.done", OutputIndex: idx})
+		return json.Marshal(RespStreamEvent{Type: "response.output_item.done", OutputIndex: idx, Item: item})
 
 	case "response.completed":
 		var resp *RespResponse
@@ -362,6 +377,11 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 					InputTokens:  ev.Response.Usage.PromptTokens,
 					OutputTokens: ev.Response.Usage.CompletionTokens,
 					TotalTokens:  ev.Response.Usage.TotalTokens,
+				}
+			}
+			for _, ch := range ev.Response.Choices {
+				if ch.Message != nil {
+					resp.Output = append(resp.Output, irMsgToRespOutput(*ch.Message))
 				}
 			}
 		}
