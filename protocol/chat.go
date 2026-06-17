@@ -21,11 +21,12 @@ type ChatRequest struct {
 }
 
 type ChatMessage struct {
-	Role       string         `json:"role"`
-	Content    any            `json:"content,omitempty"` // string | []ChatContent
-	Name       string         `json:"name,omitempty"`
-	ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
+	Role             string         `json:"role"`
+	Content          any            `json:"content,omitempty"` // string | []ChatContent
+	ReasoningContent *string        `json:"reasoning_content,omitempty"`
+	Name             string         `json:"name,omitempty"`
+	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
 }
 
 type ChatContent struct {
@@ -137,6 +138,7 @@ func DecodeChatRequest(data []byte) (*IRRequest, error) {
 // EncodeChatRequest serializes an IR request into Chat Completions wire format.
 func EncodeChatRequest(ir *IRRequest) ([]byte, error) {
 	tools := cleanIRTools(ir.Tools)
+	includeEmptyReasoning := chatModelRequiresReasoningContent(ir.Model)
 	req := ChatRequest{
 		Model:       ir.Model,
 		Temperature: ir.Temperature,
@@ -152,7 +154,7 @@ func EncodeChatRequest(ir *IRRequest) ([]byte, error) {
 		req.Messages = append(req.Messages, ChatMessage{Role: "system", Content: ir.System})
 	}
 	for _, m := range ir.Messages {
-		req.Messages = append(req.Messages, irMsgToChat(m))
+		req.Messages = append(req.Messages, irMsgToChatWithReasoning(m, includeEmptyReasoning))
 	}
 	for _, t := range tools {
 		req.Tools = append(req.Tools, ChatTool{
@@ -300,9 +302,15 @@ func EncodeChatStreamChunk(ev *IRStreamEvent) ([]byte, error) {
 
 func chatMsgToIR(m ChatMessage) IRMessage {
 	ir := IRMessage{Role: m.Role, Name: m.Name, ToolCallID: m.ToolCallID}
+	if m.ReasoningContent != nil {
+		ir.Content = appendThinkingContentBlock(ir.Content, *m.ReasoningContent)
+	}
 	switch v := m.Content.(type) {
 	case string:
 		ir.Text = v
+		if len(ir.Content) > 0 {
+			ir.Content = appendTextContent(ir.Content, v)
+		}
 	case []any:
 		for _, item := range v {
 			b, _ := json.Marshal(item)
@@ -333,14 +341,23 @@ func chatMsgToIR(m ChatMessage) IRMessage {
 }
 
 func irMsgToChat(m IRMessage) ChatMessage {
+	return irMsgToChatWithReasoning(m, false)
+}
+
+func irMsgToChatWithReasoning(m IRMessage, includeEmptyReasoning bool) ChatMessage {
 	cm := ChatMessage{Role: normalizeChatRole(m.Role), Name: m.Name, ToolCallID: m.ToolCallID}
+	if text, ok := thinkingTextAndPresence(m); ok {
+		cm.ReasoningContent = stringPtr(text)
+	} else if includeEmptyReasoning && cm.Role == "assistant" {
+		cm.ReasoningContent = stringPtr("")
+	}
 	if m.Text != "" && len(m.Content) == 0 {
 		cm.Content = m.Text
 	} else if len(m.Content) > 0 {
 		var parts []ChatContent
 		for _, c := range m.Content {
 			switch c.Type {
-			case "text", "thinking":
+			case "text":
 				parts = append(parts, ChatContent{Type: "text", Text: c.Text})
 			case "image":
 				if c.Source != nil {
@@ -348,7 +365,9 @@ func irMsgToChat(m IRMessage) ChatMessage {
 				}
 			}
 		}
-		if len(parts) == 1 && parts[0].Type == "text" {
+		if len(parts) == 0 {
+			cm.Content = ""
+		} else if len(parts) == 1 && parts[0].Type == "text" {
 			cm.Content = parts[0].Text
 		} else {
 			cm.Content = parts

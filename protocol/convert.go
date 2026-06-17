@@ -248,14 +248,27 @@ func emitChatStream(dst io.Writer, resp *IRResponse) error {
 		return err
 	}
 
-	// Emit text content.
-	if msg.Text != "" {
+	if thinking := thinkingText(*msg); thinking != "" {
 		ev := &IRStreamEvent{
 			Type:         "chat.completion.chunk",
-			ContentDelta: msg.Text,
+			ContentDelta: thinking,
 			Choice: &IRChoice{
 				Index: 0,
-				Delta: &IRMessage{Content: []IRContent{{Type: "text", Text: msg.Text}}},
+				Delta: &IRMessage{Content: []IRContent{{Type: "thinking", Text: thinking}}},
+			},
+		}
+		if err := enc.WriteEvent(ev); err != nil {
+			return err
+		}
+	}
+	// Emit text content.
+	if text := visibleText(*msg); text != "" {
+		ev := &IRStreamEvent{
+			Type:         "chat.completion.chunk",
+			ContentDelta: text,
+			Choice: &IRChoice{
+				Index: 0,
+				Delta: &IRMessage{Content: []IRContent{{Type: "text", Text: text}}},
 			},
 		}
 		if err := enc.WriteEvent(ev); err != nil {
@@ -463,34 +476,67 @@ func emitResponsesStream(dst io.Writer, resp *IRResponse) error {
 
 	outputIndex := 0
 	// Text delta.
-	if msg.Text != "" {
+	text := visibleText(*msg)
+	if text != "" || thinkingText(*msg) != "" {
+		outputMsg := IRMessage{Role: "assistant", Text: text}
+		if thinking := thinkingText(*msg); thinking != "" {
+			outputMsg.Content = []IRContent{{Type: "thinking", Text: thinking}}
+			if text != "" {
+				outputMsg.Content = append(outputMsg.Content, IRContent{Type: "text", Text: text})
+			}
+		}
 		itemAdded := &IRStreamEvent{
-			Type:   "response.output_item.added",
-			Choice: &IRChoice{Index: outputIndex, Delta: &IRMessage{Role: "assistant"}},
+			Type: "response.output_item.added",
+			Choice: &IRChoice{
+				Index: outputIndex,
+				Delta: &outputMsg,
+			},
 		}
 		if err := enc.WriteEvent(itemAdded); err != nil {
 			return err
 		}
-		deltaEv := &IRStreamEvent{
-			Type:         "response.output_text.delta",
-			ContentDelta: msg.Text,
-			Choice:       &IRChoice{Index: outputIndex},
+		if thinking := thinkingText(*msg); thinking != "" {
+			reasoningDelta := &IRStreamEvent{
+				Type:         "response.reasoning_content.delta",
+				ContentDelta: thinking,
+				Choice: &IRChoice{
+					Index: outputIndex,
+					Delta: &IRMessage{Content: []IRContent{{Type: "thinking", Text: thinking}}},
+				},
+			}
+			if err := enc.WriteEvent(reasoningDelta); err != nil {
+				return err
+			}
+			reasoningDone := &IRStreamEvent{
+				Type:   "response.reasoning_content.done",
+				Choice: &IRChoice{Index: outputIndex},
+			}
+			if err := enc.WriteEvent(reasoningDone); err != nil {
+				return err
+			}
 		}
-		if err := enc.WriteEvent(deltaEv); err != nil {
-			return err
-		}
-		doneEv := &IRStreamEvent{
-			Type:   "response.output_text.done",
-			Choice: &IRChoice{Index: outputIndex},
-		}
-		if err := enc.WriteEvent(doneEv); err != nil {
-			return err
+		if text != "" {
+			deltaEv := &IRStreamEvent{
+				Type:         "response.output_text.delta",
+				ContentDelta: text,
+				Choice:       &IRChoice{Index: outputIndex},
+			}
+			if err := enc.WriteEvent(deltaEv); err != nil {
+				return err
+			}
+			doneEv := &IRStreamEvent{
+				Type:   "response.output_text.done",
+				Choice: &IRChoice{Index: outputIndex},
+			}
+			if err := enc.WriteEvent(doneEv); err != nil {
+				return err
+			}
 		}
 		textDone := &IRStreamEvent{
 			Type: "response.output_item.done",
 			Choice: &IRChoice{
 				Index:   outputIndex,
-				Message: &IRMessage{Role: "assistant", Text: msg.Text},
+				Message: &outputMsg,
 			},
 		}
 		if err := enc.WriteEvent(textDone); err != nil {
@@ -501,17 +547,39 @@ func emitResponsesStream(dst io.Writer, resp *IRResponse) error {
 
 	// Tool calls.
 	for _, tc := range cleanIRToolCalls(msg.ToolCalls) {
+		outputMsg := IRMessage{ToolCalls: []IRToolCall{{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}}}
+		if thinking := thinkingText(*msg); thinking != "" {
+			outputMsg.Content = []IRContent{{Type: "thinking", Text: thinking}}
+		}
 		added := &IRStreamEvent{
 			Type: "response.output_item.added",
 			Choice: &IRChoice{
 				Index: outputIndex,
-				Delta: &IRMessage{
-					ToolCalls: []IRToolCall{{ID: tc.ID, Name: tc.Name}},
-				},
+				Delta: &outputMsg,
 			},
 		}
 		if err := enc.WriteEvent(added); err != nil {
 			return err
+		}
+		if thinking := thinkingText(*msg); thinking != "" {
+			reasoningDelta := &IRStreamEvent{
+				Type:         "response.reasoning_content.delta",
+				ContentDelta: thinking,
+				Choice: &IRChoice{
+					Index: outputIndex,
+					Delta: &IRMessage{Content: []IRContent{{Type: "thinking", Text: thinking}}},
+				},
+			}
+			if err := enc.WriteEvent(reasoningDelta); err != nil {
+				return err
+			}
+			reasoningDone := &IRStreamEvent{
+				Type:   "response.reasoning_content.done",
+				Choice: &IRChoice{Index: outputIndex},
+			}
+			if err := enc.WriteEvent(reasoningDone); err != nil {
+				return err
+			}
 		}
 		// function_call_arguments.delta
 		if tc.Arguments != "" {
@@ -532,7 +600,7 @@ func emitResponsesStream(dst io.Writer, resp *IRResponse) error {
 			Type: "response.function_call_arguments.done",
 			Choice: &IRChoice{
 				Index:   outputIndex,
-				Message: &IRMessage{ToolCalls: []IRToolCall{{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}}},
+				Message: &outputMsg,
 			},
 		}
 		if err := enc.WriteEvent(doneEv); err != nil {
@@ -542,7 +610,7 @@ func emitResponsesStream(dst io.Writer, resp *IRResponse) error {
 			Type: "response.output_item.done",
 			Choice: &IRChoice{
 				Index:   outputIndex,
-				Message: &IRMessage{ToolCalls: []IRToolCall{{ID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}}},
+				Message: &outputMsg,
 			},
 		}
 		if err := enc.WriteEvent(itemDone); err != nil {

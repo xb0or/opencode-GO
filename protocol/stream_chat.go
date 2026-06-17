@@ -74,10 +74,18 @@ func DecodeChatSSE(r io.Reader) (*IRResponse, error) {
 		if ch.Delta != nil {
 			if ch.Delta.Text != "" {
 				msg.Text += ch.Delta.Text
-				if len(msg.Content) == 0 {
-					msg.Content = []IRContent{{Type: "text"}}
+				msg.Content = appendTextContent(msg.Content, ch.Delta.Text)
+			}
+			for _, c := range ch.Delta.Content {
+				switch c.Type {
+				case "thinking":
+					msg.Content = appendThinkingContent(msg.Content, c.Text)
+				case "text":
+					if c.Text != "" && ch.Delta.Text == "" {
+						msg.Text += c.Text
+						msg.Content = appendTextContent(msg.Content, c.Text)
+					}
 				}
-				msg.Content[0].Text += ch.Delta.Text
 			}
 			if len(ch.Delta.ToolCalls) > 0 {
 				tc := ch.Delta.ToolCalls[0]

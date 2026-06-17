@@ -74,10 +74,9 @@ func DecodeResponsesSSE(r io.Reader) (*IRResponse, error) {
 			}
 		case "response.output_text.delta":
 			msg.Text += ev.ContentDelta
-			if len(msg.Content) == 0 {
-				msg.Content = []IRContent{{Type: "text"}}
-			}
-			msg.Content[0].Text += ev.ContentDelta
+			msg.Content = appendTextContent(msg.Content, ev.ContentDelta)
+		case "response.reasoning_text.delta", "response.reasoning.delta", "response.reasoning_content.delta":
+			msg.Content = appendThinkingContentBlock(msg.Content, ev.ContentDelta)
 		case "response.function_call_arguments.delta":
 			if len(toolCalls) == 0 {
 				toolCalls = append(toolCalls, IRToolCall{})
@@ -92,6 +91,9 @@ func DecodeResponsesSSE(r io.Reader) (*IRResponse, error) {
 			toolCalls[idx].Arguments += ev.ContentDelta
 		case "response.output_item.done":
 			if ev.Choice != nil && ev.Choice.Message != nil {
+				if text, ok := thinkingTextAndPresence(*ev.Choice.Message); ok {
+					msg.Content = appendThinkingContentBlock(msg.Content, text)
+				}
 				if len(ev.Choice.Message.ToolCalls) > 0 {
 					tc := ev.Choice.Message.ToolCalls[0]
 					if len(toolCalls) == 0 {

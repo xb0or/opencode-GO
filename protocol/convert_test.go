@@ -350,6 +350,109 @@ func TestConvertRequest_FiltersInvalidToolsForAllTargets(t *testing.T) {
 	}
 }
 
+func TestConvertRequest_ChatReasoningContentPreserved(t *testing.T) {
+	body := []byte(`{
+		"model": "deepseek-v4-flash",
+		"messages": [
+			{"role": "assistant", "content": "I will call a tool.", "reasoning_content": "Need tool."},
+			{"role": "user", "content": "continue"}
+		]
+	}`)
+	out, err := ConvertRequest(config.ProtocolChat, config.ProtocolMessages, body)
+	if err != nil {
+		t.Fatalf("chat→messages: %v", err)
+	}
+	var req MsgRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("messages output JSON: %v", err)
+	}
+	var foundThinking bool
+	for _, m := range req.Messages {
+		var blocks []MsgContent
+		if err := json.Unmarshal(m.Content, &blocks); err != nil {
+			continue
+		}
+		for _, b := range blocks {
+			if b.Type == "thinking" && b.Thinking == "Need tool." {
+				foundThinking = true
+			}
+			if b.Type == "text" && b.Text == "Need tool." {
+				t.Fatalf("reasoning_content leaked into visible text: %#v", blocks)
+			}
+		}
+	}
+	if !foundThinking {
+		t.Fatalf("reasoning_content was not preserved as thinking: %s", string(out))
+	}
+}
+
+func TestEncodeChatRequestReasoningModelsInjectEmptyAssistantReasoning(t *testing.T) {
+	ir := &IRRequest{
+		Model: "deepseek-v4-flash",
+		Messages: []IRMessage{
+			{Role: "assistant", Text: "old answer"},
+			{Role: "user", Text: "follow up"},
+		},
+	}
+	out, err := EncodeChatRequest(ir)
+	if err != nil {
+		t.Fatalf("encode chat: %v", err)
+	}
+	var req ChatRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("chat output JSON: %v", err)
+	}
+	if len(req.Messages) == 0 || req.Messages[0].ReasoningContent == nil {
+		t.Fatalf("reasoning model assistant history must include empty reasoning_content: %s", string(out))
+	}
+	if *req.Messages[0].ReasoningContent != "" {
+		t.Fatalf("empty fallback reasoning_content = %q, want empty string", *req.Messages[0].ReasoningContent)
+	}
+
+	ir.Model = "gpt-4"
+	out, err = EncodeChatRequest(ir)
+	if err != nil {
+		t.Fatalf("encode ordinary chat: %v", err)
+	}
+	req = ChatRequest{}
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("ordinary chat output JSON: %v", err)
+	}
+	if req.Messages[0].ReasoningContent != nil {
+		t.Fatalf("ordinary models should not receive synthetic reasoning_content: %s", string(out))
+	}
+}
+
+func TestConvertRequest_ResponsesReasoningContentToChat(t *testing.T) {
+	body := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type": "message", "role": "assistant", "content": "visible", "reasoning_content": "hidden"},
+			{"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": "{}", "reasoning_content": ""}
+		]
+	}`)
+	out, err := ConvertRequest(config.ProtocolResponses, config.ProtocolChat, body)
+	if err != nil {
+		t.Fatalf("responses→chat: %v", err)
+	}
+	var req ChatRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("chat output JSON: %v", err)
+	}
+	if len(req.Messages) != 2 {
+		t.Fatalf("messages = %d, want 2: %s", len(req.Messages), string(out))
+	}
+	if req.Messages[0].ReasoningContent == nil || *req.Messages[0].ReasoningContent != "hidden" {
+		t.Fatalf("message reasoning_content = %#v, want hidden", req.Messages[0].ReasoningContent)
+	}
+	if req.Messages[0].Content != "visible" {
+		t.Fatalf("visible content = %#v, want visible", req.Messages[0].Content)
+	}
+	if req.Messages[1].ReasoningContent == nil || *req.Messages[1].ReasoningContent != "" {
+		t.Fatalf("function_call reasoning_content = %#v, want explicit empty string", req.Messages[1].ReasoningContent)
+	}
+}
+
 func TestEncodeChatRequest_FiltersInvalidToolCalls(t *testing.T) {
 	ir := &IRRequest{
 		Model: "m",
@@ -598,7 +701,8 @@ func TestConvertResponse_ThinkingBlockPreserved(t *testing.T) {
 		t.Error("thinking block not found in IR")
 	}
 
-	// messages → chat should degrade thinking to text.
+	// messages → chat should preserve thinking as reasoning_content instead of
+	// mixing it into visible content.
 	chatOut, err := ConvertResponse(config.ProtocolMessages, config.ProtocolChat, body)
 	if err != nil {
 		t.Fatalf("messages→chat: %v", err)
@@ -610,21 +714,15 @@ func TestConvertResponse_ThinkingBlockPreserved(t *testing.T) {
 	if len(chatResp.Choices) == 0 {
 		t.Fatal("no choices in chat response")
 	}
-	// The thinking text should appear somewhere in the chat content.
 	chatMsg := chatResp.Choices[0].Message
-	content := ""
-	switch v := chatMsg.Content.(type) {
-	case string:
-		content = v
-	case []any:
-		b, _ := json.Marshal(v)
-		content = string(b)
+	if chatMsg.ReasoningContent == nil || *chatMsg.ReasoningContent != "Let me think about this..." {
+		t.Fatalf("chat reasoning_content = %#v, want thinking text", chatMsg.ReasoningContent)
 	}
-	if content == "" {
-		t.Error("chat response content is empty")
+	if chatMsg.Content != "The answer is 42." {
+		t.Fatalf("chat visible content = %#v, want final answer only", chatMsg.Content)
 	}
 
-	// messages → responses should also include thinking as text.
+	// messages → responses should also preserve thinking out-of-band.
 	respOut, err := ConvertResponse(config.ProtocolMessages, config.ProtocolResponses, body)
 	if err != nil {
 		t.Fatalf("messages→responses: %v", err)
@@ -638,14 +736,12 @@ func TestConvertResponse_ThinkingBlockPreserved(t *testing.T) {
 	}
 	foundThinking := false
 	for _, item := range respResp.Output {
-		for _, c := range item.Content {
-			if c.Text == "Let me think about this..." {
-				foundThinking = true
-			}
+		if item.ReasoningContent != nil && *item.ReasoningContent == "Let me think about this..." {
+			foundThinking = true
 		}
 	}
 	if !foundThinking {
-		t.Error("thinking text not found in responses output")
+		t.Error("thinking text not found in responses reasoning_content")
 	}
 }
 
@@ -702,6 +798,40 @@ func TestStreamConverterChatToolCallToResponsesFunctionCall(t *testing.T) {
 	}
 	if strings.Contains(out, `"type":"message","role":"assistant","content":null`) {
 		t.Fatalf("responses stream should not emit an empty message item before tool call:\n%s", out)
+	}
+}
+
+func TestStreamConverterChatReasoningToolCallToResponses(t *testing.T) {
+	src := strings.NewReader(
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Need \"}}]}\n\n" +
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"tool.\"}}]}\n\n" +
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+			"data: [DONE]\n\n")
+	var dst bytes.Buffer
+	resp, err := StreamConverterWithUsage(&dst, src, config.ProtocolChat, config.ProtocolResponses)
+	if err != nil {
+		t.Fatalf("StreamConverterWithUsage error: %v", err)
+	}
+	if resp == nil || len(resp.Choices) != 1 || resp.Choices[0].Message == nil {
+		t.Fatalf("buffered response missing message: %#v", resp)
+	}
+	if got := thinkingText(*resp.Choices[0].Message); got != "Need tool." {
+		t.Fatalf("buffered reasoning = %q, want Need tool.", got)
+	}
+	out := dst.String()
+	for _, want := range []string{
+		`"type":"response.reasoning_content.delta"`,
+		`"reasoning_content":"Need tool."`,
+		`"type":"function_call"`,
+		`"call_id":"call_1"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("responses stream missing %s:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `"Need tool.","type":"output_text"`) {
+		t.Fatalf("reasoning should not be emitted as output_text:\n%s", out)
 	}
 }
 

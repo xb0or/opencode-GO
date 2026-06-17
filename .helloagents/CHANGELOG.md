@@ -1,5 +1,11 @@
 ## 2026-06-17
 
+- 完整修复 Chat thinking/reasoning 跨协议保真：Chat `reasoning_content` 会进入 IR thinking 块，Messages thinking 与 Responses `reasoning_content` 再转回 Chat 时不再丢失或混入普通输出。
+- 针对 DeepSeek/MiMo thinking 模型的 Chat 上游请求，历史 assistant 消息会补 `reasoning_content: ""`，避免工具调用后多轮对话触发上游 400。
+- 补充 Chat/Responses/Messages 非流式与 SSE 工具调用回归测试，验证 reasoning 不再作为 `output_text` 泄漏且 `go test ./...` 通过。
+
+## 2026-06-17
+
 - 修复 Chat SSE 转 Responses SSE 的工具调用输出语义：工具调用现在输出完整 `function_call` item，不再先发空 assistant message，避免 Codex 工具调用时出现空回复。
 - Chat 流式 tool call 聚合支持 `index`、分片参数、name/id 回填，并过滤无效 tool call。
 - 补充 Chat 工具调用流转换为 Responses `function_call` 事件的回归测试，验证 `go test ./...` 通过。

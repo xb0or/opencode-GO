@@ -21,18 +21,20 @@ type RespRequest struct {
 }
 
 type RespInputItem struct {
-	Role      string          `json:"role,omitempty"`
-	Type      string          `json:"type,omitempty"`    // message | function_call | function_call_output
-	Content   json.RawMessage `json:"content,omitempty"` // string | []RespContent
-	Name      string          `json:"name,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Output    string          `json:"output,omitempty"`
-	Arguments string          `json:"arguments,omitempty"`
+	Role             string          `json:"role,omitempty"`
+	Type             string          `json:"type,omitempty"`    // message | function_call | function_call_output
+	Content          json.RawMessage `json:"content,omitempty"` // string | []RespContent
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
+	Name             string          `json:"name,omitempty"`
+	CallID           string          `json:"call_id,omitempty"`
+	Output           string          `json:"output,omitempty"`
+	Arguments        string          `json:"arguments,omitempty"`
 }
 
 type RespContent struct {
-	Type string `json:"type"` // input_text | output_text
-	Text string `json:"text,omitempty"`
+	Type             string  `json:"type"` // input_text | output_text | reasoning | reasoning_text
+	Text             string  `json:"text,omitempty"`
+	ReasoningContent *string `json:"reasoning_content,omitempty"`
 }
 
 type RespTool struct {
@@ -55,13 +57,14 @@ type RespResponse struct {
 }
 
 type RespOutputItem struct {
-	Type      string        `json:"type"` // message | function_call
-	ID        string        `json:"id,omitempty"`
-	Role      string        `json:"role,omitempty"`
-	Content   []RespContent `json:"content,omitempty"`
-	Name      string        `json:"name,omitempty"`
-	CallID    string        `json:"call_id,omitempty"`
-	Arguments string        `json:"arguments,omitempty"`
+	Type             string        `json:"type"` // message | function_call
+	ID               string        `json:"id,omitempty"`
+	Role             string        `json:"role,omitempty"`
+	Content          []RespContent `json:"content,omitempty"`
+	ReasoningContent *string       `json:"reasoning_content,omitempty"`
+	Name             string        `json:"name,omitempty"`
+	CallID           string        `json:"call_id,omitempty"`
+	Arguments        string        `json:"arguments,omitempty"`
 }
 
 type RespUsage struct {
@@ -72,13 +75,14 @@ type RespUsage struct {
 
 // RespStreamEvent is one SSE event for the Responses API streaming format.
 type RespStreamEvent struct {
-	Type           string          `json:"type"`
-	Response       *RespResponse   `json:"response,omitempty"`
-	OutputIndex    int             `json:"output_index,omitempty"`
-	ContentIndex   int             `json:"content_index,omitempty"`
-	Delta          string          `json:"delta,omitempty"`
-	Item           *RespOutputItem `json:"item,omitempty"`
-	SequenceNumber int             `json:"sequence_number,omitempty"`
+	Type             string          `json:"type"`
+	Response         *RespResponse   `json:"response,omitempty"`
+	OutputIndex      int             `json:"output_index,omitempty"`
+	ContentIndex     int             `json:"content_index,omitempty"`
+	Delta            string          `json:"delta,omitempty"`
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
+	Item             *RespOutputItem `json:"item,omitempty"`
+	SequenceNumber   int             `json:"sequence_number,omitempty"`
 }
 
 // ──────────────────────── Decoders ──────────────────────────────────
@@ -250,8 +254,20 @@ func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
 	case "response.output_text.delta":
 		ir.Choice = &IRChoice{Index: ev.OutputIndex, Delta: &IRMessage{Role: "assistant"}}
 		ir.ContentDelta = ev.Delta
+	case "response.reasoning_text.delta", "response.reasoning.delta", "response.reasoning_content.delta":
+		delta := ev.Delta
+		if ev.ReasoningContent != nil {
+			delta = *ev.ReasoningContent
+		}
+		ir.Choice = &IRChoice{Index: ev.OutputIndex, Delta: &IRMessage{
+			Role:    "assistant",
+			Content: []IRContent{{Type: "thinking", Text: delta}},
+		}}
+		ir.ContentDelta = delta
 	case "response.output_text.done":
 		// Text complete
+	case "response.reasoning_text.done", "response.reasoning.done", "response.reasoning_content.done":
+		// Reasoning complete
 	case "response.function_call_arguments.delta":
 		ir.Choice = &IRChoice{Index: ev.OutputIndex, Delta: &IRMessage{Role: "assistant"}}
 		ir.ToolCallDelta = &IRToolCallDelta{Index: ev.OutputIndex, Arguments: ev.Delta}
@@ -323,12 +339,32 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 		}
 		return json.Marshal(RespStreamEvent{Type: "response.output_text.delta", OutputIndex: idx, Delta: ev.ContentDelta})
 
+	case "response.reasoning_text.delta", "response.reasoning.delta", "response.reasoning_content.delta":
+		idx := 0
+		delta := ev.ContentDelta
+		if ev.Choice != nil {
+			idx = ev.Choice.Index
+			if ev.Choice.Delta != nil {
+				if text := thinkingText(*ev.Choice.Delta); text != "" {
+					delta = text
+				}
+			}
+		}
+		return json.Marshal(RespStreamEvent{Type: ev.Type, OutputIndex: idx, Delta: delta, ReasoningContent: stringPtr(delta)})
+
 	case "response.output_text.done":
 		idx := 0
 		if ev.Choice != nil {
 			idx = ev.Choice.Index
 		}
 		return json.Marshal(RespStreamEvent{Type: "response.output_text.done", OutputIndex: idx})
+
+	case "response.reasoning_text.done", "response.reasoning.done", "response.reasoning_content.done":
+		idx := 0
+		if ev.Choice != nil {
+			idx = ev.Choice.Index
+		}
+		return json.Marshal(RespStreamEvent{Type: ev.Type, OutputIndex: idx})
 
 	case "response.function_call_arguments.delta":
 		idx := 0
@@ -397,6 +433,9 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 
 func respItemToIR(item RespInputItem) IRMessage {
 	ir := IRMessage{Role: item.Role}
+	if item.ReasoningContent != nil {
+		ir.Content = appendThinkingContentBlock(ir.Content, *item.ReasoningContent)
+	}
 	if item.Type == "function_call_output" {
 		ir.Role = "tool"
 		ir.ToolCallID = item.CallID
@@ -412,14 +451,26 @@ func respItemToIR(item RespInputItem) IRMessage {
 	var s string
 	if err := json.Unmarshal(item.Content, &s); err == nil {
 		ir.Text = s
+		if len(ir.Content) > 0 && !hasContentType(ir.Content, "text") {
+			ir.Content = append(ir.Content, IRContent{Type: "text", Text: s})
+		}
 		return ir
 	}
 	var parts []RespContent
 	if err := json.Unmarshal(item.Content, &parts); err == nil {
 		for _, p := range parts {
-			ir.Content = append(ir.Content, IRContent{Type: "text", Text: p.Text})
+			switch p.Type {
+			case "reasoning", "reasoning_text", "thinking":
+				text := p.Text
+				if p.ReasoningContent != nil {
+					text = *p.ReasoningContent
+				}
+				ir.Content = appendThinkingContentBlock(ir.Content, text)
+			default:
+				ir.Content = append(ir.Content, IRContent{Type: "text", Text: p.Text})
+			}
 		}
-		if len(ir.Content) == 1 {
+		if len(ir.Content) == 1 && ir.Content[0].Type == "text" {
 			ir.Text = ir.Content[0].Text
 		}
 	}
@@ -428,19 +479,23 @@ func respItemToIR(item RespInputItem) IRMessage {
 
 func irMsgToRespItem(m IRMessage) RespInputItem {
 	if m.Role == "tool" || m.ToolCallID != "" {
-		text := m.Text
-		if text == "" && len(m.Content) > 0 {
-			text = m.Content[0].Text
-		}
+		text := visibleText(m)
 		return RespInputItem{Type: "function_call_output", CallID: m.ToolCallID, Output: text}
 	}
 	if len(m.ToolCalls) > 0 {
 		tc := m.ToolCalls[0]
-		return RespInputItem{Type: "function_call", CallID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+		item := RespInputItem{Type: "function_call", CallID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+		if text, ok := thinkingTextAndPresence(m); ok {
+			item.ReasoningContent = stringPtr(text)
+		}
+		return item
 	}
 	item := RespInputItem{Role: m.Role, Type: "message"}
-	if m.Text != "" && len(m.Content) == 0 {
-		content, _ := json.Marshal(m.Text)
+	if text, ok := thinkingTextAndPresence(m); ok {
+		item.ReasoningContent = stringPtr(text)
+	}
+	if text := visibleText(m); text != "" && (len(m.Content) == 0 || !hasContentType(m.Content, "image")) {
+		content, _ := json.Marshal(text)
 		item.Content = content
 	} else {
 		var parts []RespContent
@@ -450,7 +505,7 @@ func irMsgToRespItem(m IRMessage) RespInputItem {
 			}
 		}
 		if len(parts) == 0 {
-			parts = append(parts, RespContent{Type: "input_text", Text: m.Text})
+			parts = append(parts, RespContent{Type: "input_text", Text: visibleText(m)})
 		}
 		content, _ := json.Marshal(parts)
 		item.Content = content
@@ -460,15 +515,29 @@ func irMsgToRespItem(m IRMessage) RespInputItem {
 
 func respOutputToIR(item RespOutputItem) IRMessage {
 	ir := IRMessage{Role: "assistant"}
+	if item.ReasoningContent != nil {
+		ir.Content = appendThinkingContentBlock(ir.Content, *item.ReasoningContent)
+	}
 	if item.Type == "function_call" {
 		ir.ToolCalls = appendIRToolCallIfValid(ir.ToolCalls, IRToolCall{ID: item.CallID, Name: item.Name, Arguments: item.Arguments})
 		return ir
 	}
 	for _, c := range item.Content {
-		ir.Content = append(ir.Content, IRContent{Type: "text", Text: c.Text})
+		switch c.Type {
+		case "reasoning", "reasoning_text", "thinking":
+			text := c.Text
+			if c.ReasoningContent != nil {
+				text = *c.ReasoningContent
+			}
+			ir.Content = appendThinkingContentBlock(ir.Content, text)
+		default:
+			ir.Content = append(ir.Content, IRContent{Type: "text", Text: c.Text})
+		}
 	}
-	if len(ir.Content) == 1 {
+	if len(ir.Content) == 1 && ir.Content[0].Type == "text" {
 		ir.Text = ir.Content[0].Text
+	} else if hasContentType(ir.Content, "text") {
+		ir.Text = visibleText(ir)
 	}
 	return ir
 }
@@ -476,19 +545,22 @@ func respOutputToIR(item RespOutputItem) IRMessage {
 func irMsgToRespOutput(m IRMessage) RespOutputItem {
 	if len(m.ToolCalls) > 0 {
 		tc := m.ToolCalls[0]
-		return RespOutputItem{Type: "function_call", CallID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+		item := RespOutputItem{Type: "function_call", CallID: tc.ID, Name: tc.Name, Arguments: tc.Arguments}
+		if text, ok := thinkingTextAndPresence(m); ok {
+			item.ReasoningContent = stringPtr(text)
+		}
+		return item
 	}
 	item := RespOutputItem{Type: "message", Role: "assistant"}
-	if m.Text != "" && len(m.Content) == 0 {
-		item.Content = []RespContent{{Type: "output_text", Text: m.Text}}
+	if text, ok := thinkingTextAndPresence(m); ok {
+		item.ReasoningContent = stringPtr(text)
+	}
+	if text := visibleText(m); text != "" && (len(m.Content) == 0 || !hasContentType(m.Content, "image")) {
+		item.Content = []RespContent{{Type: "output_text", Text: text}}
 	} else {
 		for _, c := range m.Content {
 			switch c.Type {
 			case "text":
-				item.Content = append(item.Content, RespContent{Type: "output_text", Text: c.Text})
-			case "thinking":
-				// Thinking blocks from Anthropic are included as text in Responses
-				// format since Responses API has no native thinking type.
 				item.Content = append(item.Content, RespContent{Type: "output_text", Text: c.Text})
 			}
 		}

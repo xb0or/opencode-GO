@@ -478,8 +478,8 @@ func irMsgToMsg(m IRMessage) MsgMessage {
 		mm.Role = "user"
 	}
 	// Text shorthand
-	if m.Text != "" && len(m.Content) == 0 && len(m.ToolCalls) == 0 {
-		mm.Content, _ = json.Marshal(m.Text)
+	if text := visibleText(m); text != "" && len(m.ToolCalls) == 0 && (len(m.Content) == 0 || !hasContentType(m.Content, "thinking")) {
+		mm.Content, _ = json.Marshal(text)
 		return mm
 	}
 	var blocks []MsgContent
@@ -540,8 +540,8 @@ func msgContentToIRMessage(content []MsgContent) IRMessage {
 }
 
 func irMsgToMsgContent(m IRMessage) []MsgContent {
-	if m.Text != "" && len(m.Content) == 0 {
-		return []MsgContent{{Type: "text", Text: m.Text}}
+	if text := visibleText(m); text != "" && len(m.Content) == 0 {
+		return []MsgContent{{Type: "text", Text: text}}
 	}
 	var out []MsgContent
 	for _, c := range m.Content {
@@ -552,6 +552,8 @@ func irMsgToMsgContent(m IRMessage) []MsgContent {
 			out = append(out, MsgContent{Type: "tool_use", ID: c.ID, Name: c.Name, Input: c.Input})
 		case "tool_result":
 			out = append(out, MsgContent{Type: "tool_result", ToolUseID: c.ToolID, IsError: c.IsError})
+		case "thinking":
+			out = append(out, MsgContent{Type: "thinking", Thinking: c.Text})
 		}
 	}
 	return out
