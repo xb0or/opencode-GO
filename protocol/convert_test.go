@@ -119,6 +119,92 @@ func TestConvertRequest_ChatToResponses(t *testing.T) {
 	}
 }
 
+func TestConvertRequest_OmitsDefaultAutoToolChoice(t *testing.T) {
+	chatBody := []byte(`{
+		"model": "claude",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+		"tool_choice": "auto"
+	}`)
+	msgOut, err := ConvertRequest(config.ProtocolChat, config.ProtocolMessages, chatBody)
+	if err != nil {
+		t.Fatalf("chat→messages: %v", err)
+	}
+	var msgReq map[string]any
+	if err := json.Unmarshal(msgOut, &msgReq); err != nil {
+		t.Fatalf("messages output JSON: %v", err)
+	}
+	if _, ok := msgReq["tool_choice"]; ok {
+		t.Fatalf("default auto tool_choice should be omitted for messages: %s", string(msgOut))
+	}
+
+	responsesBody := []byte(`{
+		"model": "gpt",
+		"input": "hi",
+		"tools": [{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+		"tool_choice": "auto"
+	}`)
+	chatOut, err := ConvertRequest(config.ProtocolResponses, config.ProtocolChat, responsesBody)
+	if err != nil {
+		t.Fatalf("responses→chat: %v", err)
+	}
+	var chatReq map[string]any
+	if err := json.Unmarshal(chatOut, &chatReq); err != nil {
+		t.Fatalf("chat output JSON: %v", err)
+	}
+	if _, ok := chatReq["tool_choice"]; ok {
+		t.Fatalf("default auto tool_choice should be omitted for chat: %s", string(chatOut))
+	}
+}
+
+func TestConvertRequest_NormalizesNamedToolChoice(t *testing.T) {
+	chatBody := []byte(`{
+		"model": "claude",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],
+		"tool_choice": {"type":"function","function":{"name":"lookup"}}
+	}`)
+	msgOut, err := ConvertRequest(config.ProtocolChat, config.ProtocolMessages, chatBody)
+	if err != nil {
+		t.Fatalf("chat→messages: %v", err)
+	}
+	var msgReq MsgRequest
+	if err := json.Unmarshal(msgOut, &msgReq); err != nil {
+		t.Fatalf("messages output JSON: %v", err)
+	}
+	var msgChoice map[string]any
+	if err := json.Unmarshal(msgReq.ToolChoice, &msgChoice); err != nil {
+		t.Fatalf("messages tool_choice JSON: %v", err)
+	}
+	if msgChoice["type"] != "tool" || msgChoice["name"] != "lookup" {
+		t.Fatalf("messages tool_choice = %#v, want tool lookup", msgChoice)
+	}
+
+	messagesBody := []byte(`{
+		"model": "gpt",
+		"max_tokens": 16,
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [{"name":"lookup","input_schema":{"type":"object"}}],
+		"tool_choice": {"type":"tool","name":"lookup"}
+	}`)
+	respOut, err := ConvertRequest(config.ProtocolMessages, config.ProtocolResponses, messagesBody)
+	if err != nil {
+		t.Fatalf("messages→responses: %v", err)
+	}
+	var respReq RespRequest
+	if err := json.Unmarshal(respOut, &respReq); err != nil {
+		t.Fatalf("responses output JSON: %v", err)
+	}
+	var respChoice map[string]any
+	if err := json.Unmarshal(respReq.ToolChoice, &respChoice); err != nil {
+		t.Fatalf("responses tool_choice JSON: %v", err)
+	}
+	function, _ := respChoice["function"].(map[string]any)
+	if respChoice["type"] != "function" || function["name"] != "lookup" {
+		t.Fatalf("responses tool_choice = %#v, want function lookup", respChoice)
+	}
+}
+
 // ──────────────────────── Response conversion tests ─────────────────
 
 func TestConvertResponse_SameProtocol(t *testing.T) {

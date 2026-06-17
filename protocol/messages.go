@@ -146,7 +146,7 @@ func EncodeMessagesRequest(ir *IRRequest) ([]byte, error) {
 		MaxTokens:     ir.MaxTokens,
 		Temperature:   ir.Temperature,
 		Stream:        ir.Stream,
-		ToolChoice:    ir.ToolChoice,
+		ToolChoice:    normalizeToolChoiceForMessages(ir.ToolChoice),
 		TopP:          ir.TopP,
 		StopSequences: ir.Stop,
 	}

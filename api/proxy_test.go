@@ -91,7 +91,7 @@ func TestUsageFromResponseIncludesCacheTokens(t *testing.T) {
 	if chat == nil {
 		t.Fatal("chat usage should be parsed")
 	}
-	if chat.InputTokens != 120 || chat.OutputTokens != 30 || chat.CacheTokens != 40 || chat.CacheReadTokens != 40 || chat.CacheCreationTokens != 0 || !chat.CacheIncludedInInput {
+	if chat.InputTokens != 80 || chat.OutputTokens != 30 || chat.CacheTokens != 40 || chat.CacheReadTokens != 40 || chat.CacheCreationTokens != 0 || !chat.CacheIncludedInInput || chat.TotalTokens != 150 {
 		t.Fatalf("unexpected chat usage: %#v", chat)
 	}
 
@@ -106,7 +106,7 @@ func TestUsageFromResponseIncludesCacheTokens(t *testing.T) {
 	if messages == nil {
 		t.Fatal("messages usage should be parsed")
 	}
-	if messages.InputTokens != 100 || messages.OutputTokens != 25 || messages.CacheTokens != 70 || messages.CacheReadTokens != 60 || messages.CacheCreationTokens != 10 || messages.TotalTokens != 195 {
+	if messages.InputTokens != 30 || messages.OutputTokens != 25 || messages.CacheTokens != 70 || messages.CacheReadTokens != 60 || messages.CacheCreationTokens != 10 || messages.TotalTokens != 125 {
 		t.Fatalf("unexpected messages usage: %#v", messages)
 	}
 }
@@ -122,7 +122,7 @@ func TestUsageFromResponseAcceptsAlternateTokenFieldNames(t *testing.T) {
 	if chat == nil {
 		t.Fatal("chat usage should be parsed from input/output token fields")
 	}
-	if chat.InputTokens != 3 || chat.OutputTokens != 2 || chat.CacheCreationTokens != 4 || chat.CacheTokens != 4 || chat.TotalTokens != 5 {
+	if chat.InputTokens != 0 || chat.OutputTokens != 2 || chat.CacheCreationTokens != 4 || chat.CacheTokens != 4 || chat.TotalTokens != 6 {
 		t.Fatalf("unexpected alternate chat usage: %#v", chat)
 	}
 
@@ -185,7 +185,7 @@ func TestUsageFromSSELineParsesStreamUsage(t *testing.T) {
 	}
 
 	chatCache := usageFromSSELine(config.ProtocolChat, []byte(`data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":2}}}`))
-	if chatCache == nil || chatCache.InputTokens != 5 || chatCache.OutputTokens != 1 || chatCache.CacheReadTokens != 2 || chatCache.CacheTokens != 2 || chatCache.TotalTokens != 6 {
+	if chatCache == nil || chatCache.InputTokens != 3 || chatCache.OutputTokens != 1 || chatCache.CacheReadTokens != 2 || chatCache.CacheTokens != 2 || chatCache.TotalTokens != 6 {
 		t.Fatalf("unexpected chat cache stream usage: %#v", chatCache)
 	}
 }
@@ -200,12 +200,11 @@ func TestEstimateUsageCostSeparatesCachedPromptTokens(t *testing.T) {
 		},
 	}
 	usage := &usageAccounting{
-		InputTokens:          120,
-		OutputTokens:         30,
-		CacheTokens:          50,
-		CacheReadTokens:      40,
-		CacheCreationTokens:  10,
-		CacheIncludedInInput: true,
+		InputTokens:         70,
+		OutputTokens:        30,
+		CacheTokens:         50,
+		CacheReadTokens:     40,
+		CacheCreationTokens: 10,
 	}
 	got := estimateUsageCost(route, usage)
 	want := float64(70)*0.01 + float64(30)*0.02 + float64(40)*0.001 + float64(10)*0.004
@@ -657,9 +656,9 @@ func TestProxyLogsRawCrossProtocolCacheUsage(t *testing.T) {
 	if err := store.DB().First(&logRow).Error; err != nil {
 		t.Fatalf("load usage log: %v", err)
 	}
-	if logRow.InputTokens != 100 || logRow.OutputTokens != 25 ||
+	if logRow.InputTokens != 30 || logRow.OutputTokens != 25 ||
 		logRow.CacheTokens != 70 || logRow.CacheReadTokens != 60 ||
-		logRow.CacheCreationTokens != 10 || logRow.TotalTokens != 195 {
+		logRow.CacheCreationTokens != 10 || logRow.TotalTokens != 125 {
 		t.Fatalf("unexpected cross-protocol usage log: %#v", logRow)
 	}
 }

@@ -9,20 +9,20 @@ import (
 
 // RespRequest is the wire format for POST /v1/responses.
 type RespRequest struct {
-	Model      string           `json:"model"`
-	Input      json.RawMessage  `json:"input"` // string | []RespInputItem
-	Stream     bool             `json:"stream,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	MaxTokens  int              `json:"max_output_tokens,omitempty"`
-	Tools      []RespTool       `json:"tools,omitempty"`
-	ToolChoice json.RawMessage  `json:"tool_choice,omitempty"`
-	TopP       *float64         `json:"top_p,omitempty"`
-	Instructions string         `json:"instructions,omitempty"`
+	Model        string          `json:"model"`
+	Input        json.RawMessage `json:"input"` // string | []RespInputItem
+	Stream       bool            `json:"stream,omitempty"`
+	Temperature  *float64        `json:"temperature,omitempty"`
+	MaxTokens    int             `json:"max_output_tokens,omitempty"`
+	Tools        []RespTool      `json:"tools,omitempty"`
+	ToolChoice   json.RawMessage `json:"tool_choice,omitempty"`
+	TopP         *float64        `json:"top_p,omitempty"`
+	Instructions string          `json:"instructions,omitempty"`
 }
 
 type RespInputItem struct {
 	Role      string          `json:"role,omitempty"`
-	Type      string          `json:"type,omitempty"` // message | function_call | function_call_output
+	Type      string          `json:"type,omitempty"`    // message | function_call | function_call_output
 	Content   json.RawMessage `json:"content,omitempty"` // string | []RespContent
 	Name      string          `json:"name,omitempty"`
 	CallID    string          `json:"call_id,omitempty"`
@@ -55,12 +55,12 @@ type RespResponse struct {
 }
 
 type RespOutputItem struct {
-	Type    string          `json:"type"` // message | function_call
-	ID      string          `json:"id,omitempty"`
-	Role    string          `json:"role,omitempty"`
-	Content []RespContent   `json:"content,omitempty"`
-	Name    string          `json:"name,omitempty"`
-	CallID  string          `json:"call_id,omitempty"`
+	Type      string        `json:"type"` // message | function_call
+	ID        string        `json:"id,omitempty"`
+	Role      string        `json:"role,omitempty"`
+	Content   []RespContent `json:"content,omitempty"`
+	Name      string        `json:"name,omitempty"`
+	CallID    string        `json:"call_id,omitempty"`
 	Arguments string        `json:"arguments,omitempty"`
 }
 
@@ -72,12 +72,12 @@ type RespUsage struct {
 
 // RespStreamEvent is one SSE event for the Responses API streaming format.
 type RespStreamEvent struct {
-	Type           string           `json:"type"`
-	Response       *RespResponse    `json:"response,omitempty"`
-	OutputIndex   int              `json:"output_index,omitempty"`
-	ContentIndex  int              `json:"content_index,omitempty"`
-	Delta         string           `json:"delta,omitempty"`
-	Item          *RespOutputItem  `json:"item,omitempty"`
+	Type           string          `json:"type"`
+	Response       *RespResponse   `json:"response,omitempty"`
+	OutputIndex    int             `json:"output_index,omitempty"`
+	ContentIndex   int             `json:"content_index,omitempty"`
+	Delta          string          `json:"delta,omitempty"`
+	Item           *RespOutputItem `json:"item,omitempty"`
 	SequenceNumber int             `json:"sequence_number,omitempty"`
 }
 
@@ -131,7 +131,7 @@ func EncodeResponsesRequest(ir *IRRequest) ([]byte, error) {
 		Temperature: ir.Temperature,
 		MaxTokens:   ir.MaxTokens,
 		Stream:      ir.Stream,
-		ToolChoice:  ir.ToolChoice,
+		ToolChoice:  normalizeToolChoiceForResponses(ir.ToolChoice),
 		TopP:        ir.TopP,
 	}
 	// Collect system instructions from both ir.System and system-role messages.

@@ -137,7 +137,7 @@ func EncodeChatRequest(ir *IRRequest) ([]byte, error) {
 		Temperature: ir.Temperature,
 		MaxTokens:   ir.MaxTokens,
 		Stream:      ir.Stream,
-		ToolChoice:  ir.ToolChoice,
+		ToolChoice:  normalizeToolChoiceForChat(ir.ToolChoice),
 		TopP:        ir.TopP,
 		Stop:        ir.Stop,
 	}

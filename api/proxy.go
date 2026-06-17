@@ -810,10 +810,7 @@ func (u *usageAccounting) recomputeTotalIfNeeded() {
 	if u == nil || u.TotalExplicit {
 		return
 	}
-	u.TotalTokens = u.InputTokens + u.OutputTokens
-	if !u.CacheIncludedInInput {
-		u.TotalTokens += u.CacheTokens
-	}
+	u.TotalTokens = u.InputTokens + u.OutputTokens + u.CacheTokens
 }
 
 func usageFromSSEBuffer(proto config.Protocol, body []byte) *usageAccounting {
@@ -875,6 +872,9 @@ func usageFromRawMap(u map[string]any, _ config.Protocol) *usageAccounting {
 	acct.CacheTokens = firstNumberField(u, "cache_tokens", "cached_tokens", "total_cache_tokens")
 	if separate := acct.CacheReadTokens + acct.CacheCreationTokens; acct.CacheTokens < separate {
 		acct.CacheTokens = separate
+	}
+	if acct.CacheIncludedInInput || acct.CacheTokens > 0 {
+		acct.InputTokens = maxInt(0, acct.InputTokens-acct.CacheTokens)
 	}
 	acct.TotalTokens = numberField(u, "total_tokens")
 	acct.TotalExplicit = acct.TotalTokens > 0
@@ -1004,9 +1004,6 @@ func estimateUsageCost(route config.ModelRoute, usage *usageAccounting) float64 
 	cacheRead := priceField(route.Pricing, "input_cache_read", "cache_read", "prompt_cache_read")
 	cacheCreation := priceField(route.Pricing, "input_cache_write", "cache_write", "prompt_cache_write", "input_cache_creation")
 	inputTokens := usage.InputTokens
-	if usage.CacheIncludedInInput {
-		inputTokens = maxInt(0, inputTokens-usage.CacheTokens)
-	}
 	cost := float64(inputTokens)*prompt +
 		float64(usage.OutputTokens)*completion +
 		float64(usage.CacheReadTokens)*cacheRead +
