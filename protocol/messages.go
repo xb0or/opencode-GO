@@ -130,7 +130,7 @@ func DecodeMessagesRequest(data []byte) (*IRRequest, error) {
 		ir.Messages = append(ir.Messages, msgMsgToIR(m))
 	}
 	for _, t := range req.Tools {
-		ir.Tools = append(ir.Tools, IRTool{
+		ir.Tools = appendIRToolIfValid(ir.Tools, IRTool{
 			Name:        t.Name,
 			Description: t.Description,
 			Parameters:  t.InputSchema,
@@ -141,12 +141,13 @@ func DecodeMessagesRequest(data []byte) (*IRRequest, error) {
 
 // EncodeMessagesRequest serializes an IR request into Anthropic Messages wire format.
 func EncodeMessagesRequest(ir *IRRequest) ([]byte, error) {
+	tools := cleanIRTools(ir.Tools)
 	req := MsgRequest{
 		Model:         ir.Model,
 		MaxTokens:     ir.MaxTokens,
 		Temperature:   ir.Temperature,
 		Stream:        ir.Stream,
-		ToolChoice:    normalizeToolChoiceForMessages(ir.ToolChoice),
+		ToolChoice:    normalizeToolChoiceForMessages(ir.ToolChoice, tools),
 		TopP:          ir.TopP,
 		StopSequences: ir.Stop,
 	}
@@ -171,7 +172,7 @@ func EncodeMessagesRequest(ir *IRRequest) ([]byte, error) {
 		}
 		req.Messages = append(req.Messages, irMsgToMsg(m))
 	}
-	for _, t := range ir.Tools {
+	for _, t := range tools {
 		req.Tools = append(req.Tools, MsgTool{
 			Name:        t.Name,
 			Description: t.Description,
@@ -431,7 +432,7 @@ func msgMsgToIR(m MsgMessage) IRMessage {
 				Name:  c.Name,
 				Input: c.Input,
 			})
-			ir.ToolCalls = append(ir.ToolCalls, IRToolCall{
+			ir.ToolCalls = appendIRToolCallIfValid(ir.ToolCalls, IRToolCall{
 				ID:        c.ID,
 				Name:      c.Name,
 				Arguments: string(c.Input),
@@ -529,7 +530,7 @@ func msgContentToIRMessage(content []MsgContent) IRMessage {
 			ir.Content = append(ir.Content, IRContent{Type: "thinking", Text: c.Thinking})
 		case "tool_use":
 			ir.Content = append(ir.Content, IRContent{Type: "tool_use", ID: c.ID, Name: c.Name, Input: c.Input})
-			ir.ToolCalls = append(ir.ToolCalls, IRToolCall{ID: c.ID, Name: c.Name, Arguments: string(c.Input)})
+			ir.ToolCalls = appendIRToolCallIfValid(ir.ToolCalls, IRToolCall{ID: c.ID, Name: c.Name, Arguments: string(c.Input)})
 		}
 	}
 	if len(ir.Content) == 1 && ir.Content[0].Type == "text" {

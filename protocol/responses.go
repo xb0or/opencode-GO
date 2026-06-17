@@ -114,7 +114,10 @@ func DecodeResponsesRequest(data []byte) (*IRRequest, error) {
 		}
 	}
 	for _, t := range req.Tools {
-		ir.Tools = append(ir.Tools, IRTool{
+		if !isFunctionToolType(t.Type) {
+			continue
+		}
+		ir.Tools = appendIRToolIfValid(ir.Tools, IRTool{
 			Name:        t.Name,
 			Description: t.Description,
 			Parameters:  t.Parameters,
@@ -126,12 +129,13 @@ func DecodeResponsesRequest(data []byte) (*IRRequest, error) {
 
 // EncodeResponsesRequest serializes an IR request into Responses API wire format.
 func EncodeResponsesRequest(ir *IRRequest) ([]byte, error) {
+	tools := cleanIRTools(ir.Tools)
 	req := RespRequest{
 		Model:       ir.Model,
 		Temperature: ir.Temperature,
 		MaxTokens:   ir.MaxTokens,
 		Stream:      ir.Stream,
-		ToolChoice:  normalizeToolChoiceForResponses(ir.ToolChoice),
+		ToolChoice:  normalizeToolChoiceForResponses(ir.ToolChoice, tools),
 		TopP:        ir.TopP,
 	}
 	// Collect system instructions from both ir.System and system-role messages.
@@ -161,7 +165,7 @@ func EncodeResponsesRequest(ir *IRRequest) ([]byte, error) {
 	req.Instructions = instructions
 	inputBytes, _ := json.Marshal(items)
 	req.Input = inputBytes
-	for _, t := range ir.Tools {
+	for _, t := range tools {
 		req.Tools = append(req.Tools, RespTool{
 			Type:        "function",
 			Name:        t.Name,
@@ -381,7 +385,7 @@ func respItemToIR(item RespInputItem) IRMessage {
 	}
 	if item.Type == "function_call" {
 		ir.Role = "assistant"
-		ir.ToolCalls = append(ir.ToolCalls, IRToolCall{ID: item.CallID, Name: item.Name, Arguments: item.Arguments})
+		ir.ToolCalls = appendIRToolCallIfValid(ir.ToolCalls, IRToolCall{ID: item.CallID, Name: item.Name, Arguments: item.Arguments})
 		return ir
 	}
 	// Parse content (string or array).
@@ -437,7 +441,7 @@ func irMsgToRespItem(m IRMessage) RespInputItem {
 func respOutputToIR(item RespOutputItem) IRMessage {
 	ir := IRMessage{Role: "assistant"}
 	if item.Type == "function_call" {
-		ir.ToolCalls = append(ir.ToolCalls, IRToolCall{ID: item.CallID, Name: item.Name, Arguments: item.Arguments})
+		ir.ToolCalls = appendIRToolCallIfValid(ir.ToolCalls, IRToolCall{ID: item.CallID, Name: item.Name, Arguments: item.Arguments})
 		return ir
 	}
 	for _, c := range item.Content {

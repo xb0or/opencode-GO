@@ -264,6 +264,119 @@ func TestConvertRequest_ChatDeveloperRoleToMessagesSystem(t *testing.T) {
 	}
 }
 
+func TestConvertRequest_ResponsesToChatFiltersUnsupportedAndInvalidTools(t *testing.T) {
+	body := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": "hello",
+		"tools": [
+			{"type": "function", "name": "valid_tool", "parameters": {"type": "object"}},
+			{"type": "web_search_preview"},
+			{"type": "function", "name": "", "parameters": {"type": "object"}},
+			{"type": "function", "name": "bad name", "parameters": {"type": "object"}},
+			{"type": "function", "name": "valid_tool", "parameters": {"type": "object"}}
+		],
+		"tool_choice": {"type":"function","function":{"name":"missing_tool"}}
+	}`)
+	out, err := ConvertRequest(config.ProtocolResponses, config.ProtocolChat, body)
+	if err != nil {
+		t.Fatalf("responses→chat: %v", err)
+	}
+	var req ChatRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("chat output JSON: %v", err)
+	}
+	if len(req.Tools) != 1 {
+		t.Fatalf("tools = %#v, want exactly one valid function tool", req.Tools)
+	}
+	if req.Tools[0].Function.Name != "valid_tool" {
+		t.Fatalf("tool name = %q, want valid_tool", req.Tools[0].Function.Name)
+	}
+	if len(req.ToolChoice) != 0 {
+		t.Fatalf("tool_choice referencing a filtered/missing tool should be omitted: %s", string(req.ToolChoice))
+	}
+}
+
+func TestConvertRequest_FiltersInvalidToolsForAllTargets(t *testing.T) {
+	ir := &IRRequest{
+		Model:      "m",
+		Messages:   []IRMessage{{Role: "user", Text: "hello"}},
+		Tools:      []IRTool{{Name: ""}, {Name: "bad name"}, {Name: "ok_tool"}, {Name: "ok_tool"}},
+		ToolChoice: json.RawMessage(`{"type":"function","function":{"name":"ok_tool"}}`),
+	}
+
+	chatOut, err := EncodeChatRequest(ir)
+	if err != nil {
+		t.Fatalf("encode chat: %v", err)
+	}
+	var chatReq ChatRequest
+	if err := json.Unmarshal(chatOut, &chatReq); err != nil {
+		t.Fatalf("chat output JSON: %v", err)
+	}
+	if len(chatReq.Tools) != 1 || chatReq.Tools[0].Function.Name != "ok_tool" {
+		t.Fatalf("chat tools = %#v, want one ok_tool", chatReq.Tools)
+	}
+	if !strings.Contains(string(chatReq.ToolChoice), "ok_tool") {
+		t.Fatalf("chat tool_choice should keep ok_tool, got %s", string(chatReq.ToolChoice))
+	}
+
+	msgOut, err := EncodeMessagesRequest(ir)
+	if err != nil {
+		t.Fatalf("encode messages: %v", err)
+	}
+	var msgReq MsgRequest
+	if err := json.Unmarshal(msgOut, &msgReq); err != nil {
+		t.Fatalf("messages output JSON: %v", err)
+	}
+	if len(msgReq.Tools) != 1 || msgReq.Tools[0].Name != "ok_tool" {
+		t.Fatalf("messages tools = %#v, want one ok_tool", msgReq.Tools)
+	}
+	if !strings.Contains(string(msgReq.ToolChoice), "ok_tool") {
+		t.Fatalf("messages tool_choice should keep ok_tool, got %s", string(msgReq.ToolChoice))
+	}
+
+	respOut, err := EncodeResponsesRequest(ir)
+	if err != nil {
+		t.Fatalf("encode responses: %v", err)
+	}
+	var respReq RespRequest
+	if err := json.Unmarshal(respOut, &respReq); err != nil {
+		t.Fatalf("responses output JSON: %v", err)
+	}
+	if len(respReq.Tools) != 1 || respReq.Tools[0].Name != "ok_tool" {
+		t.Fatalf("responses tools = %#v, want one ok_tool", respReq.Tools)
+	}
+	if !strings.Contains(string(respReq.ToolChoice), "ok_tool") {
+		t.Fatalf("responses tool_choice should keep ok_tool, got %s", string(respReq.ToolChoice))
+	}
+}
+
+func TestEncodeChatRequest_FiltersInvalidToolCalls(t *testing.T) {
+	ir := &IRRequest{
+		Model: "m",
+		Messages: []IRMessage{{
+			Role: "assistant",
+			ToolCalls: []IRToolCall{
+				{ID: "bad", Name: "", Arguments: "{}"},
+				{ID: "ok", Name: "valid_tool", Arguments: "{}"},
+			},
+		}},
+	}
+	out, err := EncodeChatRequest(ir)
+	if err != nil {
+		t.Fatalf("encode chat: %v", err)
+	}
+	var req ChatRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("chat output JSON: %v", err)
+	}
+	if len(req.Messages) != 1 || len(req.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("tool_calls = %#v, want one valid call", req.Messages)
+	}
+	if req.Messages[0].ToolCalls[0].Function.Name != "valid_tool" {
+		t.Fatalf("tool call name = %q, want valid_tool", req.Messages[0].ToolCalls[0].Function.Name)
+	}
+}
+
 // ──────────────────────── Response conversion tests ─────────────────
 
 func TestConvertResponse_SameProtocol(t *testing.T) {

@@ -120,7 +120,10 @@ func DecodeChatRequest(data []byte) (*IRRequest, error) {
 		ir.Messages = append(ir.Messages, chatMsgToIR(m))
 	}
 	for _, t := range req.Tools {
-		ir.Tools = append(ir.Tools, IRTool{
+		if !isFunctionToolType(t.Type) {
+			continue
+		}
+		ir.Tools = appendIRToolIfValid(ir.Tools, IRTool{
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
 			Parameters:  t.Function.Parameters,
@@ -132,12 +135,13 @@ func DecodeChatRequest(data []byte) (*IRRequest, error) {
 
 // EncodeChatRequest serializes an IR request into Chat Completions wire format.
 func EncodeChatRequest(ir *IRRequest) ([]byte, error) {
+	tools := cleanIRTools(ir.Tools)
 	req := ChatRequest{
 		Model:       ir.Model,
 		Temperature: ir.Temperature,
 		MaxTokens:   ir.MaxTokens,
 		Stream:      ir.Stream,
-		ToolChoice:  normalizeToolChoiceForChat(ir.ToolChoice),
+		ToolChoice:  normalizeToolChoiceForChat(ir.ToolChoice, tools),
 		TopP:        ir.TopP,
 		Stop:        ir.Stop,
 	}
@@ -149,7 +153,7 @@ func EncodeChatRequest(ir *IRRequest) ([]byte, error) {
 	for _, m := range ir.Messages {
 		req.Messages = append(req.Messages, irMsgToChat(m))
 	}
-	for _, t := range ir.Tools {
+	for _, t := range tools {
 		req.Tools = append(req.Tools, ChatTool{
 			Type: "function",
 			Function: ChatToolFunction{
@@ -350,7 +354,7 @@ func irMsgToChat(m IRMessage) ChatMessage {
 	} else {
 		cm.Content = ""
 	}
-	for _, tc := range m.ToolCalls {
+	for _, tc := range cleanIRToolCalls(m.ToolCalls) {
 		cm.ToolCalls = append(cm.ToolCalls, ChatToolCall{
 			ID:   tc.ID,
 			Type: "function",

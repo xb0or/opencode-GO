@@ -9,22 +9,26 @@ import (
 // the OpenAI Chat shape. Default "auto" choices are omitted because providers
 // already default to auto when tools are present, and some OpenAI-compatible
 // backends reject the Anthropic object form {"type":"auto"}.
-func normalizeToolChoiceForChat(raw json.RawMessage) json.RawMessage {
-	return normalizeToolChoiceForOpenAI(raw)
+func normalizeToolChoiceForChat(raw json.RawMessage, tools []IRTool) json.RawMessage {
+	return normalizeToolChoiceForOpenAI(raw, tools)
 }
 
 // normalizeToolChoiceForResponses converts source-protocol tool_choice values
 // into the OpenAI Responses shape, which follows the same string/function
 // object convention for the choices we support here.
-func normalizeToolChoiceForResponses(raw json.RawMessage) json.RawMessage {
-	return normalizeToolChoiceForOpenAI(raw)
+func normalizeToolChoiceForResponses(raw json.RawMessage, tools []IRTool) json.RawMessage {
+	return normalizeToolChoiceForOpenAI(raw, tools)
 }
 
 // normalizeToolChoiceForMessages converts OpenAI Chat/Responses tool_choice
 // values into the Anthropic Messages shape.
-func normalizeToolChoiceForMessages(raw json.RawMessage) json.RawMessage {
+func normalizeToolChoiceForMessages(raw json.RawMessage, tools []IRTool) json.RawMessage {
 	raw = compactRawMessage(raw)
 	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	toolNames := toolNameSet(tools)
+	if len(toolNames) == 0 {
 		return nil
 	}
 	if s, ok := rawString(raw); ok {
@@ -53,19 +57,29 @@ func normalizeToolChoiceForMessages(raw json.RawMessage) json.RawMessage {
 		return mustRaw(map[string]any{"type": "none"})
 	case "function":
 		if name := functionChoiceName(obj); name != "" {
+			if !toolNames[name] {
+				return nil
+			}
 			return mustRaw(map[string]any{"type": "tool", "name": name})
 		}
 	case "tool":
 		if name := stringValue(obj["name"]); name != "" {
+			if !toolNames[name] {
+				return nil
+			}
 			return mustRaw(map[string]any{"type": "tool", "name": name})
 		}
 	}
 	return raw
 }
 
-func normalizeToolChoiceForOpenAI(raw json.RawMessage) json.RawMessage {
+func normalizeToolChoiceForOpenAI(raw json.RawMessage, tools []IRTool) json.RawMessage {
 	raw = compactRawMessage(raw)
 	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	toolNames := toolNameSet(tools)
+	if len(toolNames) == 0 {
 		return nil
 	}
 	if s, ok := rawString(raw); ok {
@@ -92,6 +106,9 @@ func normalizeToolChoiceForOpenAI(raw json.RawMessage) json.RawMessage {
 		return mustRaw("required")
 	case "tool", "function":
 		if name := functionChoiceName(obj); name != "" {
+			if !toolNames[name] {
+				return nil
+			}
 			return mustRaw(map[string]any{
 				"type":     "function",
 				"function": map[string]any{"name": name},
