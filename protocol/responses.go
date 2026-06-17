@@ -138,7 +138,7 @@ func EncodeResponsesRequest(ir *IRRequest) ([]byte, error) {
 	instructions := ir.System
 	var items []RespInputItem
 	for _, m := range ir.Messages {
-		if m.Role == "system" {
+		if isSystemLikeRole(m.Role) {
 			// Fold system messages into instructions.
 			text := m.Text
 			if text == "" && len(m.Content) > 0 {

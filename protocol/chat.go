@@ -327,7 +327,7 @@ func chatMsgToIR(m ChatMessage) IRMessage {
 }
 
 func irMsgToChat(m IRMessage) ChatMessage {
-	cm := ChatMessage{Role: m.Role, Name: m.Name, ToolCallID: m.ToolCallID}
+	cm := ChatMessage{Role: normalizeChatRole(m.Role), Name: m.Name, ToolCallID: m.ToolCallID}
 	if m.Text != "" && len(m.Content) == 0 {
 		cm.Content = m.Text
 	} else if len(m.Content) > 0 {

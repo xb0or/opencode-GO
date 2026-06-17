@@ -205,6 +205,65 @@ func TestConvertRequest_NormalizesNamedToolChoice(t *testing.T) {
 	}
 }
 
+func TestConvertRequest_ResponsesDeveloperRoleToChatSystem(t *testing.T) {
+	body := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type": "message", "role": "user", "content": "Hello"},
+			{"type": "message", "role": "developer", "content": "Follow internal rules."}
+		]
+	}`)
+	out, err := ConvertRequest(config.ProtocolResponses, config.ProtocolChat, body)
+	if err != nil {
+		t.Fatalf("responses→chat: %v", err)
+	}
+	var req ChatRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("chat output JSON: %v", err)
+	}
+	for _, m := range req.Messages {
+		if m.Role == "developer" {
+			t.Fatalf("developer role should not be sent to chat upstream: %s", string(out))
+		}
+	}
+	foundSystem := false
+	for _, m := range req.Messages {
+		if m.Role == "system" && m.Content == "Follow internal rules." {
+			foundSystem = true
+		}
+	}
+	if !foundSystem {
+		t.Fatalf("developer role was not converted to system: %#v", req.Messages)
+	}
+}
+
+func TestConvertRequest_ChatDeveloperRoleToMessagesSystem(t *testing.T) {
+	body := []byte(`{
+		"model": "claude",
+		"messages": [
+			{"role": "developer", "content": "Follow internal rules."},
+			{"role": "user", "content": "Hello"}
+		],
+		"max_tokens": 16
+	}`)
+	out, err := ConvertRequest(config.ProtocolChat, config.ProtocolMessages, body)
+	if err != nil {
+		t.Fatalf("chat→messages: %v", err)
+	}
+	var req MsgRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("messages output JSON: %v", err)
+	}
+	if req.System != "Follow internal rules." {
+		t.Fatalf("developer role should fold into system, got %#v", req.System)
+	}
+	for _, m := range req.Messages {
+		if m.Role == "developer" || m.Role == "system" {
+			t.Fatalf("system-like role should not remain in messages: %#v", req.Messages)
+		}
+	}
+}
+
 // ──────────────────────── Response conversion tests ─────────────────
 
 func TestConvertResponse_SameProtocol(t *testing.T) {

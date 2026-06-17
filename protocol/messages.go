@@ -155,7 +155,7 @@ func EncodeMessagesRequest(ir *IRRequest) ([]byte, error) {
 	}
 	// Anthropic only allows user/assistant in messages; system is separate.
 	for _, m := range ir.Messages {
-		if m.Role == "system" {
+		if isSystemLikeRole(m.Role) {
 			// Fold system messages into the system field.
 			if req.System == nil {
 				req.System = m.Text
