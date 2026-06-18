@@ -458,50 +458,50 @@
 
             <!-- Usage Records -->
             <div v-if="page==='usage'" class="usage-page">
-              <div class="page-hero">
+              <div class="page-hero usage-hero">
                 <div>
                   <div class="eyebrow">{{t('usage.eyebrow')}}</div>
                   <h1>{{t('usage.title')}}</h1>
                   <p>{{t('usage.subtitle')}}</p>
                 </div>
-                <button class="btn btn-primary" @click="loadUsage" :disabled="usageLoading">{{usageLoading?t('usage.loading'):t('common.refresh')}}</button>
+                <div class="hero-actions">
+                  <button class="btn btn-ghost" @click="setTodayUsageFilters">{{t('usage.todayRange')}}</button>
+                  <button class="btn btn-primary" @click="loadUsage" :disabled="usageLoading">{{usageLoading?t('usage.loading'):t('common.refresh')}}</button>
+                </div>
               </div>
 
-              <div class="stats-grid stats-grid-dense">
-                <div class="stat-card stat-card-rich">
-                  <div class="label">{{t('usage.visibleRows')}}</div>
-                  <div class="value accent">{{usageSummary.visible}}</div>
+              <div class="usage-kpi-grid">
+                <div class="usage-kpi-card usage-kpi-wide">
+                  <div class="label">{{t('usage.totalUsage')}}</div>
+                  <div class="usage-kpi-main">
+                    <span class="value blue">{{usageTokens(usageSummary.total_tokens)}}</span>
+                    <span class="usage-kpi-cost">{{usageCost(usageSummary.actual_cost || usageSummary.total_cost)}}</span>
+                  </div>
+                  <div class="hint">{{t('dashboard.input')}} {{usageTokens(usageSummary.input_tokens)}} / {{t('dashboard.output')}} {{usageTokens(usageSummary.output_tokens)}} · {{t('usage.cacheRead')}} {{usageTokens(usageSummary.cache_read_tokens || usageSummary.cache_tokens)}}</div>
                 </div>
-                <div class="stat-card stat-card-rich">
-                  <div class="label">{{t('usage.successRows')}}</div>
-                  <div class="value green">{{usageSummary.success}}</div>
+                <div class="usage-kpi-card">
+                  <div class="label">{{t('usage.realtimeRpm')}}</div>
+                  <div class="value accent">{{usageSummary.rpm || 0}}</div>
+                  <div class="hint">{{t('usage.requestsPerMinute')}}</div>
                 </div>
-                <div class="stat-card stat-card-rich">
-                  <div class="label">{{t('usage.errorRows')}}</div>
-                  <div class="value red">{{usageSummary.errors}}</div>
+                <div class="usage-kpi-card">
+                  <div class="label">{{t('usage.realtimeTpm')}}</div>
+                  <div class="value green">{{usageTokens(usageSummary.tpm || 0)}}</div>
+                  <div class="hint">{{t('usage.tokensPerMinute')}}</div>
                 </div>
-                <div class="stat-card stat-card-rich">
+                <div class="usage-kpi-card">
+                  <div class="label">{{t('usage.finalCost')}}</div>
+                  <div class="value accent">{{usageCost(usageSummary.actual_cost || usageSummary.total_cost)}}</div>
+                  <div class="hint">{{t('usage.baseCost')}} {{usageCost(usageSummary.total_cost)}}</div>
+                </div>
+                <div class="usage-kpi-card">
                   <div class="label">{{t('usage.pageAvgLatency')}}</div>
                   <div class="value yellow">{{usageDuration(usageSummary.avg_duration_ms)}}</div>
-                </div>
-                <div class="stat-card stat-card-rich">
-                  <div class="label">{{t('usage.pageTokens')}}</div>
-                  <div class="value blue">{{usageTokens(usageSummary.total_tokens)}}</div>
-                  <div class="hint">{{t('dashboard.input')}} {{usageTokens(usageSummary.input_tokens)}} / {{t('dashboard.output')}} {{usageTokens(usageSummary.output_tokens)}}</div>
-                </div>
-                <div class="stat-card stat-card-rich">
-                  <div class="label">{{t('usage.pageCacheTokens')}}</div>
-                  <div class="value accent">{{usageTokens(usageSummary.cache_tokens)}}</div>
-                  <div class="hint">{{t('dashboard.cacheRead')}} {{usageTokens(usageSummary.cache_read_tokens)}} / {{t('dashboard.cacheWrite')}} {{usageTokens(usageSummary.cache_creation_tokens)}}</div>
-                </div>
-                <div class="stat-card stat-card-rich">
-                  <div class="label">{{t('usage.pageCost')}}</div>
-                  <div class="value accent">{{usageCost(usageSummary.total_cost)}}</div>
-                  <div class="hint">{{t('dashboard.todaySpend')}} {{usageCost(usageSummary.actual_cost)}} / {{usageCost(usageSummary.account_cost)}}</div>
+                  <div class="hint">{{usageSummary.success_calls || usageSummary.success || 0}} {{t('usage.success')}} / {{usageSummary.error_calls || usageSummary.errors || 0}} {{t('usage.error')}}</div>
                 </div>
               </div>
 
-              <div class="card filter-card">
+              <div class="card filter-card usage-filter-card">
                 <div class="form-row usage-filter-row">
                   <div class="form-group">
                     <label>{{t('usage.search')}}</label>
@@ -527,6 +527,14 @@
                       <option value="false">sync</option>
                     </select>
                   </div>
+                  <div class="form-group usage-time-filter">
+                    <label>{{t('usage.startTime')}}</label>
+                    <input v-model="usageFilters.start" type="datetime-local" @change="applyUsageFilters" />
+                  </div>
+                  <div class="form-group usage-time-filter">
+                    <label>{{t('usage.endTime')}}</label>
+                    <input v-model="usageFilters.end" type="datetime-local" @change="applyUsageFilters" />
+                  </div>
                   <div class="form-group compact-select">
                     <label>{{t('usage.pageSize')}}</label>
                     <select v-model.number="usageFilters.pageSize" @change="applyUsageFilters">
@@ -542,40 +550,55 @@
                 </div>
               </div>
 
-              <div class="card">
+              <div class="card usage-record-card">
                 <div class="card-title-row">
                   <h2>{{t('usage.records')}}</h2>
                   <span class="pill">{{usagePageRange()}}</span>
                 </div>
-                <div class="table-wrap">
-                  <table>
+                <div class="table-wrap usage-table-wrap">
+                  <table class="usage-table">
                     <tr>
                       <th>{{t('table.time')}}</th>
+                      <th>{{t('usage.tokenColumn')}}</th>
                       <th>{{t('table.model')}}</th>
-                      <th>{{t('table.protocol')}}</th>
-                      <th>{{t('table.status')}}</th>
-                      <th>{{t('table.duration')}}</th>
-                      <th>{{t('table.stream')}}</th>
+                      <th>{{t('usage.latencyColumn')}}</th>
                       <th>{{t('table.tokens')}}</th>
                       <th>{{t('table.cost')}}</th>
-                      <th>{{t('table.token')}}</th>
-                      <th>{{t('table.error')}}</th>
+                      <th>{{t('usage.priceBrief')}}</th>
+                      <th>{{t('table.status')}}</th>
                     </tr>
-                    <tr v-for="l in usageLogs" :key="'usage-'+l.id">
-                      <td class="nowrap muted-cell">{{fmtTime(l.created_at, locale)}}</td>
-                      <td><span class="badge badge-blue">{{l.model||'?'}}</span></td>
-                      <td>{{l.protocol||'?'}}</td>
-                      <td><span :class="'badge '+(l.status_code<400?'badge-green':'badge-red')">{{l.status_code}}</span></td>
-                      <td>{{usageDuration(l.duration_ms)}}</td>
-                      <td><span :class="streamBadgeClass(l.stream)">{{streamLabel(l.stream)}}</span></td>
-                      <td class="token-cell">
+                    <tr v-for="l in usageLogs" :key="'usage-'+l.id" class="usage-row" @click="openUsageDetail(l)">
+                      <td class="nowrap muted-cell usage-time-cell">{{fmtTime(l.created_at, locale)}}</td>
+                      <td class="usage-token-name-cell">
+                        <b>{{usageTokenLabel(l)}}</b>
+                        <small>{{usageGroupLabel(l)}}</small>
+                      </td>
+                      <td class="usage-model-cell">
+                        <span class="model-avatar">{{usageModelInitial(l)}}</span>
+                        <div>
+                          <b>{{usageModelLabel(l)}}</b>
+                          <small>{{l.model || '—'}} · {{l.protocol || '—'}}</small>
+                        </div>
+                      </td>
+                      <td class="usage-latency-cell">
+                        <b>{{usageDuration(l.duration_ms)}}</b>
+                        <small>FRT {{l.first_response_ms ? usageDuration(l.first_response_ms) : '—'}} · {{usageStreamRate(l)}}</small>
+                      </td>
+                      <td class="token-cell usage-token-detail">
                         <b>{{usageTokens(l.total_tokens)}}</b>
                         <small>{{t('dashboard.input')}} {{usageTokens(l.input_tokens)}} / {{t('dashboard.output')}} {{usageTokens(l.output_tokens)}}</small>
-                        <small>{{t('dashboard.cache')}} {{usageTokens(l.cache_tokens)}} · {{t('dashboard.cacheRead')}} {{usageTokens(l.cache_read_tokens)}} / {{t('dashboard.cacheWrite')}} {{usageTokens(l.cache_creation_tokens)}}</small>
+                        <small v-if="usageCacheReadTokens(l)>0" class="cache-read-line">{{t('usage.cacheRead')}} {{usageTokens(usageCacheReadTokens(l))}}</small>
+                        <small v-if="usageCacheCreationTokens(l)>0" class="cache-write-line">{{t('usage.cacheWrite')}} {{usageTokens(usageCacheCreationTokens(l))}}</small>
                       </td>
-                      <td class="nowrap muted-cell">{{usageCost(l.total_cost)}}</td>
-                      <td class="muted-cell">{{emptyLabel(l.token_name)}}</td>
-                      <td class="error-cell">{{emptyLabel(l.error)}}</td>
+                      <td class="usage-cost-cell">
+                        <b>{{usageCost(usageFinalCost(l))}}</b>
+                        <small>{{usageGroupLabel(l)}}</small>
+                      </td>
+                      <td class="nowrap muted-cell">{{usagePriceBrief(l)}}</td>
+                      <td>
+                        <span :class="'badge '+(l.status_code<400?'badge-green':'badge-red')">{{l.status_code}}</span>
+                        <span :class="streamBadgeClass(l.stream)">{{streamLabel(l.stream)}}</span>
+                      </td>
                     </tr>
                   </table>
                   <div v-if="!usageLoading && usageLogs.length===0" class="empty-state">{{t('usage.noRecords')}}</div>
@@ -584,6 +607,56 @@
                   <button class="btn btn-ghost btn-sm" @click="usagePrevPage" :disabled="usagePagination.page<=1">{{t('usage.prev')}}</button>
                   <span>{{usagePageRange()}}</span>
                   <button class="btn btn-ghost btn-sm" @click="usageNextPage" :disabled="usagePagination.page*usagePagination.page_size>=usagePagination.total">{{t('usage.next')}}</button>
+                </div>
+              </div>
+
+              <div v-if="usageSelected" class="modal-overlay usage-detail-overlay" @click.self="closeUsageDetail">
+                <div class="modal usage-detail-modal">
+                  <div class="usage-detail-head">
+                    <div>
+                      <div class="eyebrow">{{usageSelected.request_id || ('#'+usageSelected.id)}}</div>
+                      <h2>{{t('usage.detailTitle')}}</h2>
+                      <p>{{usageModelLabel(usageSelected)}} · {{usagePriceBrief(usageSelected)}}</p>
+                    </div>
+                    <button class="btn btn-ghost btn-sm" @click="closeUsageDetail">{{t('usage.closeDetail')}}</button>
+                  </div>
+
+                  <div class="usage-detail-grid">
+                    <section class="usage-detail-section">
+                      <h3>{{t('usage.basicInfo')}}</h3>
+                      <div class="detail-list">
+                        <span>{{t('usage.requestId')}}<b>{{usageSelected.request_id || '—'}}</b></span>
+                        <span>{{t('table.token')}}<b>{{usageTokenLabel(usageSelected)}}</b></span>
+                        <span>{{t('usage.group')}}<b>{{usageGroupLabel(usageSelected)}}</b></span>
+                        <span>{{t('usage.ipAddress')}}<b>{{usageSelected.ip_address || '—'}}</b></span>
+                        <span>{{t('table.duration')}}<b>{{usageDuration(usageSelected.duration_ms)}} · FRT {{usageSelected.first_response_ms ? usageDuration(usageSelected.first_response_ms) : '—'}}</b></span>
+                        <span>{{t('table.stream')}}<b>{{streamLabel(usageSelected.stream)}} · {{usageStreamRate(usageSelected)}}</b></span>
+                      </div>
+                    </section>
+
+                    <section class="usage-detail-section token-breakdown-section">
+                      <h3>{{t('usage.tokenDetail')}}</h3>
+                      <div class="token-breakdown-grid">
+                        <div><small>{{t('usage.inputTokens')}}</small><b>{{usageTokens(usageSelected.input_tokens)}}</b></div>
+                        <div><small>{{t('usage.outputTokens')}}</small><b>{{usageTokens(usageSelected.output_tokens)}}</b></div>
+                        <div class="cache-read"><small>{{t('usage.cacheRead')}}</small><b>{{usageTokens(usageCacheReadTokens(usageSelected))}}</b></div>
+                        <div v-if="usageCacheCreationTokens(usageSelected)>0" class="cache-write"><small>{{t('usage.cacheWrite')}}</small><b>{{usageTokens(usageCacheCreationTokens(usageSelected))}}</b></div>
+                      </div>
+                    </section>
+
+                    <section class="usage-detail-section billing-section">
+                      <h3>{{t('usage.billingDetail')}}</h3>
+                      <div class="detail-list">
+                        <span>{{t('usage.billingMode')}}<b>{{usageBillingMode(usageSelected)}}</b></span>
+                        <span>{{t('usage.inputPrice')}}<b>{{usageUnitPrice(usageSelected.input_unit_price)}}</b></span>
+                        <span>{{t('usage.outputPrice')}}<b>{{usageUnitPrice(usageSelected.output_unit_price)}}</b></span>
+                        <span>{{t('usage.cacheReadPrice')}}<b>{{usageUnitPrice(usageSelected.cache_read_unit_price)}}</b></span>
+                        <span>{{t('usage.multiplier')}}<b>{{usageGroupLabel(usageSelected)}}</b></span>
+                        <span>{{t('usage.baseCost')}}<b>{{usageCost(usageSelected.total_cost)}}</b></span>
+                        <span class="total"><em>{{t('usage.finalCost')}}</em><strong>{{usageCost(usageFinalCost(usageSelected))}}</strong></span>
+                      </div>
+                    </section>
+                  </div>
                 </div>
               </div>
             </div>

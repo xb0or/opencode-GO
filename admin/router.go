@@ -694,13 +694,144 @@ func listUsageLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	decorated := make([]usageLogDTO, 0, len(items))
+	for _, item := range items {
+		decorated = append(decorated, decorateUsageLog(item))
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"items":     items,
+		"items":     decorated,
 		"total":     total,
 		"page":      page,
 		"page_size": pageSize,
+		"summary":   usageLogSummary(c),
 	})
+}
+
+type usageLogDTO struct {
+	store.UsageLog
+	ModelName string `json:"model_name"`
+}
+
+func decorateUsageLog(row store.UsageLog) usageLogDTO {
+	if row.BillingMode == "" {
+		row.BillingMode = "token"
+	}
+	route, ok := config.LookupModel(row.Model)
+	if ok {
+		if row.Group == "" {
+			row.Group = route.Group
+		}
+		if row.InputUnitPrice == 0 {
+			row.InputUnitPrice = adminPriceField(route.Pricing, "prompt")
+		}
+		if row.OutputUnitPrice == 0 {
+			row.OutputUnitPrice = adminPriceField(route.Pricing, "completion")
+		}
+		if row.CacheReadUnitPrice == 0 {
+			row.CacheReadUnitPrice = adminPriceField(route.Pricing, "input_cache_read", "cache_read", "prompt_cache_read")
+		}
+		if row.CacheWriteUnitPrice == 0 {
+			row.CacheWriteUnitPrice = adminPriceField(route.Pricing, "input_cache_write", "cache_write", "prompt_cache_write", "input_cache_creation")
+		}
+	}
+	if row.GroupMultiplier <= 0 {
+		row.GroupMultiplier = config.GroupMultiplier(row.Group)
+	}
+	if row.CacheReadTokens == 0 && row.CacheTokens > 0 && row.CacheCreationTokens == 0 {
+		row.CacheReadTokens = row.CacheTokens
+	}
+	if row.ActualCost == 0 && row.TotalCost > 0 {
+		row.ActualCost = row.TotalCost * row.GroupMultiplier
+		row.AccountCost = row.ActualCost
+	}
+	modelName := row.Model
+	if ok && route.Name != "" {
+		modelName = route.Name
+	}
+	return usageLogDTO{UsageLog: row, ModelName: modelName}
+}
+
+func usageLogSummary(c *gin.Context) gin.H {
+	q := usageLogQuery(c)
+	if strings.TrimSpace(c.Query("start")) == "" && strings.TrimSpace(c.Query("end")) == "" {
+		now := time.Now()
+		todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		q = q.Where("created_at >= ?", todayStart)
+	}
+
+	var totalCalls int64
+	q.Count(&totalCalls)
+	var successCalls int64
+	usageLogQueryForSummary(c).Where("status_code < ?", http.StatusBadRequest).Count(&successCalls)
+	var errorCalls int64
+	usageLogQueryForSummary(c).Where("status_code >= ?", http.StatusBadRequest).Count(&errorCalls)
+
+	type sums struct {
+		InputTokens         int64   `gorm:"column:input_tokens"`
+		OutputTokens        int64   `gorm:"column:output_tokens"`
+		CacheReadTokens     int64   `gorm:"column:cache_read_tokens"`
+		CacheCreationTokens int64   `gorm:"column:cache_creation_tokens"`
+		TotalTokens         int64   `gorm:"column:total_tokens"`
+		TotalCost           float64 `gorm:"column:total_cost"`
+		ActualCost          float64 `gorm:"column:actual_cost"`
+		AccountCost         float64 `gorm:"column:account_cost"`
+		AvgDurationMs       float64 `gorm:"column:avg_duration_ms"`
+	}
+	var s sums
+	usageLogQueryForSummary(c).
+		Select("coalesce(sum(input_tokens),0) as input_tokens, coalesce(sum(output_tokens),0) as output_tokens, coalesce(sum(cache_read_tokens),0) as cache_read_tokens, coalesce(sum(cache_creation_tokens),0) as cache_creation_tokens, coalesce(sum(total_tokens),0) as total_tokens, coalesce(sum(total_cost),0) as total_cost, coalesce(sum(case when actual_cost > 0 then actual_cost else total_cost end),0) as actual_cost, coalesce(sum(case when account_cost > 0 then account_cost else case when actual_cost > 0 then actual_cost else total_cost end end),0) as account_cost, coalesce(avg(duration_ms),0) as avg_duration_ms").
+		Scan(&s)
+
+	lastMinute := time.Now().Add(-time.Minute)
+	var rpm int64
+	usageLogQueryForSummary(c).Where("created_at >= ?", lastMinute).Count(&rpm)
+	var tpm int64
+	usageLogQueryForSummary(c).Where("created_at >= ?", lastMinute).
+		Select("coalesce(sum(total_tokens),0)").
+		Scan(&tpm)
+
+	return gin.H{
+		"total_calls":           totalCalls,
+		"success_calls":         successCalls,
+		"error_calls":           errorCalls,
+		"rpm":                   rpm,
+		"tpm":                   tpm,
+		"avg_duration_ms":       s.AvgDurationMs,
+		"input_tokens":          s.InputTokens,
+		"output_tokens":         s.OutputTokens,
+		"cache_read_tokens":     s.CacheReadTokens,
+		"cache_creation_tokens": s.CacheCreationTokens,
+		"cache_tokens":          s.CacheReadTokens,
+		"total_tokens":          s.TotalTokens,
+		"total_cost":            s.TotalCost,
+		"actual_cost":           s.ActualCost,
+		"account_cost":          s.AccountCost,
+	}
+}
+
+func usageLogQueryForSummary(c *gin.Context) *gorm.DB {
+	q := usageLogQuery(c)
+	if strings.TrimSpace(c.Query("start")) == "" && strings.TrimSpace(c.Query("end")) == "" {
+		now := time.Now()
+		todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		q = q.Where("created_at >= ?", todayStart)
+	}
+	return q
+}
+
+func adminPriceField(pricing map[string]string, keys ...string) float64 {
+	for _, key := range keys {
+		raw := strings.TrimSpace(pricing[key])
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.ParseFloat(raw, 64)
+		if err == nil && v >= 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 func usageLogQuery(c *gin.Context) *gorm.DB {
@@ -713,6 +844,9 @@ func usageLogQuery(c *gin.Context) *gorm.DB {
 	}
 	if token := strings.TrimSpace(c.Query("token")); token != "" {
 		q = q.Where("token_name = ?", token)
+	}
+	if group := strings.TrimSpace(c.Query("group")); group != "" {
+		q = q.Where("`group` = ?", group)
 	}
 	if status := strings.TrimSpace(c.Query("status")); status != "" {
 		switch status {
@@ -735,7 +869,7 @@ func usageLogQuery(c *gin.Context) *gorm.DB {
 	}
 	if qText := strings.TrimSpace(c.Query("q")); qText != "" {
 		like := "%" + qText + "%"
-		q = q.Where("model LIKE ? OR protocol LIKE ? OR token_name LIKE ? OR error LIKE ?", like, like, like, like)
+		q = q.Where("model LIKE ? OR protocol LIKE ? OR token_name LIKE ? OR `group` LIKE ? OR request_id LIKE ? OR ip_address LIKE ? OR error LIKE ?", like, like, like, like, like, like, like)
 	}
 	if start := parseQueryTime(c.Query("start")); start != nil {
 		q = q.Where("created_at >= ?", *start)
