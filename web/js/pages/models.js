@@ -3,7 +3,7 @@
  * 支持模态框添加、下拉选择、自动填写模型ID
  */
 
-import { validateRequired } from "../api.js";
+import { validateRequired } from "../api.js?v=20260619a";
 const { ref, reactive, computed, watch } = Vue;
 
 /**

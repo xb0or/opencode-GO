@@ -3,7 +3,7 @@
  * 支持模态框创建和删除
  */
 
-import { validateRequired } from "../api.js";
+import { validateRequired } from "../api.js?v=20260619a";
 const { ref, reactive } = Vue;
 
 export function useTokens(api, showToast, t, showConfirm) {

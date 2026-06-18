@@ -3,7 +3,7 @@
  * 支持添加/修改/删除 client model -> upstream model 改写规则。
  */
 
-import { validateRequired } from "../api.js";
+import { validateRequired } from "../api.js?v=20260619a";
 const { ref, reactive } = Vue;
 
 export function useMappings(api, showToast, t, showConfirm) {
