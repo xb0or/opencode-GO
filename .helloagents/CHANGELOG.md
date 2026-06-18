@@ -1,3 +1,9 @@
+## 2026-06-18
+
+- 修复 Responses 端点转 Chat 上游时的工具调用历史合法化：system/developer 消息统一折叠到前置 system，避免打断 assistant `tool_calls` 与后续 tool result。
+- Responses `reasoning` item 会回挂到待配对 assistant tool_call；连续 `function_call` 会合并为同一 assistant tool_calls turn，并按 call_id 将 tool output 紧跟其后。
+- 对缺失 tool output 的历史 tool_call 与孤儿 tool output 做安全过滤，避免 DeepSeek 报 `tool_calls` 后缺少对应 tool message；补充 Codex Responses 工具链回归测试并验证 `go test ./...` 通过。
+
 ## 2026-06-17
 
 - 完整修复 Chat thinking/reasoning 跨协议保真：Chat `reasoning_content` 会进入 IR thinking 块，Messages thinking 与 Responses `reasoning_content` 再转回 Chat 时不再丢失或混入普通输出。

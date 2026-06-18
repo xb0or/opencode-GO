@@ -21,20 +21,27 @@ type RespRequest struct {
 }
 
 type RespInputItem struct {
-	Role             string          `json:"role,omitempty"`
-	Type             string          `json:"type,omitempty"`    // message | function_call | function_call_output
-	Content          json.RawMessage `json:"content,omitempty"` // string | []RespContent
-	ReasoningContent *string         `json:"reasoning_content,omitempty"`
-	Name             string          `json:"name,omitempty"`
-	CallID           string          `json:"call_id,omitempty"`
-	Output           string          `json:"output,omitempty"`
-	Arguments        string          `json:"arguments,omitempty"`
+	ID               string                 `json:"id,omitempty"`
+	Role             string                 `json:"role,omitempty"`
+	Type             string                 `json:"type,omitempty"`    // message | function_call | function_call_output | reasoning
+	Content          json.RawMessage        `json:"content,omitempty"` // string | []RespContent
+	Summary          []RespReasoningSummary `json:"summary,omitempty"`
+	ReasoningContent *string                `json:"reasoning_content,omitempty"`
+	Name             string                 `json:"name,omitempty"`
+	CallID           string                 `json:"call_id,omitempty"`
+	Output           string                 `json:"output,omitempty"`
+	Arguments        string                 `json:"arguments,omitempty"`
 }
 
 type RespContent struct {
 	Type             string  `json:"type"` // input_text | output_text | reasoning | reasoning_text
 	Text             string  `json:"text,omitempty"`
 	ReasoningContent *string `json:"reasoning_content,omitempty"`
+}
+
+type RespReasoningSummary struct {
+	Type string `json:"type,omitempty"`
+	Text string `json:"text,omitempty"`
 }
 
 type RespTool struct {
@@ -113,9 +120,7 @@ func DecodeResponsesRequest(data []byte) (*IRRequest, error) {
 		if err := json.Unmarshal(req.Input, &items); err != nil {
 			return nil, fmt.Errorf("responses: parse input: %w", err)
 		}
-		for _, item := range items {
-			ir.Messages = append(ir.Messages, respItemToIR(item))
-		}
+		ir.Messages = decodeResponsesInputItems(items)
 	}
 	for _, t := range req.Tools {
 		if !isFunctionToolType(t.Type) {
@@ -431,10 +436,121 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 
 // ──────────────────────── helpers ───────────────────────────────────
 
+func decodeResponsesInputItems(items []RespInputItem) []IRMessage {
+	messages := make([]IRMessage, 0, len(items))
+	pendingReasoning := ""
+	for _, item := range items {
+		if isResponsesReasoningType(item.Type) {
+			reasoning := reasoningTextFromRespItem(item)
+			if attachReasoningToLastPendingToolCall(messages, reasoning) {
+				continue
+			}
+			pendingReasoning += reasoning
+			continue
+		}
+		msg := respItemToIR(item)
+		if pendingReasoning != "" && (msg.Role == "assistant" || len(msg.ToolCalls) > 0) {
+			msg.Content = appendThinkingContentBlock(msg.Content, pendingReasoning)
+			pendingReasoning = ""
+		}
+		messages = append(messages, msg)
+	}
+	if pendingReasoning != "" {
+		messages = append(messages, IRMessage{Role: "assistant", Content: []IRContent{{Type: "thinking", Text: pendingReasoning}}})
+	}
+	return coalesceResponsesFunctionCalls(messages)
+}
+
+func attachReasoningToLastPendingToolCall(messages []IRMessage, reasoning string) bool {
+	if reasoning == "" {
+		return true
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.Role == "tool" || m.ToolCallID != "" || m.Role == "user" {
+			return false
+		}
+		if isSystemLikeRole(m.Role) || isEmptyMessage(m) {
+			continue
+		}
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			messages[i].Content = appendThinkingContentBlock(messages[i].Content, reasoning)
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+func coalesceResponsesFunctionCalls(messages []IRMessage) []IRMessage {
+	out := make([]IRMessage, 0, len(messages))
+	for i := 0; i < len(messages); i++ {
+		m := messages[i]
+		if len(m.ToolCalls) == 0 || visibleText(m) != "" {
+			out = append(out, m)
+			continue
+		}
+		merged := m
+		for i+1 < len(messages) && len(messages[i+1].ToolCalls) > 0 && visibleText(messages[i+1]) == "" {
+			merged.ToolCalls = append(merged.ToolCalls, messages[i+1].ToolCalls...)
+			for _, c := range messages[i+1].Content {
+				if c.Type == "thinking" {
+					merged.Content = appendThinkingContentBlock(merged.Content, c.Text)
+				}
+			}
+			i++
+		}
+		out = append(out, merged)
+	}
+	return out
+}
+
+func isResponsesReasoningType(typ string) bool {
+	switch typ {
+	case "reasoning", "reasoning_text", "reasoning_content", "summary_text":
+		return true
+	default:
+		return false
+	}
+}
+
+func reasoningTextFromRespItem(item RespInputItem) string {
+	text := ""
+	if item.ReasoningContent != nil {
+		text += *item.ReasoningContent
+	}
+	for _, s := range item.Summary {
+		text += s.Text
+	}
+	var contentText string
+	if err := json.Unmarshal(item.Content, &contentText); err == nil {
+		text += contentText
+		return text
+	}
+	var parts []RespContent
+	if err := json.Unmarshal(item.Content, &parts); err == nil {
+		for _, p := range parts {
+			if p.ReasoningContent != nil {
+				text += *p.ReasoningContent
+			} else {
+				text += p.Text
+			}
+		}
+	}
+	return text
+}
+
 func respItemToIR(item RespInputItem) IRMessage {
 	ir := IRMessage{Role: item.Role}
 	if item.ReasoningContent != nil {
 		ir.Content = appendThinkingContentBlock(ir.Content, *item.ReasoningContent)
+	}
+	if isResponsesReasoningType(item.Type) {
+		ir.Role = "assistant"
+		if text := reasoningTextFromRespItem(item); text != "" {
+			ir.Content = appendThinkingContentBlock(ir.Content, text)
+		}
+		return ir
 	}
 	if item.Type == "function_call_output" {
 		ir.Role = "tool"

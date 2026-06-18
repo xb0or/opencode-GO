@@ -148,12 +148,27 @@ func EncodeChatRequest(ir *IRRequest) ([]byte, error) {
 		TopP:        ir.TopP,
 		Stop:        ir.Stop,
 	}
-	// If there's a system prompt (from Anthropic's system field), prepend it as
-	// a system message.
-	if ir.System != "" {
-		req.Messages = append(req.Messages, ChatMessage{Role: "system", Content: ir.System})
-	}
+	// Chat-compatible APIs require system/developer instructions to be outside
+	// assistant tool_call -> tool result runs. Fold system-like messages from any
+	// position into the leading system prompt before normalizing tool pairs.
+	instructions := ir.System
+	var chatHistory []IRMessage
 	for _, m := range ir.Messages {
+		if isSystemLikeRole(m.Role) {
+			if text := messageTextForSystem(m); text != "" {
+				if instructions != "" {
+					instructions += "\n"
+				}
+				instructions += text
+			}
+			continue
+		}
+		chatHistory = append(chatHistory, m)
+	}
+	if instructions != "" {
+		req.Messages = append(req.Messages, ChatMessage{Role: "system", Content: instructions})
+	}
+	for _, m := range normalizeChatHistory(chatHistory) {
 		req.Messages = append(req.Messages, irMsgToChatWithReasoning(m, includeEmptyReasoning))
 	}
 	for _, t := range tools {

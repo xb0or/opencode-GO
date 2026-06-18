@@ -428,7 +428,8 @@ func TestConvertRequest_ResponsesReasoningContentToChat(t *testing.T) {
 		"model": "deepseek-v4-flash",
 		"input": [
 			{"type": "message", "role": "assistant", "content": "visible", "reasoning_content": "hidden"},
-			{"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": "{}", "reasoning_content": ""}
+			{"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": "{}", "reasoning_content": ""},
+			{"type": "function_call_output", "call_id": "call_1", "output": "ok"}
 		]
 	}`)
 	out, err := ConvertRequest(config.ProtocolResponses, config.ProtocolChat, body)
@@ -439,8 +440,8 @@ func TestConvertRequest_ResponsesReasoningContentToChat(t *testing.T) {
 	if err := json.Unmarshal(out, &req); err != nil {
 		t.Fatalf("chat output JSON: %v", err)
 	}
-	if len(req.Messages) != 2 {
-		t.Fatalf("messages = %d, want 2: %s", len(req.Messages), string(out))
+	if len(req.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3: %s", len(req.Messages), string(out))
 	}
 	if req.Messages[0].ReasoningContent == nil || *req.Messages[0].ReasoningContent != "hidden" {
 		t.Fatalf("message reasoning_content = %#v, want hidden", req.Messages[0].ReasoningContent)
@@ -453,16 +454,127 @@ func TestConvertRequest_ResponsesReasoningContentToChat(t *testing.T) {
 	}
 }
 
+func TestConvertRequest_ResponsesToolCallsAreImmediatelyFollowedByToolOutputs(t *testing.T) {
+	body := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": "{\"path\":\"README.md\"}"},
+			{"type": "message", "role": "developer", "content": "Keep responses concise."},
+			{"type": "reasoning", "summary": [{"type": "summary_text", "text": "Need file contents."}]},
+			{"type": "function_call_output", "call_id": "call_1", "output": "file contents"},
+			{"type": "message", "role": "user", "content": "continue"}
+		]
+	}`)
+	out, err := ConvertRequest(config.ProtocolResponses, config.ProtocolChat, body)
+	if err != nil {
+		t.Fatalf("responses→chat: %v", err)
+	}
+	var req ChatRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("chat output JSON: %v", err)
+	}
+	if len(req.Messages) < 4 {
+		t.Fatalf("messages too short: %#v\n%s", req.Messages, string(out))
+	}
+	if req.Messages[0].Role != "system" || req.Messages[0].Content != "Keep responses concise." {
+		t.Fatalf("developer message should be folded to leading system, got %#v", req.Messages[0])
+	}
+	assistantIdx := -1
+	for i, m := range req.Messages {
+		if len(m.ToolCalls) > 0 {
+			assistantIdx = i
+			break
+		}
+	}
+	if assistantIdx < 0 {
+		t.Fatalf("no assistant tool_calls found: %s", string(out))
+	}
+	assistant := req.Messages[assistantIdx]
+	if len(assistant.ToolCalls) != 1 || assistant.ToolCalls[0].ID != "call_1" {
+		t.Fatalf("assistant tool_calls = %#v, want call_1", assistant.ToolCalls)
+	}
+	if assistant.ReasoningContent == nil || *assistant.ReasoningContent != "Need file contents." {
+		t.Fatalf("reasoning summary should attach to assistant tool_call, got %#v", assistant.ReasoningContent)
+	}
+	if assistantIdx+1 >= len(req.Messages) || req.Messages[assistantIdx+1].Role != "tool" || req.Messages[assistantIdx+1].ToolCallID != "call_1" {
+		t.Fatalf("assistant tool_calls must be immediately followed by matching tool output: %#v", req.Messages)
+	}
+}
+
+func TestConvertRequest_ResponsesDropsUnansweredToolCallsForChat(t *testing.T) {
+	body := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type": "function_call", "call_id": "call_missing", "name": "read_file", "arguments": "{}"},
+			{"type": "message", "role": "user", "content": "continue"}
+		]
+	}`)
+	out, err := ConvertRequest(config.ProtocolResponses, config.ProtocolChat, body)
+	if err != nil {
+		t.Fatalf("responses→chat: %v", err)
+	}
+	var req ChatRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("chat output JSON: %v", err)
+	}
+	for _, m := range req.Messages {
+		if len(m.ToolCalls) > 0 || m.Role == "tool" {
+			t.Fatalf("unanswered tool call/output should not be forwarded to Chat upstream: %#v\n%s", req.Messages, string(out))
+		}
+	}
+}
+
+func TestConvertRequest_ResponsesCoalescesParallelToolCallsAndOrdersOutputs(t *testing.T) {
+	body := []byte(`{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"type": "reasoning", "summary": [{"type": "summary_text", "text": "Need two tools."}]},
+			{"type": "function_call", "call_id": "call_a", "name": "first_tool", "arguments": "{}"},
+			{"type": "function_call", "call_id": "call_b", "name": "second_tool", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_b", "output": "B"},
+			{"type": "function_call_output", "call_id": "call_a", "output": "A"},
+			{"type": "message", "role": "user", "content": "continue"}
+		]
+	}`)
+	out, err := ConvertRequest(config.ProtocolResponses, config.ProtocolChat, body)
+	if err != nil {
+		t.Fatalf("responses→chat: %v", err)
+	}
+	var req ChatRequest
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("chat output JSON: %v", err)
+	}
+	assistantIdx := -1
+	for i, m := range req.Messages {
+		if len(m.ToolCalls) > 0 {
+			assistantIdx = i
+			break
+		}
+	}
+	if assistantIdx < 0 || len(req.Messages[assistantIdx].ToolCalls) != 2 {
+		t.Fatalf("parallel calls should be coalesced into one assistant message: %#v\n%s", req.Messages, string(out))
+	}
+	if req.Messages[assistantIdx].ToolCalls[0].ID != "call_a" || req.Messages[assistantIdx].ToolCalls[1].ID != "call_b" {
+		t.Fatalf("tool call order = %#v", req.Messages[assistantIdx].ToolCalls)
+	}
+	if assistantIdx+2 >= len(req.Messages) || req.Messages[assistantIdx+1].ToolCallID != "call_a" || req.Messages[assistantIdx+2].ToolCallID != "call_b" {
+		t.Fatalf("tool outputs should immediately follow in tool_call order: %#v", req.Messages)
+	}
+}
+
 func TestEncodeChatRequest_FiltersInvalidToolCalls(t *testing.T) {
 	ir := &IRRequest{
 		Model: "m",
-		Messages: []IRMessage{{
-			Role: "assistant",
-			ToolCalls: []IRToolCall{
-				{ID: "bad", Name: "", Arguments: "{}"},
-				{ID: "ok", Name: "valid_tool", Arguments: "{}"},
+		Messages: []IRMessage{
+			{
+				Role: "assistant",
+				ToolCalls: []IRToolCall{
+					{ID: "bad", Name: "", Arguments: "{}"},
+					{ID: "ok", Name: "valid_tool", Arguments: "{}"},
+				},
 			},
-		}},
+			{Role: "tool", ToolCallID: "ok", Text: "result"},
+		},
 	}
 	out, err := EncodeChatRequest(ir)
 	if err != nil {
@@ -472,8 +584,8 @@ func TestEncodeChatRequest_FiltersInvalidToolCalls(t *testing.T) {
 	if err := json.Unmarshal(out, &req); err != nil {
 		t.Fatalf("chat output JSON: %v", err)
 	}
-	if len(req.Messages) != 1 || len(req.Messages[0].ToolCalls) != 1 {
-		t.Fatalf("tool_calls = %#v, want one valid call", req.Messages)
+	if len(req.Messages) != 2 || len(req.Messages[0].ToolCalls) != 1 || req.Messages[1].Role != "tool" || req.Messages[1].ToolCallID != "ok" {
+		t.Fatalf("tool_calls should be followed by matching tool output: %#v", req.Messages)
 	}
 	if req.Messages[0].ToolCalls[0].Function.Name != "valid_tool" {
 		t.Fatalf("tool call name = %q, want valid_tool", req.Messages[0].ToolCalls[0].Function.Name)

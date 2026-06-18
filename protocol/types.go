@@ -219,6 +219,101 @@ func visibleText(m IRMessage) string {
 	return text
 }
 
+func messageTextForSystem(m IRMessage) string {
+	text := visibleText(m)
+	if text != "" {
+		return text
+	}
+	for _, c := range m.Content {
+		if c.Type == "thinking" {
+			continue
+		}
+		if c.Text != "" {
+			text += c.Text
+		}
+	}
+	return text
+}
+
+func isEmptyMessage(m IRMessage) bool {
+	return strings.TrimSpace(m.Role) == "" && visibleText(m) == "" && thinkingText(m) == "" && len(m.ToolCalls) == 0 && m.ToolCallID == ""
+}
+
+func hasAssistantPayload(m IRMessage) bool {
+	return visibleText(m) != "" || thinkingText(m) != "" || len(cleanIRToolCalls(m.ToolCalls)) > 0
+}
+
+func withoutToolCalls(m IRMessage) IRMessage {
+	m.ToolCalls = nil
+	return m
+}
+
+func normalizeChatHistory(messages []IRMessage) []IRMessage {
+	usedToolOutputs := make(map[int]bool)
+	out := make([]IRMessage, 0, len(messages))
+	for i, m := range messages {
+		if usedToolOutputs[i] || isSystemLikeRole(m.Role) || isEmptyMessage(m) {
+			continue
+		}
+		if m.Role == "tool" || m.ToolCallID != "" {
+			// Tool messages are only valid immediately after the assistant tool_call
+			// they answer. Orphans are dropped rather than forwarded as invalid Chat
+			// history.
+			continue
+		}
+		calls := cleanIRToolCalls(m.ToolCalls)
+		if len(calls) == 0 {
+			out = append(out, withoutToolCalls(m))
+			continue
+		}
+
+		pairedCalls := make([]IRToolCall, 0, len(calls))
+		pairedOutputs := make([]IRMessage, 0, len(calls))
+		for _, call := range calls {
+			if idx := findToolOutput(messages, usedToolOutputs, i+1, call.ID); idx >= 0 {
+				pairedCalls = append(pairedCalls, call)
+				toolMsg := messages[idx]
+				toolMsg.Role = "tool"
+				toolMsg.ToolCallID = call.ID
+				toolMsg.ToolCalls = nil
+				pairedOutputs = append(pairedOutputs, toolMsg)
+				usedToolOutputs[idx] = true
+			}
+		}
+
+		if len(pairedCalls) > 0 {
+			pairedAssistant := m
+			pairedAssistant.Role = "assistant"
+			pairedAssistant.ToolCalls = pairedCalls
+			out = append(out, pairedAssistant)
+			out = append(out, pairedOutputs...)
+			continue
+		}
+
+		fallback := withoutToolCalls(m)
+		if hasAssistantPayload(fallback) {
+			out = append(out, fallback)
+		}
+	}
+	return out
+}
+
+func findToolOutput(messages []IRMessage, used map[int]bool, start int, callID string) int {
+	if strings.TrimSpace(callID) == "" {
+		return -1
+	}
+	for i := start; i < len(messages); i++ {
+		if used[i] {
+			continue
+		}
+		m := messages[i]
+		if (m.Role == "tool" || m.ToolCallID != "") && m.ToolCallID == callID {
+			return i
+		}
+	}
+	return -1
+}
+
 func chatModelRequiresReasoningContent(model string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(model))
 	if normalized == "" {
