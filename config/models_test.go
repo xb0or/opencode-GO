@@ -59,3 +59,15 @@ func TestApplyOpenRouterMetadataCopiesCatalogFields(t *testing.T) {
 		t.Fatalf("SupportedParameters not sorted/copied: %#v", route.SupportedParameters)
 	}
 }
+
+func TestParseGroupMultipliers(t *testing.T) {
+	jsonMultipliers := parseGroupMultipliers(`{"go":0.8,"default":1}`)
+	if jsonMultipliers["go"] != 0.8 || jsonMultipliers["default"] != 1 {
+		t.Fatalf("unexpected JSON multipliers: %#v", jsonMultipliers)
+	}
+
+	listMultipliers := parseGroupMultipliers("go=0.7,default:1.2,broken")
+	if listMultipliers["go"] != 0.7 || listMultipliers["default"] != 1.2 {
+		t.Fatalf("unexpected list multipliers: %#v", listMultipliers)
+	}
+}

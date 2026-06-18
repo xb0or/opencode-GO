@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,11 @@ type Config struct {
 	// ModelMappingFile optionally points to a JSON file with the same mapping
 	// object shape as ModelMappings.
 	ModelMappingFile string
+	// GroupMultipliers optionally maps KEY/token groups to billing multipliers.
+	// Supported formats:
+	//   - JSON object: {"go":0.8,"default":1}
+	//   - comma list:  go=0.8,default=1
+	GroupMultipliers string
 }
 
 var (
@@ -49,6 +55,7 @@ func Load() *Config {
 			GoBaseURL:        strings.TrimRight(envStr("GO_BASE_URL", "https://opencode.ai/zen/go"), "/"),
 			ModelMappings:    envStr("MODEL_MAPPINGS", ""),
 			ModelMappingFile: envStr("MODEL_MAPPING_FILE", ""),
+			GroupMultipliers: envStr("GROUP_MULTIPLIERS", ""),
 		}
 	})
 	return cfg
@@ -60,6 +67,55 @@ func Get() *Config {
 		return Load()
 	}
 	return cfg
+}
+
+// GroupMultiplier returns the billing multiplier for a route/key group.
+// Missing, malformed, zero, or negative values fall back to 1.0.
+func GroupMultiplier(group string) float64 {
+	group = strings.TrimSpace(group)
+	if group == "" {
+		group = "default"
+	}
+	multipliers := parseGroupMultipliers(Get().GroupMultipliers)
+	for _, key := range []string{group, "default"} {
+		if v, ok := multipliers[key]; ok && v > 0 {
+			return v
+		}
+	}
+	return 1
+}
+
+func parseGroupMultipliers(raw string) map[string]float64 {
+	out := map[string]float64{}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return out
+	}
+	var obj map[string]float64
+	if err := json.Unmarshal([]byte(raw), &obj); err == nil {
+		for k, v := range obj {
+			k = strings.TrimSpace(k)
+			if k != "" && v > 0 {
+				out[k] = v
+			}
+		}
+		return out
+	}
+	for _, part := range strings.Split(raw, ",") {
+		key, val, ok := strings.Cut(part, "=")
+		if !ok {
+			key, val, ok = strings.Cut(part, ":")
+		}
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		n, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
+		if key != "" && err == nil && n > 0 {
+			out[key] = n
+		}
+	}
+	return out
 }
 
 func envStr(key, def string) string {

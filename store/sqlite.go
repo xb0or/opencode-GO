@@ -64,13 +64,17 @@ type ModelMappingRow struct {
 // UsageLog records a single proxied request.
 type UsageLog struct {
 	ID                  uint      `gorm:"primaryKey" json:"id"`
+	RequestID           string    `gorm:"size:128;index" json:"request_id"`
 	TokenID             uint      `gorm:"index" json:"token_id"`
 	TokenName           string    `gorm:"size:128;index" json:"token_name"`
 	KeyID               uint      `gorm:"index" json:"key_id"`
 	Model               string    `gorm:"size:128;index" json:"model"`
+	Group               string    `gorm:"size:32;index" json:"group"`
 	Protocol            string    `gorm:"size:32" json:"protocol"`
+	IPAddress           string    `gorm:"size:64" json:"ip_address"`
 	StatusCode          int       `json:"status_code"`
 	DurationMs          int64     `json:"duration_ms"`
+	FirstResponseMs     int64     `json:"first_response_ms"`
 	Stream              bool      `json:"stream"`
 	InputTokens         int       `json:"input_tokens"`
 	OutputTokens        int       `json:"output_tokens"`
@@ -81,6 +85,12 @@ type UsageLog struct {
 	TotalCost           float64   `json:"total_cost"`
 	ActualCost          float64   `json:"actual_cost"`
 	AccountCost         float64   `json:"account_cost"`
+	InputUnitPrice      float64   `json:"input_unit_price"`
+	OutputUnitPrice     float64   `json:"output_unit_price"`
+	CacheReadUnitPrice  float64   `json:"cache_read_unit_price"`
+	CacheWriteUnitPrice float64   `json:"cache_write_unit_price"`
+	GroupMultiplier     float64   `json:"group_multiplier"`
+	BillingMode         string    `gorm:"size:32" json:"billing_mode"`
 	Error               string    `gorm:"type:text" json:"error,omitempty"`
 	CreatedAt           time.Time `gorm:"index" json:"created_at"`
 }

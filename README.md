@@ -229,6 +229,7 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 | `GO_BASE_URL`      | `https://opencode.ai/zen/go` | Go upstream base                                         |
 | `MODEL_MAPPINGS`  | empty                        | Optional JSON object mapping requested model → upstream model |
 | `MODEL_MAPPING_FILE` | empty                     | Optional JSON file path for model mappings               |
+| `GROUP_MULTIPLIERS` | empty                      | Optional group billing multipliers, e.g. `{"go":0.8}` or `go=0.8,default=1` |
 | `UPSTREAM_TIMEOUT` | `120`                        | Upstream call timeout (seconds)                          |
 
 ## Project structure

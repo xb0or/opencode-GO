@@ -106,7 +106,7 @@ func TestUsageFromResponseIncludesCacheTokens(t *testing.T) {
 	if messages == nil {
 		t.Fatal("messages usage should be parsed")
 	}
-	if messages.InputTokens != 30 || messages.OutputTokens != 25 || messages.CacheTokens != 70 || messages.CacheReadTokens != 60 || messages.CacheCreationTokens != 10 || messages.TotalTokens != 125 {
+	if messages.InputTokens != 110 || messages.OutputTokens != 25 || messages.CacheTokens != 60 || messages.CacheReadTokens != 60 || messages.CacheCreationTokens != 10 || messages.TotalTokens != 195 {
 		t.Fatalf("unexpected messages usage: %#v", messages)
 	}
 }
@@ -114,7 +114,7 @@ func TestUsageFromResponseIncludesCacheTokens(t *testing.T) {
 func TestUsageFromResponseAcceptsAlternateTokenFieldNames(t *testing.T) {
 	chat := usageFromResponse(config.ProtocolChat, []byte(`{
 		"usage":{
-			"input_tokens":3,
+			"input_tokens":7,
 			"output_tokens":2,
 			"input_tokens_details":{"cache_creation_tokens":4}
 		}
@@ -122,7 +122,7 @@ func TestUsageFromResponseAcceptsAlternateTokenFieldNames(t *testing.T) {
 	if chat == nil {
 		t.Fatal("chat usage should be parsed from input/output token fields")
 	}
-	if chat.InputTokens != 0 || chat.OutputTokens != 2 || chat.CacheCreationTokens != 4 || chat.CacheTokens != 4 || chat.TotalTokens != 6 {
+	if chat.InputTokens != 7 || chat.OutputTokens != 2 || chat.CacheCreationTokens != 4 || chat.CacheTokens != 0 || chat.TotalTokens != 9 {
 		t.Fatalf("unexpected alternate chat usage: %#v", chat)
 	}
 
@@ -134,6 +134,39 @@ func TestUsageFromResponseAcceptsAlternateTokenFieldNames(t *testing.T) {
 	}
 	if zero.TotalTokens != 0 {
 		t.Fatalf("zero usage total = %d, want 0", zero.TotalTokens)
+	}
+}
+
+func TestUsageFromResponseTreatsCacheCreationAsRegularInput(t *testing.T) {
+	usage := usageFromResponse(config.ProtocolMessages, []byte(`{
+		"usage":{
+			"input_tokens":0,
+			"output_tokens":0,
+			"cache_creation_input_tokens":201312
+		}
+	}`))
+	if usage == nil {
+		t.Fatal("usage should be parsed")
+	}
+	if usage.InputTokens != 201312 || usage.CacheReadTokens != 0 || usage.CacheTokens != 0 || usage.CacheCreationTokens != 201312 || usage.TotalTokens != 201312 {
+		t.Fatalf("cache creation must be regular input, got %#v", usage)
+	}
+}
+
+func TestUsageFromResponseDeepSeekCacheHitAndMiss(t *testing.T) {
+	usage := usageFromResponse(config.ProtocolChat, []byte(`{
+		"usage":{
+			"prompt_tokens":201312,
+			"completion_tokens":88,
+			"prompt_cache_hit_tokens":200000,
+			"prompt_cache_miss_tokens":1312
+		}
+	}`))
+	if usage == nil {
+		t.Fatal("usage should be parsed")
+	}
+	if usage.InputTokens != 1312 || usage.CacheReadTokens != 200000 || usage.CacheTokens != 200000 || usage.CacheCreationTokens != 1312 || usage.TotalTokens != 201400 {
+		t.Fatalf("deepseek cache hit/miss mapping incorrect: %#v", usage)
 	}
 }
 
@@ -180,7 +213,7 @@ func TestUsageFromSSELineParsesStreamUsage(t *testing.T) {
 	}
 
 	messagesCache := usageFromSSELine(config.ProtocolMessages, []byte(`data: {"type":"message_delta","usage":{"output_tokens":4,"cache_read_input_tokens":7,"cache_creation_input_tokens":3}}`))
-	if messagesCache == nil || messagesCache.OutputTokens != 4 || messagesCache.CacheReadTokens != 7 || messagesCache.CacheCreationTokens != 3 || messagesCache.CacheTokens != 10 || messagesCache.TotalTokens != 14 {
+	if messagesCache == nil || messagesCache.InputTokens != 3 || messagesCache.OutputTokens != 4 || messagesCache.CacheReadTokens != 7 || messagesCache.CacheCreationTokens != 3 || messagesCache.CacheTokens != 7 || messagesCache.TotalTokens != 14 {
 		t.Fatalf("unexpected messages cache stream usage: %#v", messagesCache)
 	}
 
@@ -200,16 +233,84 @@ func TestEstimateUsageCostSeparatesCachedPromptTokens(t *testing.T) {
 		},
 	}
 	usage := &usageAccounting{
-		InputTokens:         70,
+		InputTokens:         80,
 		OutputTokens:        30,
-		CacheTokens:         50,
+		CacheTokens:         40,
 		CacheReadTokens:     40,
 		CacheCreationTokens: 10,
 	}
 	got := estimateUsageCost(route, usage)
-	want := float64(70)*0.01 + float64(30)*0.02 + float64(40)*0.001 + float64(10)*0.004
+	want := float64(80)*0.01 + float64(30)*0.02 + float64(40)*0.001
 	if got != want {
 		t.Fatalf("cost = %v, want %v", got, want)
+	}
+}
+
+func TestProxyLogsFinalCostWithGroupMultiplier(t *testing.T) {
+	if err := store.InitForTest("file:api_group_multiplier_cost?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"m","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	oldMultipliers := cfg.GroupMultipliers
+	cfg.GoBaseURL = upstreamSrv.URL
+	cfg.GroupMultipliers = "go=0.8,default=1"
+	defer func() {
+		cfg.GoBaseURL = oldBaseURL
+		cfg.GroupMultipliers = oldMultipliers
+	}()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "cost-multiplier-model",
+		Name:      "Cost Multiplier Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+		Pricing: map[string]string{
+			"prompt":     "0.01",
+			"completion": "0.02",
+		},
+	})
+	tok, err := pool.CreateToken("cost-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "upstream-key",
+		Group:   "go",
+		Label:   "test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"cost-multiplier-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	var logRow store.UsageLog
+	if err := store.DB().First(&logRow).Error; err != nil {
+		t.Fatalf("load usage log: %v", err)
+	}
+	if logRow.TotalCost != 2.0 || logRow.ActualCost != 1.6 || logRow.AccountCost != 1.6 || logRow.GroupMultiplier != 0.8 {
+		t.Fatalf("unexpected cost fields: %#v", logRow)
 	}
 }
 
@@ -656,9 +757,9 @@ func TestProxyLogsRawCrossProtocolCacheUsage(t *testing.T) {
 	if err := store.DB().First(&logRow).Error; err != nil {
 		t.Fatalf("load usage log: %v", err)
 	}
-	if logRow.InputTokens != 30 || logRow.OutputTokens != 25 ||
-		logRow.CacheTokens != 70 || logRow.CacheReadTokens != 60 ||
-		logRow.CacheCreationTokens != 10 || logRow.TotalTokens != 125 {
+	if logRow.InputTokens != 110 || logRow.OutputTokens != 25 ||
+		logRow.CacheTokens != 60 || logRow.CacheReadTokens != 60 ||
+		logRow.CacheCreationTokens != 10 || logRow.TotalTokens != 195 {
 		t.Fatalf("unexpected cross-protocol usage log: %#v", logRow)
 	}
 }

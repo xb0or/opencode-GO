@@ -248,16 +248,16 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 
 	copyResponseHeaders(c, resp)
 	c.Writer.WriteHeader(resp.StatusCode)
-	usage, copyErr := proxyStreamAndCaptureUsage(c.Writer, resp.Body, inbound)
+	usage, firstResponseMs, copyErr := proxyStreamAndCaptureUsage(c.Writer, resp.Body, inbound, start)
 
 	if resp.StatusCode < 400 && copyErr == nil {
 		p.MarkSuccess(key.ID)
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, "")
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, "", firstResponseMs)
 	} else if shouldMarkUpstreamFailure(resp.StatusCode) {
 		p.MarkFailure(key.ID)
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, copyErrString(copyErr))
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, copyErrString(copyErr), firstResponseMs)
 	} else {
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, copyErrString(copyErr))
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, copyErrString(copyErr), firstResponseMs)
 	}
 }
 
@@ -681,7 +681,7 @@ func trimUsageError(s string) string {
 
 // markAndLog writes a usage log row. It never blocks the response path on DB errors.
 func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.ModelRoute,
-	proto config.Protocol, status int, start time.Time, stream bool, usage *usageAccounting, errMsg string) {
+	proto config.Protocol, status int, start time.Time, stream bool, usage *usageAccounting, errMsg string, firstResponseMs ...int64) {
 	var tokenID uint
 	var tokenName string
 	if tokAny, exists := c.Get("token"); exists {
@@ -693,15 +693,30 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 	if usage == nil {
 		usage = &usageAccounting{}
 	}
-	totalCost := estimateUsageCost(route, usage)
+	baseCost := estimateUsageCost(route, usage)
+	groupMultiplier := config.GroupMultiplier(route.Group)
+	finalCost := baseCost * groupMultiplier
+	if groupMultiplier <= 0 || math.IsNaN(finalCost) || math.IsInf(finalCost, 0) {
+		groupMultiplier = 1
+		finalCost = baseCost
+	}
+	frt := int64(0)
+	if len(firstResponseMs) > 0 && firstResponseMs[0] > 0 {
+		frt = firstResponseMs[0]
+	}
+	pricing := usagePricing(route)
 	entry := store.UsageLog{
+		RequestID:           usageRequestID(c, key, start),
 		TokenID:             tokenID,
 		TokenName:           tokenName,
 		KeyID:               key.ID,
 		Model:               route.ID,
+		Group:               route.Group,
 		Protocol:            string(proto),
+		IPAddress:           c.ClientIP(),
 		StatusCode:          status,
 		DurationMs:          time.Since(start).Milliseconds(),
+		FirstResponseMs:     frt,
 		Stream:              stream,
 		InputTokens:         usage.InputTokens,
 		OutputTokens:        usage.OutputTokens,
@@ -709,12 +724,34 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 		CacheReadTokens:     usage.CacheReadTokens,
 		CacheCreationTokens: usage.CacheCreationTokens,
 		TotalTokens:         usage.TotalTokens,
-		TotalCost:           totalCost,
-		ActualCost:          totalCost,
-		AccountCost:         totalCost,
+		TotalCost:           baseCost,
+		ActualCost:          finalCost,
+		AccountCost:         finalCost,
+		InputUnitPrice:      pricing.Prompt,
+		OutputUnitPrice:     pricing.Completion,
+		CacheReadUnitPrice:  pricing.CacheRead,
+		CacheWriteUnitPrice: pricing.CacheCreation,
+		GroupMultiplier:     groupMultiplier,
+		BillingMode:         "token",
 		Error:               errMsg,
 	}
 	_ = store.DB().Create(&entry).Error
+}
+
+func usageRequestID(c *gin.Context, key *store.Key, start time.Time) string {
+	for _, header := range []string{"X-Request-Id", "X-Request-ID", "Request-Id", "Request-ID"} {
+		if v := strings.TrimSpace(c.Writer.Header().Get(header)); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(c.GetHeader(header)); v != "" {
+			return v
+		}
+	}
+	keyID := uint(0)
+	if key != nil {
+		keyID = key.ID
+	}
+	return fmt.Sprintf("req_%d_%d", start.UnixNano(), keyID)
 }
 
 type usageAccounting struct {
@@ -755,23 +792,35 @@ func usageFromIRUsage(resp *protocol.IRResponse) *usageAccounting {
 	return acct
 }
 
-func proxyStreamAndCaptureUsage(dst io.Writer, src io.Reader, proto config.Protocol) (*usageAccounting, error) {
+func proxyStreamAndCaptureUsage(dst io.Writer, src io.Reader, proto config.Protocol, start time.Time) (*usageAccounting, int64, error) {
 	scanner := bufio.NewScanner(src)
 	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
 	var usage *usageAccounting
+	var firstResponseMs int64
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
 		if _, err := dst.Write(append(line, '\n')); err != nil {
-			return usage, err
+			return usage, firstResponseMs, err
+		}
+		if firstResponseMs == 0 && isSSEDataLine(line) {
+			firstResponseMs = time.Since(start).Milliseconds()
 		}
 		if nextUsage := usageFromSSELine(proto, line); nextUsage != nil {
 			usage = mergeUsageAccounting(usage, nextUsage)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return usage, err
+		return usage, firstResponseMs, err
 	}
-	return usage, nil
+	return usage, firstResponseMs, nil
+}
+
+func isSSEDataLine(line []byte) bool {
+	if !bytes.HasPrefix(line, []byte("data: ")) {
+		return false
+	}
+	payload := bytes.TrimSpace(line[6:])
+	return len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]"))
 }
 
 func mergeUsageAccounting(base, next *usageAccounting) *usageAccounting {
@@ -810,7 +859,7 @@ func (u *usageAccounting) recomputeTotalIfNeeded() {
 	if u == nil || u.TotalExplicit {
 		return
 	}
-	u.TotalTokens = u.InputTokens + u.OutputTokens + u.CacheTokens
+	u.TotalTokens = u.InputTokens + u.OutputTokens + u.CacheReadTokens
 }
 
 func usageFromSSEBuffer(proto config.Protocol, body []byte) *usageAccounting {
@@ -863,19 +912,22 @@ func usageFromRawMap(u map[string]any, _ config.Protocol) *usageAccounting {
 		return nil
 	}
 	acct := &usageAccounting{}
-	acct.InputTokens = firstNumberField(u, "prompt_tokens", "input_tokens")
+	rawInputTokens := firstNumberField(u, "prompt_tokens", "input_tokens")
 	acct.OutputTokens = firstNumberField(u, "completion_tokens", "output_tokens")
 	acct.CacheReadTokens, acct.CacheIncludedInInput = cacheReadTokens(u)
 	var cacheCreationIncluded bool
 	acct.CacheCreationTokens, cacheCreationIncluded = cacheCreationTokens(u)
-	acct.CacheIncludedInInput = acct.CacheIncludedInInput || cacheCreationIncluded
-	acct.CacheTokens = firstNumberField(u, "cache_tokens", "cached_tokens", "total_cache_tokens")
-	if separate := acct.CacheReadTokens + acct.CacheCreationTokens; acct.CacheTokens < separate {
-		acct.CacheTokens = separate
+	acct.InputTokens = rawInputTokens
+	if acct.CacheIncludedInInput && acct.CacheReadTokens > 0 {
+		acct.InputTokens = maxInt(0, acct.InputTokens-acct.CacheReadTokens)
 	}
-	if acct.CacheIncludedInInput || acct.CacheTokens > 0 {
-		acct.InputTokens = maxInt(0, acct.InputTokens-acct.CacheTokens)
+	if !cacheCreationIncluded && acct.CacheCreationTokens > 0 {
+		acct.InputTokens += acct.CacheCreationTokens
 	}
+	// CacheTokens is intentionally the cache-read/hit amount only. Cache
+	// creation/write tokens are tracked separately but billed as regular input,
+	// so they must not be mixed into cache-hit counters.
+	acct.CacheTokens = acct.CacheReadTokens
 	acct.TotalTokens = numberField(u, "total_tokens")
 	acct.TotalExplicit = acct.TotalTokens > 0
 	acct.recomputeTotalIfNeeded()
@@ -883,7 +935,7 @@ func usageFromRawMap(u map[string]any, _ config.Protocol) *usageAccounting {
 }
 
 func cacheReadTokens(u map[string]any) (int, bool) {
-	direct := firstNumberField(u,
+	direct, directKey := firstNumberFieldWithKey(u,
 		"cache_read_input_tokens",
 		"input_cache_read_tokens",
 		"cache_read_tokens",
@@ -891,6 +943,9 @@ func cacheReadTokens(u map[string]any) (int, bool) {
 		"prompt_cache_read_tokens",
 		"cached_tokens",
 	)
+	directIncluded := directKey == "prompt_cache_hit_tokens" ||
+		directKey == "prompt_cache_read_tokens" ||
+		directKey == "cached_tokens"
 	nested := 0
 	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
 		if details := objectField(u, key); details != nil {
@@ -906,11 +961,11 @@ func cacheReadTokens(u map[string]any) (int, bool) {
 	if nested > 0 {
 		return maxInt(direct, nested), true
 	}
-	return direct, false
+	return direct, directIncluded
 }
 
 func cacheCreationTokens(u map[string]any) (int, bool) {
-	total := firstNumberField(u,
+	total, directKey := firstNumberFieldWithKey(u,
 		"cache_creation_input_tokens",
 		"cache_write_input_tokens",
 		"input_cache_write_tokens",
@@ -918,6 +973,8 @@ func cacheCreationTokens(u map[string]any) (int, bool) {
 		"prompt_cache_miss_tokens",
 		"prompt_cache_write_tokens",
 	)
+	directIncluded := directKey == "prompt_cache_miss_tokens" ||
+		directKey == "prompt_cache_write_tokens"
 	detailTotal := 0
 	if details := objectField(u, "cache_creation"); details != nil {
 		for _, v := range details {
@@ -946,7 +1003,7 @@ func cacheCreationTokens(u map[string]any) (int, bool) {
 	if nested > 0 {
 		return maxInt(total, nested), true
 	}
-	return total, false
+	return total, directIncluded
 }
 
 func numberField(m map[string]any, key string) int {
@@ -954,12 +1011,17 @@ func numberField(m map[string]any, key string) int {
 }
 
 func firstNumberField(m map[string]any, keys ...string) int {
+	n, _ := firstNumberFieldWithKey(m, keys...)
+	return n
+}
+
+func firstNumberFieldWithKey(m map[string]any, keys ...string) (int, string) {
 	for _, key := range keys {
 		if n := numberField(m, key); n > 0 {
-			return n
+			return n, key
 		}
 	}
-	return 0
+	return 0, ""
 }
 
 func objectField(m map[string]any, key string) map[string]any {
@@ -999,19 +1061,34 @@ func estimateUsageCost(route config.ModelRoute, usage *usageAccounting) float64 
 	if usage == nil || route.Pricing == nil {
 		return 0
 	}
-	prompt := priceField(route.Pricing, "prompt")
-	completion := priceField(route.Pricing, "completion")
-	cacheRead := priceField(route.Pricing, "input_cache_read", "cache_read", "prompt_cache_read")
-	cacheCreation := priceField(route.Pricing, "input_cache_write", "cache_write", "prompt_cache_write", "input_cache_creation")
+	pricing := usagePricing(route)
 	inputTokens := usage.InputTokens
-	cost := float64(inputTokens)*prompt +
-		float64(usage.OutputTokens)*completion +
-		float64(usage.CacheReadTokens)*cacheRead +
-		float64(usage.CacheCreationTokens)*cacheCreation
+	cost := float64(inputTokens)*pricing.Prompt +
+		float64(usage.OutputTokens)*pricing.Completion +
+		float64(usage.CacheReadTokens)*pricing.CacheRead
 	if cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
 		return 0
 	}
 	return cost
+}
+
+type pricingSnapshot struct {
+	Prompt        float64
+	Completion    float64
+	CacheRead     float64
+	CacheCreation float64
+}
+
+func usagePricing(route config.ModelRoute) pricingSnapshot {
+	if route.Pricing == nil {
+		return pricingSnapshot{}
+	}
+	return pricingSnapshot{
+		Prompt:        priceField(route.Pricing, "prompt"),
+		Completion:    priceField(route.Pricing, "completion"),
+		CacheRead:     priceField(route.Pricing, "input_cache_read", "cache_read", "prompt_cache_read"),
+		CacheCreation: priceField(route.Pricing, "input_cache_write", "cache_write", "prompt_cache_write", "input_cache_creation"),
+	}
 }
 
 func priceField(pricing map[string]string, keys ...string) float64 {

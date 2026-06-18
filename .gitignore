@@ -18,6 +18,9 @@ go.work
 # IDE
 .vscode/
 .idea/
+
+# Agent workspace
+.serena/
 *.swp
 *.swo
 
