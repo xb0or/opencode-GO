@@ -4,16 +4,16 @@
  * ES Module 入口文件，导入各模块并创建 Vue 3 应用。
  */
 
-import { icons } from "./icons.js";
-import { locales } from "./locales.js";
-import { createApi, fmtTime } from "./api.js";
-import { useDashboard } from "./pages/dashboard.js";
-import { useKeys } from "./pages/keys.js";
-import { useTokens } from "./pages/tokens.js";
-import { useModels } from "./pages/models.js";
-import { useMappings } from "./pages/mappings.js";
-import { useOps } from "./pages/ops.js";
-import { useUsage } from "./pages/usage.js";
+import { icons } from "./icons.js?v=20260619a";
+import { locales } from "./locales.js?v=20260619a";
+import { createApi, fmtTime } from "./api.js?v=20260619a";
+import { useDashboard } from "./pages/dashboard.js?v=20260619a";
+import { useKeys } from "./pages/keys.js?v=20260619a";
+import { useTokens } from "./pages/tokens.js?v=20260619a";
+import { useModels } from "./pages/models.js?v=20260619a";
+import { useMappings } from "./pages/mappings.js?v=20260619a";
+import { useOps } from "./pages/ops.js?v=20260619a";
+import { useUsage } from "./pages/usage.js?v=20260619a";
 
 const { createApp, reactive, ref, watch } = Vue;
 

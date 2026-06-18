@@ -34,12 +34,14 @@ func AdminHandler() http.Handler {
 		if err != nil {
 			// SPA fallback: serve admin.html for any unknown sub-path
 			data, _ = content.ReadFile("admin.html")
+			setNoStoreHeaders(w)
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			w.Write(data)
 			return
 		}
 
+		setNoStoreHeaders(w)
 		// Set correct Content-Type based on file extension
 		if strings.HasSuffix(filePath, ".css") {
 			w.Header().Set("Content-Type", "text/css; charset=utf-8")
@@ -54,4 +56,11 @@ func AdminHandler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		w.Write(data)
 	})
+}
+
+func setNoStoreHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	w.Header().Set("Surrogate-Control", "no-store")
 }

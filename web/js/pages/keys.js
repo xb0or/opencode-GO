@@ -3,7 +3,7 @@
  * 支持模态框添加和修改密钥设置
  */
 
-import { validateRequired } from "../api.js";
+import { validateRequired } from "../api.js?v=20260619a";
 const { ref, reactive } = Vue;
 
 export function useKeys(api, showToast, t, showConfirm) {
