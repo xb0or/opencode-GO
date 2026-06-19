@@ -1260,6 +1260,7 @@ func fetchKeyQuota(c *gin.Context) {
 			"cookie":      maskedCookie,
 			"workspaceID": workspaceID,
 			"error":       err.Error(),
+			"hint":        quotaErrorHint(err.Error()),
 			"quota":       nil,
 		})
 		return
@@ -1272,6 +1273,7 @@ func fetchKeyQuota(c *gin.Context) {
 			"cookie":      maskedCookie,
 			"workspaceID": workspaceID,
 			"error":       result.Error,
+			"hint":        quotaErrorHint(result.Error),
 			"quota":       nil,
 		})
 		return
@@ -1332,6 +1334,17 @@ func workspaceCandidatePayload(workspaces []OpenCodeWorkspace) []gin.H {
 		out = append(out, item)
 	}
 	return out
+}
+
+func quotaErrorHint(errMsg string) string {
+	lower := strings.ToLower(errMsg)
+	if strings.Contains(lower, "httperror") || strings.Contains(lower, "missing usage buckets") {
+		return "请确认 Workspace ID 是 opencode.ai 工作区 ID，且与当前 auth Cookie 属于同一账号；不确定时可清空 Workspace ID 后重新查询自动识别。"
+	}
+	if strings.Contains(lower, "html login page") || strings.Contains(lower, "cookie") || strings.Contains(lower, "public") {
+		return "请重新从浏览器复制包含 auth=... 的 Cookie，Cookie 可能已过期或不是登录态。"
+	}
+	return "请检查 Cookie 与 Workspace ID 是否匹配；如果只填 Cookie，可先清空 Workspace ID 让系统自动识别。"
 }
 
 func maskSecret(s string) string {

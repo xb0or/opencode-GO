@@ -426,19 +426,104 @@ func fetchGoQuotaWithInstance(cookie, workspaceID string, instance int) (*GoQuot
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
+	return parseGoQuotaResponse(raw, resp.StatusCode)
+}
+
+func parseGoQuotaResponse(raw []byte, statusCode int) (*GoQuotaResponse, error) {
+	if msg := serovalErrorMessage(raw); msg != "" {
+		return nil, fmt.Errorf("quota returned upstream error: %s", msg)
+	}
+	if looksLikeHTML(raw) {
+		return nil, fmt.Errorf("quota returned HTML login page (cookie may be invalid or expired)")
+	}
 	var result GoQuotaResponse
-	if err := json.Unmarshal(raw, &result); err != nil {
+	payload, err := decodeFirstJSONValue(raw)
+	if err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	result.Raw = raw
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("normalize response: %w", err)
+	}
+	if err := json.Unmarshal(normalized, &result); err != nil {
+		return nil, fmt.Errorf("decode quota payload: %w", err)
+	}
+	result.Raw = normalized
 
 	if errMsg := result.Error; errMsg != "" {
 		return &result, nil
 	}
-	if result.RollingUsage == nil && result.WeeklyUsage == nil && result.MonthlyUsage == nil {
-		return nil, fmt.Errorf("unexpected response (cookie may be invalid or expired)")
+	if statusCode >= 400 {
+		return nil, fmt.Errorf("quota returned HTTP %d: %s", statusCode, responseSummary(payload, raw))
+	}
+	if result.RollingUsage == nil || result.WeeklyUsage == nil || result.MonthlyUsage == nil {
+		return nil, fmt.Errorf("quota response missing usage buckets: %s", responseSummary(payload, raw))
 	}
 	return &result, nil
+}
+
+func responseSummary(payload any, raw []byte) string {
+	if payload != nil {
+		if msg := firstStringInPayload(payload, "error", "message", "statusText", "code"); msg != "" {
+			if status := firstNumberInPayload(payload, "status", "statusCode"); status != "" {
+				return status + " " + msg
+			}
+			return msg
+		}
+		if compact, err := json.Marshal(payload); err == nil {
+			return truncateString(string(compact), 240)
+		}
+	}
+	return truncateString(strings.TrimSpace(string(raw)), 240)
+}
+
+func firstStringInPayload(payload any, keys ...string) string {
+	switch v := payload.(type) {
+	case map[string]any:
+		for _, key := range keys {
+			if s, ok := v[key].(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+		for _, item := range v {
+			if s := firstStringInPayload(item, keys...); s != "" {
+				return s
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if s := firstStringInPayload(item, keys...); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func firstNumberInPayload(payload any, keys ...string) string {
+	m, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range keys {
+		switch v := m[key].(type) {
+		case float64:
+			return strconv.FormatInt(int64(v), 10)
+		case string:
+			if strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	return ""
+}
+
+func truncateString(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 // formatGoQuotaReset returns a human-readable string for the reset duration.

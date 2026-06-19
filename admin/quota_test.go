@@ -31,3 +31,45 @@ func TestParseOpenCodeWorkspacesFindsIDsInSerovalText(t *testing.T) {
 		t.Fatalf("unexpected workspaces: %#v", workspaces)
 	}
 }
+
+func TestParseGoQuotaResponseSurfacesHTTPMessage(t *testing.T) {
+	raw := []byte(`{"status":500,"unhandled":true,"message":"HTTPError"}`)
+
+	result, err := parseGoQuotaResponse(raw, 500)
+	if err == nil {
+		t.Fatalf("expected error, got result=%#v", result)
+	}
+	if !strings.Contains(err.Error(), "quota returned HTTP 500: 500 HTTPError") {
+		t.Fatalf("unexpected error: %q", err.Error())
+	}
+}
+
+func TestParseGoQuotaResponseSuccess(t *testing.T) {
+	raw := []byte(`{
+		"mine": true,
+		"useBalance": false,
+		"rollingUsage": {"status": "ok", "resetInSec": 15332, "usagePercent": 0},
+		"weeklyUsage": {"status": "ok", "resetInSec": 201612, "usagePercent": 15},
+		"monthlyUsage": {"status": "ok", "resetInSec": 2302511, "usagePercent": 7}
+	}`)
+
+	result, err := parseGoQuotaResponse(raw, 200)
+	if err != nil {
+		t.Fatalf("parse quota response: %v", err)
+	}
+	if result.WeeklyUsage == nil || result.WeeklyUsage.UsagePercent != 15 {
+		t.Fatalf("unexpected quota result: %#v", result)
+	}
+}
+
+func TestParseGoQuotaResponseMissingBucketsIncludesSummary(t *testing.T) {
+	raw := []byte(`{"mine":true,"useBalance":false}`)
+
+	result, err := parseGoQuotaResponse(raw, 200)
+	if err == nil {
+		t.Fatalf("expected error, got result=%#v", result)
+	}
+	if !strings.Contains(err.Error(), "quota response missing usage buckets") {
+		t.Fatalf("unexpected error: %q", err.Error())
+	}
+}
