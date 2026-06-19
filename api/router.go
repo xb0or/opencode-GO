@@ -1,4 +1,4 @@
-package api
+﻿package api
 
 import (
 	"log"
@@ -29,12 +29,13 @@ func NewRouter(p *pool.Picker) *gin.Engine {
 	v1.GET("/models", listModels)
 
 	rateLimit := RateLimitMiddleware()
+	reqLimit := RequestLimitMiddleware()
 
-	auth := v1.Group("", Auth(), rateLimit)
+	auth := v1.Group("", Auth(), rateLimit, reqLimit)
 	registerProxyRoutes(auth, p)
 
 	// OpenCode clients sometimes hit the bare endpoints without /v1; mirror them.
-	auth2 := r.Group("", Auth(), rateLimit)
+	auth2 := r.Group("", Auth(), rateLimit, reqLimit)
 	registerProxyRoutes(auth2, p)
 	r.GET("/models", listModels)
 
