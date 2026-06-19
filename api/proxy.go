@@ -73,6 +73,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	if !routed {
 		route = passthroughRoute(head.Model, inbound)
 	}
+	if routed && !route.IsEnabled() {
+		writeOpenAIError(c, http.StatusForbidden, "model_disabled",
+			"model is disabled by administrator: "+route.ID)
+		return
+	}
 
 	if tokAny, exists := c.Get("token"); exists {
 		if tok, ok := tokAny.(*store.Token); ok && !pool.GroupAllowed(tok, route.Group) {

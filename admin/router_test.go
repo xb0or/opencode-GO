@@ -278,6 +278,66 @@ func TestDeleteModelMappingSupportsSlashInSource(t *testing.T) {
 	}
 }
 
+func TestModelPatchAndTogglePersistRuntimeConfig(t *testing.T) {
+	if err := store.InitForTest("file:admin_model_patch_toggle?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+	initial := config.ModelRoute{
+		ID:        "editable-model",
+		Name:      "Editable Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "editable-model",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+	row := store.NewModelRouteRow(initial)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("save model: %v", err)
+	}
+	config.ReplaceModels([]config.ModelRoute{initial})
+	defer config.ReplaceModels(nil)
+
+	r := gin.New()
+	MountWithPicker(r.Group("/admin"), pool.NewPicker())
+
+	body := bytes.NewBufferString(`{"name":"Admin Name","context_len":32000,"priority":7,"tags":["code","reasoning"],"pricing":{"prompt":"0.000001","completion":"0.000002"}}`)
+	req := httptest.NewRequest(http.MethodPatch, "/admin/models/editable-model", body)
+	req.Header.Set("Authorization", "Bearer "+signedAdminToken(t))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("patch status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	route, ok := config.LookupModel("editable-model")
+	if !ok {
+		t.Fatal("runtime model missing after patch")
+	}
+	if route.Name != "Admin Name" || route.ContextLen != 32000 || route.Priority != 7 || route.Pricing["completion"] != "0.000002" {
+		t.Fatalf("runtime route not patched: %#v", route)
+	}
+	for _, want := range []string{"name", "context_len", "priority", "tags", "pricing"} {
+		if !config.IsModelFieldCustomized(route, want) {
+			t.Fatalf("customized field %q not recorded: %#v", want, route.CustomizedFields)
+		}
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/admin/models/editable-model/toggle", nil)
+	req.Header.Set("Authorization", "Bearer "+signedAdminToken(t))
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("toggle status=%d body=%s", w.Code, w.Body.String())
+	}
+	route, _ = config.LookupModel("editable-model")
+	if route.IsEnabled() {
+		t.Fatalf("model should be disabled after toggle: %#v", route)
+	}
+}
+
 func assertJSONNumber(t *testing.T, payload map[string]any, key string, want float64) {
 	t.Helper()
 	got, ok := payload[key].(float64)

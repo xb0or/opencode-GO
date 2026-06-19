@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"crypto/subtle"
 	"math"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/opencode-sw/gateway/config"
+	"github.com/opencode-sw/gateway/modelsync"
 	"github.com/opencode-sw/gateway/pool"
 	"github.com/opencode-sw/gateway/store"
 	"gorm.io/gorm"
@@ -41,7 +43,10 @@ func MountWithPicker(rg *gin.RouterGroup, p *pool.Picker) {
 //	GET  /admin/stats                                                   usage summary
 //	GET  /admin/usage                                                   paginated usage logs
 //	GET  /admin/models                                                  model route table
+//	POST /admin/models/sync                                             sync model catalog
 //	POST /admin/models                      add/update route
+//	PATCH /admin/models/:id                 edit route
+//	POST /admin/models/:id/toggle                                      enable/disable route
 //	DELETE /admin/models/:id
 //	GET  /admin/model-mappings                                          model rewrite rules
 //	POST /admin/model-mappings              add/update rule
@@ -67,7 +72,10 @@ func Mount(rg *gin.RouterGroup) {
 		authed.GET("/stats", stats)
 		authed.GET("/usage", listUsageLogs)
 		authed.GET("/models", listModelsAdmin)
+		authed.POST("/models/sync", syncModels)
 		authed.POST("/models", upsertModel)
+		authed.PATCH("/models/:id", updateModel)
+		authed.POST("/models/:id/toggle", toggleModel)
 		authed.DELETE("/models/:id", deleteModel)
 		authed.GET("/model-mappings", listModelMappingsAdmin)
 		authed.POST("/model-mappings", upsertModelMapping)
@@ -314,13 +322,37 @@ func listModelsAdmin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": config.AllModels()})
 }
 
+func syncModels(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	defer cancel()
+	result, err := modelsync.Sync(ctx, modelsync.Options{})
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "result": result})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
 func upsertModel(c *gin.Context) {
-	var body config.ModelRoute
+	var body struct {
+		ID         string            `json:"id"`
+		Name       *string           `json:"name"`
+		Upstream   config.Upstream   `json:"upstream"`
+		Protocol   *config.Protocol  `json:"protocol"`
+		RealModel  *string           `json:"real_model"`
+		Group      string            `json:"group"`
+		ContextLen *int              `json:"context_len"`
+		Status     *int              `json:"status"`
+		Priority   *int              `json:"priority"`
+		Tags       []string          `json:"tags"`
+		Pricing    map[string]string `json:"pricing"`
+	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if body.ID == "" || body.Protocol == "" {
+	body.ID = strings.TrimSpace(body.ID)
+	if body.ID == "" || body.Protocol == nil || *body.Protocol == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id and protocol are required"})
 		return
 	}
@@ -334,14 +366,149 @@ func upsertModel(c *gin.Context) {
 	if body.Group == "" {
 		body.Group = "go"
 	}
-	config.RegisterModel(body)
-	// Persist to DB.
-	store.SaveModelRoute(&store.ModelRouteRow{
-		ID: body.ID, Name: body.Name, Upstream: string(body.Upstream),
-		Protocol: string(body.Protocol), RealModel: body.RealModel,
-		Group: body.Group, ContextLen: body.ContextLen,
-	})
-	c.JSON(http.StatusOK, body)
+	route := config.ModelRoute{
+		ID:       strings.TrimSpace(body.ID),
+		Upstream: body.Upstream,
+		Protocol: *body.Protocol,
+		Group:    body.Group,
+		Status:   config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+	changed := []string{"protocol"}
+	if body.Name != nil {
+		route.Name = strings.TrimSpace(*body.Name)
+		changed = append(changed, "name")
+	}
+	if body.RealModel != nil {
+		route.RealModel = strings.TrimSpace(*body.RealModel)
+		changed = append(changed, "real_model")
+	}
+	if body.ContextLen != nil {
+		route.ContextLen = *body.ContextLen
+		changed = append(changed, "context_len")
+	}
+	if body.Status != nil {
+		route.Status = config.ModelStatusPtr(*body.Status)
+	}
+	if body.Priority != nil {
+		route.Priority = *body.Priority
+		changed = append(changed, "priority")
+	}
+	if body.Tags != nil {
+		route.Tags = config.NormalizeModelTags(body.Tags)
+		changed = append(changed, "tags")
+	}
+	if body.Pricing != nil {
+		route.Pricing = body.Pricing
+		changed = append(changed, "pricing")
+	}
+	route.CustomizedFields = mergeModelCustomizedFields(route.ID, nil, changed...)
+	route.IsCustomized = len(route.CustomizedFields) > 0
+	row := store.NewModelRouteRow(route)
+	if err := store.SaveModelRoute(&row); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	route = store.ModelRouteFromRow(row)
+	config.RegisterModel(route)
+	c.JSON(http.StatusOK, route)
+}
+
+func updateModel(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id is required"})
+		return
+	}
+	var row store.ModelRouteRow
+	if err := store.DB().First(&row, "id = ?", id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	route := store.ModelRouteFromRow(row)
+
+	var body struct {
+		Name       *string           `json:"name"`
+		Protocol   *config.Protocol  `json:"protocol"`
+		RealModel  *string           `json:"real_model"`
+		ContextLen *int              `json:"context_len"`
+		Status     *int              `json:"status"`
+		Priority   *int              `json:"priority"`
+		Tags       []string          `json:"tags"`
+		Pricing    map[string]string `json:"pricing"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	changed := []string{}
+	if body.Name != nil {
+		route.Name = strings.TrimSpace(*body.Name)
+		changed = append(changed, "name")
+	}
+	if body.Protocol != nil {
+		route.Protocol = *body.Protocol
+		changed = append(changed, "protocol")
+	}
+	if body.RealModel != nil {
+		route.RealModel = strings.TrimSpace(*body.RealModel)
+		changed = append(changed, "real_model")
+	}
+	if body.ContextLen != nil {
+		route.ContextLen = *body.ContextLen
+		changed = append(changed, "context_len")
+	}
+	if body.Tags != nil {
+		route.Tags = config.NormalizeModelTags(body.Tags)
+		changed = append(changed, "tags")
+	}
+	if body.Pricing != nil {
+		route.Pricing = body.Pricing
+		changed = append(changed, "pricing")
+	}
+	if body.Priority != nil {
+		route.Priority = *body.Priority
+		changed = append(changed, "priority")
+	}
+	if body.Status != nil {
+		route.Status = config.ModelStatusPtr(*body.Status)
+	}
+	route.CustomizedFields = mergeModelCustomizedFields(id, route.CustomizedFields, changed...)
+	route.IsCustomized = route.IsCustomized || len(changed) > 0 || len(route.CustomizedFields) > 0
+	nextRow := store.NewModelRouteRow(route)
+	nextRow.CreatedAt = row.CreatedAt
+	nextRow.LastSyncedAt = row.LastSyncedAt
+	if err := store.SaveModelRoute(&nextRow); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	route = store.ModelRouteFromRow(nextRow)
+	config.RegisterModel(route)
+	c.JSON(http.StatusOK, route)
+}
+
+func toggleModel(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	var row store.ModelRouteRow
+	if err := store.DB().First(&row, "id = ?", id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+	route := store.ModelRouteFromRow(row)
+	if route.IsEnabled() {
+		route.Status = config.ModelStatusPtr(config.ModelStatusDisabled)
+	} else {
+		route.Status = config.ModelStatusPtr(config.ModelStatusEnabled)
+	}
+	nextRow := store.NewModelRouteRow(route)
+	nextRow.CreatedAt = row.CreatedAt
+	nextRow.LastSyncedAt = row.LastSyncedAt
+	if err := store.SaveModelRoute(&nextRow); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	route = store.ModelRouteFromRow(nextRow)
+	config.RegisterModel(route)
+	c.JSON(http.StatusOK, route)
 }
 
 func deleteModel(c *gin.Context) {
@@ -349,6 +516,16 @@ func deleteModel(c *gin.Context) {
 	config.RemoveModel(id)
 	store.DeleteModelRoute(id)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func mergeModelCustomizedFields(id string, current []string, extra ...string) []string {
+	fields := append([]string{}, current...)
+	var row store.ModelRouteRow
+	if id != "" && store.DB().First(&row, "id = ?", id).Error == nil {
+		fields = append(fields, store.ModelRouteFromRow(row).CustomizedFields...)
+	}
+	fields = append(fields, extra...)
+	return config.NormalizeCustomizedFields(fields)
 }
 
 // --- Model Mappings ---

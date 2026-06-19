@@ -11,7 +11,7 @@ import (
 // gateway-facing model ids so clients (and humans) can discover the catalog.
 // This endpoint is public (no gateway token) to match the OpenAI convention.
 func listModels(c *gin.Context) {
-	all := config.AllModels()
+	all := config.AllEnabledModels()
 	out := make([]gin.H, 0, len(all))
 	for _, m := range all {
 		out = append(out, gin.H{
@@ -23,6 +23,8 @@ func listModels(c *gin.Context) {
 			"protocol":             string(m.Protocol),
 			"context_length":       m.ContextLen,
 			"context_len":          m.ContextLen,
+			"priority":             m.Priority,
+			"tags":                 m.Tags,
 			"architecture":         m.Architecture,
 			"pricing":              m.Pricing,
 			"supported_parameters": m.SupportedParameters,

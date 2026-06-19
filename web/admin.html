@@ -824,6 +824,13 @@
                   <p>{{t('models.subtitle')}}</p>
                 </div>
                 <div class="hero-actions">
+                  <button
+                    class="btn btn-ghost"
+                    @click="syncModels"
+                    :disabled="syncingModels"
+                  >
+                    {{syncingModels?t('models.syncing'):t('models.sync')}}
+                  </button>
                   <button class="btn btn-primary" @click="openModal">
                     {{t('models.addModel')}}
                   </button>
@@ -834,10 +841,12 @@
                 <div class="table-wrap">
                   <table>
                     <tr>
+                      <th>{{t('table.active')}}</th>
                       <th>{{t('table.id')}}</th>
                       <th>{{t('table.name')}}</th>
                       <th>{{t('table.protocol')}}</th>
                       <th>{{t('table.context')}}</th>
+                      <th>{{t('table.priority')}}</th>
                       <th>{{t('table.promptPrice')}}</th>
                       <th>{{t('table.completionPrice')}}</th>
                       <th>{{t('table.cachePrice')}}</th>
@@ -845,10 +854,21 @@
                       <th>{{t('table.actions')}}</th>
                     </tr>
                     <tr v-for="m in models" :key="m.id">
+                      <td>
+                        <label class="toggle"
+                          ><input
+                            type="checkbox"
+                            :checked="m.status!==0"
+                            @change="toggleModel(m.id)" /><span
+                            class="slider"
+                          ></span
+                        ></label>
+                      </td>
                       <td><code>{{m.id}}</code></td>
                       <td>{{m.name}}</td>
                       <td>{{m.protocol}}</td>
                       <td>{{fmtNumber(m.context_len || m.context_length)}}</td>
+                      <td>{{m.priority||0}}</td>
                       <td>{{fmtPrice(m.pricing, 'prompt')}}</td>
                       <td>{{fmtPrice(m.pricing, 'completion')}}</td>
                       <td style="font-size: 12px">
@@ -866,7 +886,13 @@
                           {{capabilityLabel(cap)}}
                         </span>
                       </td>
-                      <td>
+                      <td class="btn-group">
+                        <button
+                          class="btn btn-ghost btn-sm"
+                          @click="openModelSettings(m)"
+                        >
+                          {{t('models.settings')}}
+                        </button>
                         <button
                           class="btn btn-danger btn-sm"
                           @click="deleteModel(m.id)"
@@ -980,20 +1006,29 @@
       <!-- Model Add Modal -->
       <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
         <div class="modal">
-          <h2>{{t('models.addModel')}}</h2>
+          <h2>{{editingModelId?t('models.editModel'):t('models.addModel')}}</h2>
           <div class="form-row">
             <div class="form-group">
               <label>{{t('models.protocol')}}</label>
-              <select v-model="newModel.protocol" disabled>
+              <select v-model="newModel.protocol">
                 <option value="chat">chat</option>
                 <option value="messages">messages</option>
+                <option value="responses">responses</option>
               </select>
+            </div>
+            <div class="form-group">
+              <label>{{t('models.priority')}}</label>
+              <input v-model.number="newModel.priority" type="number" />
             </div>
           </div>
           <div class="form-row">
             <div class="form-group">
               <label>{{t('models.modelId')}}</label>
-              <input v-model="newModel.id" placeholder="auto-generated" />
+              <input
+                v-model="newModel.id"
+                placeholder="auto-generated"
+                :disabled="!!editingModelId"
+              />
             </div>
             <div class="form-group">
               <label>{{t('models.displayName')}}</label>
@@ -1026,12 +1061,42 @@
               />
             </div>
           </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('models.tags')}}</label>
+              <input
+                v-model="newModel.tags_text"
+                :placeholder="t('models.tagsPlaceholder')"
+              />
+            </div>
+          </div>
+          <h3 style="margin: 8px 0">{{t('models.pricing')}}</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('models.promptPrice')}}</label>
+              <input v-model="newModel.prompt_price" placeholder="0.0000001" />
+            </div>
+            <div class="form-group">
+              <label>{{t('models.completionPrice')}}</label>
+              <input v-model="newModel.completion_price" placeholder="0.0000002" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('models.cacheReadPrice')}}</label>
+              <input v-model="newModel.cache_read_price" placeholder="0.00000002" />
+            </div>
+            <div class="form-group">
+              <label>{{t('models.cacheWritePrice')}}</label>
+              <input v-model="newModel.cache_write_price" placeholder="0.00000008" />
+            </div>
+          </div>
           <div class="btn-group">
             <button class="btn btn-ghost" @click="closeModal">
               {{t('common.cancel')}}
             </button>
             <button class="btn btn-primary" @click="addModel">
-              {{t('models.addBtn')}}
+              {{editingModelId?t('models.updateBtn'):t('models.addBtn')}}
             </button>
           </div>
         </div>

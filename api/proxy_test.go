@@ -364,6 +364,62 @@ func TestCORSHeadersOnRegisteredAPIRoute(t *testing.T) {
 	}
 }
 
+func TestDisabledModelHiddenAndRejected(t *testing.T) {
+	if err := store.InitForTest("file:api_disabled_model?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+	config.ReplaceModels([]config.ModelRoute{
+		{
+			ID:        "enabled-model",
+			Name:      "Enabled Model",
+			Upstream:  config.UpstreamGo,
+			Protocol:  config.ProtocolChat,
+			RealModel: "enabled-model",
+			Group:     "go",
+			Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+		},
+		{
+			ID:        "disabled-model",
+			Name:      "Disabled Model",
+			Upstream:  config.UpstreamGo,
+			Protocol:  config.ProtocolChat,
+			RealModel: "disabled-model",
+			Group:     "go",
+			Status:    config.ModelStatusPtr(config.ModelStatusDisabled),
+		},
+	})
+	defer config.ReplaceModels(nil)
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "disabled-model") {
+		t.Fatalf("disabled model should be hidden from /v1/models: %s", w.Body.String())
+	}
+
+	tok, err := pool.CreateToken("disabled-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"disabled-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("disabled model status = %d want 403 body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "model_disabled") {
+		t.Fatalf("disabled error should include model_disabled: %s", w.Body.String())
+	}
+}
+
 func TestProxyAppliesModelMappingAndContentLength(t *testing.T) {
 	if err := store.InitForTest("file:api_model_mapping?mode=memory&cache=shared"); err != nil {
 		t.Fatalf("init test db: %v", err)

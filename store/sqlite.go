@@ -1,9 +1,11 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/opencode-sw/gateway/config"
@@ -44,14 +46,30 @@ type Token struct {
 
 // ModelRouteRow persists a model route in the database.
 type ModelRouteRow struct {
-	ID           string `gorm:"primaryKey;size:128" json:"id"`
-	Name         string `gorm:"size:128" json:"name"`
-	Upstream     string `gorm:"size:32;not null" json:"upstream"`
-	Protocol     string `gorm:"size:32;not null" json:"protocol"`
-	RealModel    string `gorm:"size:255;not null" json:"real_model"`
-	Group        string `gorm:"size:32;not null" json:"group"`
-	ContextLen   int    `json:"context_len"`
-	Capabilities string `gorm:"size:512" json:"capabilities"` // JSON array string
+	ID                      string     `gorm:"primaryKey;size:128" json:"id"`
+	Name                    string     `gorm:"size:128" json:"name"`
+	Upstream                string     `gorm:"size:32;not null" json:"upstream"`
+	Protocol                string     `gorm:"size:32;not null" json:"protocol"`
+	RealModel               string     `gorm:"size:255;not null" json:"real_model"`
+	Group                   string     `gorm:"size:32;not null" json:"group"`
+	ContextLen              int        `json:"context_len"`
+	Capabilities            string     `gorm:"size:512" json:"capabilities,omitempty"` // legacy JSON array string
+	Status                  int        `gorm:"default:1" json:"status"`                // 0 disabled, 1 enabled
+	Priority                int        `gorm:"default:0" json:"priority"`              // admin-defined ordering hint
+	TagsJSON                string     `gorm:"type:text" json:"tags_json,omitempty"`
+	PricingJSON             string     `gorm:"type:text" json:"pricing_json,omitempty"`
+	ArchitectureJSON        string     `gorm:"type:text" json:"architecture_json,omitempty"`
+	SupportedParametersJSON string     `gorm:"type:text" json:"supported_parameters_json,omitempty"`
+	OpenRouterID            string     `gorm:"size:255" json:"openrouter_id,omitempty"`
+	OpenRouterName          string     `gorm:"size:255" json:"openrouter_name,omitempty"`
+	OpenRouterMatchedBy     string     `gorm:"size:64" json:"openrouter_matched_by,omitempty"`
+	Description             string     `gorm:"type:text" json:"description,omitempty"`
+	KnowledgeCutoff         string     `gorm:"size:64" json:"knowledge_cutoff,omitempty"`
+	IsCustomized            bool       `gorm:"default:false" json:"is_customized"`
+	CustomizedFieldsJSON    string     `gorm:"type:text" json:"customized_fields_json,omitempty"`
+	LastSyncedAt            *time.Time `json:"last_synced_at,omitempty"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
 }
 
 // ModelMappingRow persists a UI-managed model rewrite rule.
@@ -141,6 +159,110 @@ func SaveModelRoute(r *ModelRouteRow) error {
 	return db.Save(r).Error
 }
 
+// ModelRouteFromRow converts a persisted route row into the runtime config
+// representation, including JSON-encoded metadata fields.
+func ModelRouteFromRow(r ModelRouteRow) config.ModelRoute {
+	status := r.Status
+	if status != config.ModelStatusDisabled {
+		status = config.ModelStatusEnabled
+	}
+	route := config.ModelRoute{
+		ID:                  strings.TrimSpace(r.ID),
+		Name:                strings.TrimSpace(r.Name),
+		Upstream:            config.Upstream(strings.TrimSpace(r.Upstream)),
+		Protocol:            config.Protocol(strings.TrimSpace(r.Protocol)),
+		RealModel:           strings.TrimSpace(r.RealModel),
+		Group:               strings.TrimSpace(r.Group),
+		ContextLen:          r.ContextLen,
+		Status:              config.ModelStatusPtr(status),
+		Priority:            r.Priority,
+		Tags:                routeTagsFromRow(r),
+		Pricing:             decodeStringMap(r.PricingJSON),
+		SupportedParameters: decodeStringSlice(r.SupportedParametersJSON),
+		OpenRouterID:        r.OpenRouterID,
+		OpenRouterName:      r.OpenRouterName,
+		OpenRouterMatchedBy: r.OpenRouterMatchedBy,
+		Description:         r.Description,
+		KnowledgeCutoff:     r.KnowledgeCutoff,
+		IsCustomized:        r.IsCustomized,
+		CustomizedFields:    config.NormalizeCustomizedFields(decodeStringSlice(r.CustomizedFieldsJSON)),
+	}
+	if strings.TrimSpace(r.ArchitectureJSON) != "" {
+		var arch config.ModelArchitecture
+		if err := json.Unmarshal([]byte(r.ArchitectureJSON), &arch); err == nil {
+			route.Architecture = &arch
+		}
+	}
+	if route.Upstream == "" {
+		route.Upstream = config.UpstreamGo
+	}
+	if route.Group == "" {
+		route.Group = "go"
+	}
+	if route.RealModel == "" {
+		route.RealModel = route.ID
+	}
+	if route.Name == "" {
+		route.Name = route.ID
+	}
+	route.IsCustomized = route.IsCustomized || len(route.CustomizedFields) > 0
+	return route
+}
+
+func routeTagsFromRow(r ModelRouteRow) []string {
+	tags := decodeStringSlice(r.TagsJSON)
+	if len(tags) == 0 {
+		tags = decodeStringSlice(r.Capabilities)
+	}
+	return config.NormalizeModelTags(tags)
+}
+
+// NewModelRouteRow converts a runtime route into a DB row.
+func NewModelRouteRow(m config.ModelRoute) ModelRouteRow {
+	status := config.ModelStatusEnabled
+	if m.Status != nil && *m.Status == config.ModelStatusDisabled {
+		status = config.ModelStatusDisabled
+	}
+	if m.Upstream == "" {
+		m.Upstream = config.UpstreamGo
+	}
+	if m.Protocol == "" {
+		m.Protocol = config.ProtocolChat
+	}
+	if strings.TrimSpace(m.Group) == "" {
+		m.Group = "go"
+	}
+	if strings.TrimSpace(m.RealModel) == "" {
+		m.RealModel = m.ID
+	}
+	if strings.TrimSpace(m.Name) == "" {
+		m.Name = m.ID
+	}
+	return ModelRouteRow{
+		ID:                      strings.TrimSpace(m.ID),
+		Name:                    strings.TrimSpace(m.Name),
+		Upstream:                string(m.Upstream),
+		Protocol:                string(m.Protocol),
+		RealModel:               strings.TrimSpace(m.RealModel),
+		Group:                   strings.TrimSpace(m.Group),
+		ContextLen:              m.ContextLen,
+		Status:                  status,
+		Priority:                m.Priority,
+		TagsJSON:                encodeJSON(config.NormalizeModelTags(m.Tags)),
+		Capabilities:            encodeJSON(config.NormalizeModelTags(m.Tags)),
+		PricingJSON:             encodeJSON(m.Pricing),
+		ArchitectureJSON:        encodeJSON(m.Architecture),
+		SupportedParametersJSON: encodeJSON(m.SupportedParameters),
+		OpenRouterID:            m.OpenRouterID,
+		OpenRouterName:          m.OpenRouterName,
+		OpenRouterMatchedBy:     m.OpenRouterMatchedBy,
+		Description:             m.Description,
+		KnowledgeCutoff:         m.KnowledgeCutoff,
+		IsCustomized:            m.IsCustomized || len(m.CustomizedFields) > 0,
+		CustomizedFieldsJSON:    encodeJSON(config.NormalizeCustomizedFields(m.CustomizedFields)),
+	}
+}
+
 // DeleteModelRoute deletes a model route by id.
 func DeleteModelRoute(id string) error {
 	return db.Delete(&ModelRouteRow{}, "id = ?", id).Error
@@ -160,6 +282,41 @@ func SaveModelMapping(r *ModelMappingRow) error {
 // DeleteModelMapping deletes a model rewrite rule by source model id.
 func DeleteModelMapping(sourceModel string) error {
 	return db.Delete(&ModelMappingRow{}, "source_model = ?", sourceModel).Error
+}
+
+func encodeJSON(v any) string {
+	if v == nil {
+		return ""
+	}
+	b, err := json.Marshal(v)
+	if err != nil || string(b) == "null" || string(b) == "[]" || string(b) == "{}" {
+		return ""
+	}
+	return string(b)
+}
+
+func decodeStringSlice(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func decodeStringMap(raw string) map[string]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out map[string]string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // InitForTest opens an in-memory SQLite for testing. Not for production use.
