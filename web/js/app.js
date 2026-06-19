@@ -336,12 +336,20 @@ createApp({
       // 令牌管理
       tokens: tokens.tokens,
       newToken: tokens.newToken,
+      editingTokenId: tokens.editingTokenId,
       showTokenModal: tokens.showTokenModal,
       openTokenModal: tokens.openTokenModal,
+      openTokenSettings: tokens.openTokenSettings,
       closeTokenModal: tokens.closeTokenModal,
       loadTokens: tokens.load,
       addToken: tokens.add,
+      toggleToken: tokens.toggle,
       deleteToken: tokens.remove,
+      fmtTokenExpiry: tokens.fmtTokenExpiry,
+      expiryBadgeClass: tokens.expiryBadgeClass,
+      requestUsedLabel: tokens.requestUsedLabel,
+      requestUsedPercent: tokens.requestUsedPercent,
+      requestBadgeClass: tokens.requestBadgeClass,
 
       // 模型管理
       models: models.models,
