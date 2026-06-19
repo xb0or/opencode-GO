@@ -337,6 +337,7 @@ createApp({
       deleteKey: keys.remove,
       quotaPercent: keys.quotaPercent,
       quotaBadgeClass: keys.quotaBadgeClass,
+      normalizeKeyCookie: keys.normalizeKeyCookie,
 
       // 令牌管理
       tokens: tokens.tokens,

@@ -49,6 +49,23 @@ export function useKeys(api, showToast, t, showConfirm) {
     editingKeyId.value = null;
   }
 
+  function normalizeCookieInput(raw) {
+    let value = String(raw || "").trim();
+    if (!value) return "";
+    value = value
+      .replace(/^cookie:\s*/i, "")
+      .replace(/^set-cookie:\s*/i, "")
+      .trim();
+    const match = value.match(/(?:^|[;\s])auth=([^;\s]+)/i);
+    if (match && match[1]) return "auth=" + match[1].trim();
+    if (!value.includes("=")) return "auth=" + value;
+    return value;
+  }
+
+  function normalizeKeyCookie() {
+    newKey.cookie = normalizeCookieInput(newKey.cookie);
+  }
+
   async function load() {
     try {
       const d = await api("/keys", "GET", null, t);
@@ -68,7 +85,7 @@ export function useKeys(api, showToast, t, showConfirm) {
         label: newKey.label,
         weight: newKey.weight || 1,
         proxy_url: newKey.proxy_url,
-        cookie: newKey.cookie,
+        cookie: normalizeCookieInput(newKey.cookie),
         workspace_id: newKey.workspace_id,
       };
       if (editing) {
@@ -165,5 +182,7 @@ export function useKeys(api, showToast, t, showConfirm) {
     remove,
     quotaPercent,
     quotaBadgeClass,
+    normalizeCookieInput,
+    normalizeKeyCookie,
   };
 }

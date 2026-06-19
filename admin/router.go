@@ -170,11 +170,13 @@ func listKeys(c *gin.Context) {
 
 func createKey(c *gin.Context) {
 	var body struct {
-		Value    string `json:"value" binding:"required"`
-		Group    string `json:"group"`
-		Label    string `json:"label"`
-		Weight   int    `json:"weight"`
-		ProxyURL string `json:"proxy_url"`
+		Value       string `json:"value" binding:"required"`
+		Group       string `json:"group"`
+		Label       string `json:"label"`
+		Weight      int    `json:"weight"`
+		ProxyURL    string `json:"proxy_url"`
+		Cookie      string `json:"cookie"`
+		WorkspaceID string `json:"workspace_id"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -193,12 +195,14 @@ func createKey(c *gin.Context) {
 		return
 	}
 	k := &store.Key{
-		Value:    strings.TrimSpace(body.Value),
-		Group:    group,
-		Label:    body.Label,
-		Enabled:  true,
-		Weight:   w,
-		ProxyURL: strings.TrimSpace(body.ProxyURL),
+		Value:       strings.TrimSpace(body.Value),
+		Group:       group,
+		Label:       body.Label,
+		Enabled:     true,
+		Weight:      w,
+		ProxyURL:    strings.TrimSpace(body.ProxyURL),
+		Cookie:      normalizeAuthCookie(body.Cookie),
+		WorkspaceID: strings.TrimSpace(body.WorkspaceID),
 	}
 	if err := store.DB().Create(k).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -215,11 +219,13 @@ func updateKey(c *gin.Context) {
 	}
 
 	var body struct {
-		Value    string `json:"value"`
-		Label    string `json:"label"`
-		Weight   *int   `json:"weight"`
-		ProxyURL string `json:"proxy_url"`
-		Enabled  *bool  `json:"enabled"`
+		Value       string `json:"value"`
+		Label       string `json:"label"`
+		Weight      *int   `json:"weight"`
+		ProxyURL    string `json:"proxy_url"`
+		Enabled     *bool  `json:"enabled"`
+		Cookie      string `json:"cookie"`
+		WorkspaceID string `json:"workspace_id"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -229,6 +235,12 @@ func updateKey(c *gin.Context) {
 	updates := map[string]any{
 		"label":     body.Label,
 		"proxy_url": strings.TrimSpace(body.ProxyURL),
+	}
+	if cookie := normalizeAuthCookie(body.Cookie); cookie != "" {
+		updates["cookie"] = cookie
+	}
+	if workspaceID := strings.TrimSpace(body.WorkspaceID); workspaceID != "" {
+		updates["workspace_id"] = workspaceID
 	}
 	if body.Weight != nil {
 		weight := *body.Weight

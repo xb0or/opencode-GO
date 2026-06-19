@@ -1,4 +1,4 @@
-﻿package admin
+package admin
 
 import (
 	"bytes"
@@ -6,18 +6,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 )
 
 // GoQuotaResponse represents the quota usage data returned by opencode.ai.
 type GoQuotaResponse struct {
-	Mine         bool                `json:"mine"`
-	UseBalance   bool                `json:"useBalance"`
-	RollingUsage *GoQuotaBucket      `json:"rollingUsage,omitempty"`
-	WeeklyUsage  *GoQuotaBucket      `json:"weeklyUsage,omitempty"`
-	MonthlyUsage *GoQuotaBucket      `json:"monthlyUsage,omitempty"`
-	Error        string              `json:"error,omitempty"`
-	Raw          json.RawMessage     `json:"-"`
+	Mine         bool            `json:"mine"`
+	UseBalance   bool            `json:"useBalance"`
+	RollingUsage *GoQuotaBucket  `json:"rollingUsage,omitempty"`
+	WeeklyUsage  *GoQuotaBucket  `json:"weeklyUsage,omitempty"`
+	MonthlyUsage *GoQuotaBucket  `json:"monthlyUsage,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	Raw          json.RawMessage `json:"-"`
 }
 
 // GoQuotaBucket holds one quota bucket.
@@ -29,6 +31,29 @@ type GoQuotaBucket struct {
 
 // serverRefHash is the fixed server reference hash for lite.subscription.get.
 const quotaServerHash = "c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229bab753498cd"
+
+var authCookiePattern = regexp.MustCompile(`(?i)(?:^|[;\s])auth=([^;\s]+)`)
+
+// normalizeAuthCookie accepts pasted browser cookie/header fragments and returns
+// the minimal Cookie header value required by opencode.ai quota RPC: auth=<token>.
+func normalizeAuthCookie(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	s = strings.TrimPrefix(s, "Cookie:")
+	s = strings.TrimPrefix(s, "cookie:")
+	s = strings.TrimPrefix(s, "Set-Cookie:")
+	s = strings.TrimPrefix(s, "set-cookie:")
+	s = strings.TrimSpace(s)
+	if m := authCookiePattern.FindStringSubmatch(s); len(m) == 2 {
+		return "auth=" + strings.TrimSpace(m[1])
+	}
+	if !strings.Contains(s, "=") {
+		return "auth=" + s
+	}
+	return s
+}
 
 // serovalString encodes a single string argument as the Seroval format expected
 // by opencode.ai RPC calls.
@@ -44,6 +69,7 @@ func serovalString(s string) json.RawMessage {
 // provided session cookie and workspace ID. Returns nil when the key has no
 // cookie configured (silent skip).
 func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
+	cookie = normalizeAuthCookie(cookie)
 	if cookie == "" || workspaceID == "" {
 		return nil, nil
 	}

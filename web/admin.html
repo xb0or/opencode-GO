@@ -1162,8 +1162,10 @@
               <label>Cookie</label>
               <input
                 v-model="newKey.cookie"
-                placeholder="auth=Fe26.2..."
+                @blur="normalizeKeyCookie"
+                placeholder="可粘贴 Cookie: auth=... / auth=... / Fe26..."
               />
+              <small class="hint-text">自动识别并保存为 auth=&lt;token&gt;，可直接粘贴浏览器 Cookie 请求头。</small>
             </div>
           </div>
           <div class="form-row">
