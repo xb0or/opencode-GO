@@ -26,7 +26,8 @@
     dashboard: {
       eyebrow: "Gateway Overview",
       title: "仪表盘",
-      subtitle: "网关运行状态一目了然：流量趋势、消费统计与健康评分，快速掌握全局。",
+      subtitle:
+        "网关运行状态一目了然：流量趋势、消费统计与健康评分，快速掌握全局。",
       totalCalls: "总调用次数",
       today: "今日",
       lastHour: "近 1 小时",
@@ -97,7 +98,8 @@
     usage: {
       eyebrow: "Audit Trail",
       title: "使用记录",
-      subtitle: "审计与检索所有 API 调用记录，支持多维度筛选，快速定位目标日志。",
+      subtitle:
+        "审计与检索所有 API 调用记录，支持多维度筛选，快速定位目标日志。",
       loading: "加载中...",
       visibleRows: "当前页记录",
       successRows: "成功记录",
@@ -144,6 +146,13 @@
       all: "全部",
       success: "成功",
       error: "错误",
+      protocolAll: "全部协议",
+      protocolChat: "Chat",
+      protocolMessages: "Messages",
+      protocolResponses: "Responses",
+      streamAll: "全部",
+      streamYes: "是",
+      streamNo: "否",
       pageSize: "每页",
       apply: "应用",
       reset: "重置",
@@ -154,6 +163,8 @@
     },
     keys: {
       title: "API 密钥",
+      eyebrow: "Credentials",
+      subtitle: "管理上游 API KEY，支持自定义权重、代理地址与冷却重置。",
       addKey: "添加密钥",
       updateKey: "修改密钥设置",
       keyValue: "密钥值",
@@ -173,6 +184,8 @@
     },
     tokens: {
       title: "访问令牌",
+      eyebrow: "Access Tokens",
+      subtitle: "创建网关访问令牌，支持速率限制与过期时间。",
       createToken: "创建令牌",
       name: "名称",
       namePlaceholder: "例如：my-app",
@@ -188,6 +201,8 @@
     },
     models: {
       title: "模型路由",
+      eyebrow: "Model Routes",
+      subtitle: "配置 Go 模型路由表，关联上游模型 ID 与协议。",
       addModel: "添加模型路由",
       modelId: "模型 ID",
       displayName: "显示名称",
@@ -204,6 +219,8 @@
     },
     mappings: {
       title: "模型映射",
+      eyebrow: "Model Mappings",
+      subtitle: "客户端请求模型名自动改写为上游模型名，支持实时生效。",
       addMapping: "添加映射",
       updateMapping: "修改映射",
       sourceModel: "客户端模型",
@@ -211,7 +228,8 @@
       addBtn: "添加",
       updateBtn: "保存",
       registered: "已配置映射 ({count})",
-      description: "客户端请求指定模型时，网关自动将其替换为目标模型，实现无缝模型路由。",
+      description:
+        "客户端请求指定模型时，网关自动将其替换为目标模型，实现无缝模型路由。",
       modalHint: "配置即刻生效。示例：客户端请求 gpt-5.5 时自动映射为 glm-51。",
       settings: "设置",
       delete: "删除",
@@ -222,6 +240,8 @@
       light: "浅色模式",
     },
     common: {
+      cancel: "取消",
+      confirm: "确定",
       refresh: "刷新",
       copied: "已复制",
       copyFailed: "复制失败",
@@ -326,7 +346,8 @@
     dashboard: {
       eyebrow: "Gateway Overview",
       title: "Dashboard",
-      subtitle: "Gateway status at a glance: traffic trends, usage costs, and health score in one view.",
+      subtitle:
+        "Gateway status at a glance: traffic trends, usage costs, and health score in one view.",
       totalCalls: "Total Calls",
       today: "Today",
       lastHour: "last hour",
@@ -357,7 +378,8 @@
       healthy: "Healthy",
       degraded: "Degraded",
       unstable: "Unstable",
-      healthHint: "A composite score reflecting overall gateway quality based on success rate, error rate, and latency.",
+      healthHint:
+        "A composite score reflecting overall gateway quality based on success rate, error rate, and latency.",
       trafficTrend: "Traffic Trend",
       requests: "Requests",
       errors: "Errors",
@@ -372,11 +394,13 @@
     ops: {
       eyebrow: "Operations",
       title: "Ops Monitor",
-      subtitle: "Monitor key-pool health, traffic load, and error events to quickly identify and resolve issues.",
+      subtitle:
+        "Monitor key-pool health, traffic load, and error events to quickly identify and resolve issues.",
       updated: "Updated",
       loading: "Loading...",
       gatewayHealth: "Gateway Health",
-      healthHint: "A health score combining key availability and request success rate for gateway reliability.",
+      healthHint:
+        "A health score combining key availability and request success rate for gateway reliability.",
       availableKeys: "Available Keys",
       cooldownKeys: "Cooldown Keys",
       errorRate: "Error Rate",
@@ -397,7 +421,8 @@
     usage: {
       eyebrow: "Audit Trail",
       title: "Usage Logs",
-      subtitle: "Audit and search all API call logs with multi-dimensional filters for quick navigation.",
+      subtitle:
+        "Audit and search all API call logs with multi-dimensional filters for quick navigation.",
       loading: "Loading...",
       visibleRows: "Visible Rows",
       successRows: "Successful Rows",
@@ -444,6 +469,13 @@
       all: "All",
       success: "Success",
       error: "Error",
+      protocolAll: "All Protocols",
+      protocolChat: "Chat",
+      protocolMessages: "Messages",
+      protocolResponses: "Responses",
+      streamAll: "All",
+      streamYes: "Yes",
+      streamNo: "No",
       pageSize: "Page Size",
       apply: "Apply",
       reset: "Reset",
@@ -454,6 +486,9 @@
     },
     keys: {
       title: "API Keys",
+      eyebrow: "Credentials",
+      subtitle:
+        "Manage upstream API keys with custom weight, proxy URL, and cooldown reset.",
       addKey: "Add Key",
       updateKey: "Edit Key Settings",
       keyValue: "Key Value",
@@ -473,6 +508,9 @@
     },
     tokens: {
       title: "Gateway Tokens",
+      eyebrow: "Access Tokens",
+      subtitle:
+        "Create gateway tokens with rate limiting and optional expiration.",
       createToken: "Create Token",
       name: "Name",
       namePlaceholder: "e.g. my-app",
@@ -488,6 +526,9 @@
     },
     models: {
       title: "Model Routes",
+      eyebrow: "Model Routes",
+      subtitle:
+        "Configure Go model routing table with upstream model IDs and protocols.",
       addModel: "Add Model Route",
       modelId: "Model ID",
       displayName: "Display Name",
@@ -504,6 +545,9 @@
     },
     mappings: {
       title: "Model Mappings",
+      eyebrow: "Model Mappings",
+      subtitle:
+        "Automatically rewrite client model names to upstream model names in real time.",
       addMapping: "Add Mapping",
       updateMapping: "Edit Mapping",
       sourceModel: "Client Model",
@@ -511,8 +555,10 @@
       addBtn: "Add Mapping",
       updateBtn: "Save",
       registered: "Configured Mappings ({count})",
-      description: "When a client requests a specific model, the gateway automatically maps it to the target model for seamless routing.",
-      modalHint: "Takes effect immediately. Example: map client-requested gpt-5.5 to glm-51.",
+      description:
+        "When a client requests a specific model, the gateway automatically maps it to the target model for seamless routing.",
+      modalHint:
+        "Takes effect immediately. Example: map client-requested gpt-5.5 to glm-51.",
       settings: "Settings",
       delete: "Delete",
       cancel: "Cancel",
@@ -522,6 +568,8 @@
       light: "Light",
     },
     common: {
+      cancel: "Cancel",
+      confirm: "Confirm",
       refresh: "Refresh",
       copied: "Copied",
       copyFailed: "Copy failed",
