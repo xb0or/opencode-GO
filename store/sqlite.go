@@ -38,9 +38,12 @@ type Token struct {
 	ID            uint       `gorm:"primaryKey" json:"id"`
 	Token         string     `gorm:"uniqueIndex;size:128;not null" json:"token"`
 	Name          string     `gorm:"size:128" json:"name"`
+	Description   string     `gorm:"size:512" json:"description"`
 	Enabled       bool       `gorm:"default:true" json:"enabled"`
 	AllowedGroups string     `gorm:"size:255" json:"allowed_groups"` // comma-separated; empty = all
 	RateLimit     int        `gorm:"default:0" json:"rate_limit"`    // req/min, 0 = unlimited
+	MaxRequests   int        `gorm:"default:0" json:"max_requests"`  // total request cap, 0 = unlimited
+	RequestsUsed  int        `gorm:"default:0" json:"requests_used"` // running count of proxied requests
 	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
 	CreatedAt     time.Time  `json:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at"`

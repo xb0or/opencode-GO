@@ -1,4 +1,4 @@
-package pool
+﻿package pool
 
 import (
 	"crypto/rand"
@@ -58,7 +58,7 @@ func AllTokens() ([]store.Token, error) {
 }
 
 // CreateToken inserts a new gateway token.
-func CreateToken(name, allowedGroups string, rateLimit int, expiresAt *time.Time) (*store.Token, error) {
+func CreateToken(name, allowedGroups string, rateLimit int, expiresAt *time.Time, opts ...TokenOption) (*store.Token, error) {
 	t := &store.Token{
 		Token:         GenerateToken(),
 		Name:          name,
@@ -67,8 +67,28 @@ func CreateToken(name, allowedGroups string, rateLimit int, expiresAt *time.Time
 		RateLimit:     rateLimit,
 		ExpiresAt:     expiresAt,
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
 	if err := store.DB().Create(t).Error; err != nil {
 		return nil, err
 	}
 	return t, nil
+}
+
+// TokenOption is a functional option for CreateToken.
+type TokenOption func(*store.Token)
+
+// WithMaxRequests sets the total request cap for the token.
+func WithMaxRequests(maxRequests int) TokenOption {
+	return func(t *store.Token) {
+		t.MaxRequests = maxRequests
+	}
+}
+
+// WithDescription sets a human-readable description for the token.
+func WithDescription(desc string) TokenOption {
+	return func(t *store.Token) {
+		t.Description = desc
+	}
 }

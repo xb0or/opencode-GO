@@ -1,4 +1,4 @@
-package api
+﻿package api
 
 import (
 	"net/http"
@@ -64,6 +64,33 @@ func RequireGroup() gin.HandlerFunc {
 				"error": gin.H{
 					"type":    "permission_denied",
 					"message": "this token is not allowed to use group: " + g,
+				},
+			})
+			return
+		}
+		c.Next()
+	}
+}
+
+// RequestLimitMiddleware enforces the per-token total request cap (MaxRequests).
+// Must run after Auth() so the token is available in context.
+func RequestLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tokAny, exists := c.Get("token")
+		if !exists {
+			c.Next()
+			return
+		}
+		tok, ok := tokAny.(*store.Token)
+		if !ok || tok == nil {
+			c.Next()
+			return
+		}
+		if tok.MaxRequests > 0 && tok.RequestsUsed >= tok.MaxRequests {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+				"error": gin.H{
+					"type":    "request_limit_exceeded",
+					"message": "this token has reached its total request limit",
 				},
 			})
 			return

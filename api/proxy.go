@@ -1,4 +1,4 @@
-package api
+﻿package api
 
 import (
 	"bufio"
@@ -17,6 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/opencode-sw/gateway/config"
+	"gorm.io/gorm"
 	"github.com/opencode-sw/gateway/pool"
 	"github.com/opencode-sw/gateway/protocol"
 	"github.com/opencode-sw/gateway/store"
@@ -693,6 +694,11 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 		if tok, ok := tokAny.(*store.Token); ok {
 			tokenID = tok.ID
 			tokenName = tok.Name
+			// Increment request counter for the token if it has a cap
+			if tok.MaxRequests > 0 {
+				store.DB().Model(&store.Token{}).Where("id = ?", tok.ID).
+					UpdateColumn("requests_used", gorm.Expr("requests_used + 1"))
+			}
 		}
 	}
 	if usage == nil {

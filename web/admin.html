@@ -799,29 +799,50 @@
                 <div class="table-wrap">
                   <table>
                     <tr>
+                      <th>{{t('table.active')}}</th>
                       <th>{{t('table.id')}}</th>
                       <th>{{t('table.token')}}</th>
                       <th>{{t('table.name')}}</th>
+                      <th>{{t('table.description')}}</th>
                       <th>{{t('table.rateLimit')}}</th>
+                      <th>{{t('table.requestLimit')}}</th>
                       <th>{{t('table.expires')}}</th>
                       <th>{{t('table.actions')}}</th>
                     </tr>
                     <tr v-for="tk in tokens" :key="tk.id">
-                      <td>{{tk.id}}</td>
-                      <td style="font-family: monospace; font-size: 12px">
-                        {{tk.token}}
-                      </td>
-                      <td>{{tk.name||'—'}}</td>
-                      <td>{{tk.rate_limit||t('tokens.unlimited')}}</td>
-                      <td style="font-size: 12px">
-                        {{tk.expires_at?fmtTime(tk.expires_at):t('tokens.never')}}
-                      </td>
                       <td>
+                        <label class="toggle"
+                          ><input
+                            type="checkbox"
+                            :checked="tk.enabled"
+                            @change="toggleToken(tk.id)" /><span
+                            class="slider"
+                          ></span
+                        ></label>
+                      </td>
+                      <td>{{tk.id}}</td>
+                      <td style="font-family: monospace; font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis;">
+                        {{tk.token}}
+                        <button class="btn btn-ghost btn-xs" style="margin-left:4px" @click="copyText(tk.token)">{{t('tokens.copy')}}</button>
+                      </td>
+                      <td>{{tk.name||"—"}}</td>
+                      <td style="font-size: 12px; max-width: 150px; overflow: hidden; text-overflow: ellipsis;">{{tk.description||"—"}}</td>
+                      <td>{{tk.rate_limit ? tk.rate_limit + ' req/min' : t('tokens.unlimited')}}</td>
+                      <td style="font-size: 12px">
+                        <template v-if="tk.max_requests">
+                          <span class="badge" :class="requestBadgeClass(tk)">{{requestUsedLabel(tk)}}</span>
+                        </template>
+                        <span v-else>{{t('tokens.unlimited')}}</span>
+                      </td>
+                      <td style="font-size: 12px">
+                        <span class="badge" :class="expiryBadgeClass(tk.expires_at)">{{fmtTokenExpiry(tk.expires_at)}}</span>
+                      </td>
+                      <td class="btn-group">
                         <button
                           class="btn btn-ghost btn-sm"
-                          @click="copyText(tk.token)"
+                          @click="openTokenSettings(tk)"
                         >
-                          {{t('tokens.copy')}}
+                          {{t('tokens.settings')}}
                         </button>
                         <button
                           class="btn btn-danger btn-sm"
@@ -834,101 +855,7 @@
                   </table>
                 </div>
               </div>
-            </div>
-
-            <!-- Models -->
-            <div v-if="page==='models'" class="models-page">
-              <div class="page-hero">
-                <div>
-                  <div class="eyebrow">{{t('models.eyebrow')}}</div>
-                  <h1>{{t('models.title')}}</h1>
-                  <p>{{t('models.subtitle')}}</p>
-                </div>
-                <div class="hero-actions">
-                  <button
-                    class="btn btn-ghost"
-                    @click="syncModels"
-                    :disabled="syncingModels"
-                  >
-                    {{syncingModels?t('models.syncing'):t('models.sync')}}
-                  </button>
-                  <button class="btn btn-primary" @click="openModal">
-                    {{t('models.addModel')}}
-                  </button>
-                </div>
-              </div>
-              <div class="card">
-                <h2>{{t('models.registered',{count:models.length})}}</h2>
-                <div class="table-wrap">
-                  <table>
-                    <tr>
-                      <th>{{t('table.active')}}</th>
-                      <th>{{t('table.id')}}</th>
-                      <th>{{t('table.name')}}</th>
-                      <th>{{t('table.protocol')}}</th>
-                      <th>{{t('table.context')}}</th>
-                      <th>{{t('table.priority')}}</th>
-                      <th>{{t('table.promptPrice')}}</th>
-                      <th>{{t('table.completionPrice')}}</th>
-                      <th>{{t('table.cachePrice')}}</th>
-                      <th>{{t('table.capabilities')}}</th>
-                      <th>{{t('table.actions')}}</th>
-                    </tr>
-                    <tr v-for="m in models" :key="m.id">
-                      <td>
-                        <label class="toggle"
-                          ><input
-                            type="checkbox"
-                            :checked="m.status!==0"
-                            @change="toggleModel(m.id)" /><span
-                            class="slider"
-                          ></span
-                        ></label>
-                      </td>
-                      <td><code>{{m.id}}</code></td>
-                      <td>{{m.name}}</td>
-                      <td>{{m.protocol}}</td>
-                      <td>{{fmtNumber(m.context_len || m.context_length)}}</td>
-                      <td>{{m.priority||0}}</td>
-                      <td>{{fmtPrice(m.pricing, 'prompt')}}</td>
-                      <td>{{fmtPrice(m.pricing, 'completion')}}</td>
-                      <td style="font-size: 12px">
-                        <div>{{fmtPrice(m.pricing, 'input_cache_read')}}</div>
-                        <div style="color: var(--muted)">
-                          {{fmtPrice(m.pricing, 'input_cache_write')}}
-                        </div>
-                      </td>
-                      <td>
-                        <span
-                          v-for="cap in fmtCapabilities(m)"
-                          :key="m.id + '-' + cap"
-                          class="badge badge-accent capability-badge"
-                        >
-                          {{capabilityLabel(cap)}}
-                        </span>
-                      </td>
-                      <td class="btn-group">
-                        <button
-                          class="btn btn-ghost btn-sm"
-                          @click="openModelSettings(m)"
-                        >
-                          {{t('models.settings')}}
-                        </button>
-                        <button
-                          class="btn btn-danger btn-sm"
-                          @click="deleteModel(m.id)"
-                        >
-                          {{t('models.delete')}}
-                        </button>
-                      </td>
-                    </tr>
-                  </table>
-                </div>
-              </div>
-            </div>
-
-            <!-- Model Mappings -->
-            <div v-if="page==='mappings'" class="mappings-page">
+            </div><div v-if="page==='mappings'" class="mappings-page">
               <div class="page-hero">
                 <div>
                   <div class="eyebrow">{{t('mappings.eyebrow')}}</div>
@@ -1130,7 +1057,7 @@
         @click.self="closeTokenModal"
       >
         <div class="modal">
-          <h2>{{t('tokens.createToken')}}</h2>
+          <h2>{{editingTokenId ? t('tokens.editToken') : t('tokens.createToken')}}</h2>
           <div class="form-row">
             <div class="form-group">
               <label>{{t('tokens.name')}}</label>
@@ -1140,6 +1067,15 @@
               />
             </div>
             <div class="form-group">
+              <label>{{t('tokens.description')}}</label>
+              <input
+                v-model="newToken.description"
+                :placeholder="t('tokens.descPlaceholder')"
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
               <label>{{t('tokens.rateLimit')}}</label>
               <input
                 v-model.number="newToken.rate_limit"
@@ -1148,13 +1084,31 @@
                 :placeholder="t('tokens.ratePlaceholder')"
               />
             </div>
+            <div class="form-group">
+              <label>{{t('tokens.maxRequests')}}</label>
+              <input
+                v-model.number="newToken.max_requests"
+                type="number"
+                min="0"
+                :placeholder="t('tokens.maxPlaceholder')"
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>{{t('tokens.expiresAt')}}</label>
+              <input
+                v-model="newToken.expires_at"
+                type="datetime-local"
+              />
+            </div>
           </div>
           <div class="btn-group">
             <button class="btn btn-ghost" @click="closeTokenModal">
               {{t('common.cancel')}}
             </button>
             <button class="btn btn-primary" @click="addToken">
-              {{t('tokens.create')}}
+              {{editingTokenId ? t('tokens.updateBtn') : t('tokens.create')}}
             </button>
           </div>
         </div>
