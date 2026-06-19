@@ -79,6 +79,9 @@ createApp({
     }
 
     function fmtCapabilities(model) {
+      if (Array.isArray(model.tags) && model.tags.length) {
+        return model.tags;
+      }
       const modalities = model.architecture?.input_modalities || [];
       const params = model.supported_parameters || [];
       const caps = [];
@@ -344,11 +347,16 @@ createApp({
       models: models.models,
       newModel: models.newModel,
       showModal: models.showModal,
+      editingModelId: models.editingId,
+      syncingModels: models.syncing,
       availableModels: models.availableModels,
       openModal: models.openModal,
+      openModelSettings: models.openModelSettings,
       closeModal: models.closeModal,
       loadModels: models.load,
+      syncModels: models.syncCatalog,
       addModel: models.add,
+      toggleModel: models.toggle,
       deleteModel: models.remove,
 
       // 模型映射管理

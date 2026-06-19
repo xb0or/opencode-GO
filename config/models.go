@@ -37,6 +37,11 @@ type ModelRoute struct {
 	RealModel           string             `json:"real_model"`                      // upstream model id, e.g. "glm-5.1"
 	Group               string             `json:"group"`                           // logical KEY-pool group, e.g. "go"
 	ContextLen          int                `json:"context_len"`                     // optional context window hint
+	Status              *int               `json:"status,omitempty"`                // 0 disabled, 1 enabled; nil defaults to enabled
+	Priority            int                `json:"priority"`                        // optional admin-defined display/routing priority
+	Tags                []string           `json:"tags,omitempty"`                  // normalized capability tags
+	IsCustomized        bool               `json:"is_customized,omitempty"`         // true when admin edited protected fields
+	CustomizedFields    []string           `json:"customized_fields,omitempty"`     // fields protected from automatic sync
 	OpenRouterID        string             `json:"openrouter_id,omitempty"`         // matched OpenRouter model id
 	OpenRouterName      string             `json:"openrouter_name,omitempty"`       // matched OpenRouter display name
 	OpenRouterMatchedBy string             `json:"openrouter_matched_by,omitempty"` // matching strategy used during enrichment
@@ -54,6 +59,22 @@ type ModelArchitecture struct {
 	OutputModalities []string `json:"output_modalities,omitempty"`
 	Tokenizer        string   `json:"tokenizer,omitempty"`
 	InstructType     string   `json:"instruct_type,omitempty"`
+}
+
+const (
+	ModelStatusDisabled = 0
+	ModelStatusEnabled  = 1
+)
+
+// ModelStatusPtr returns a pointer suitable for ModelRoute.Status.
+func ModelStatusPtr(status int) *int {
+	v := status
+	return &v
+}
+
+// IsEnabled reports whether a route should be visible and callable.
+func (m ModelRoute) IsEnabled() bool {
+	return m.Status == nil || *m.Status != ModelStatusDisabled
 }
 
 var (
@@ -79,6 +100,18 @@ func RegisterModels(ms []ModelRoute) {
 	}
 }
 
+// ReplaceModels replaces the in-memory route table with the supplied routes.
+func ReplaceModels(ms []ModelRoute) {
+	next := make(map[string]ModelRoute, len(ms))
+	for _, m := range ms {
+		applyLocalModelDefaults(&m)
+		next[m.ID] = m
+	}
+	routesMu.Lock()
+	defer routesMu.Unlock()
+	routes = next
+}
+
 // LookupModel returns the route for a model id and whether it existed.
 func LookupModel(id string) (ModelRoute, bool) {
 	routesMu.RLock()
@@ -95,6 +128,21 @@ func AllModels() []ModelRoute {
 	for _, m := range routes {
 		out = append(out, m)
 	}
+	sortModelRoutes(out)
+	return out
+}
+
+// AllEnabledModels returns all registered routes that are currently enabled.
+func AllEnabledModels() []ModelRoute {
+	routesMu.RLock()
+	defer routesMu.RUnlock()
+	out := make([]ModelRoute, 0, len(routes))
+	for _, m := range routes {
+		if m.IsEnabled() {
+			out = append(out, m)
+		}
+	}
+	sortModelRoutes(out)
 	return out
 }
 
@@ -157,7 +205,7 @@ func EnrichModelsFromOpenRouter() {
 	}
 
 	var payload struct {
-		Data []openRouterModel `json:"data"`
+		Data []OpenRouterModel `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		log.Printf("warn: cannot decode OpenRouter model metadata: %v", err)
@@ -170,14 +218,16 @@ func EnrichModelsFromOpenRouter() {
 	routesMu.Lock()
 	defer routesMu.Unlock()
 	for id, route := range routes {
-		if matched, matchedBy, ok := matchOpenRouterModel(route, payload.Data); ok {
-			applyOpenRouterMetadata(&route, matched, matchedBy)
+		if matched, matchedBy, ok := MatchOpenRouterModel(route, payload.Data); ok {
+			ApplyOpenRouterMetadata(&route, matched, matchedBy)
 			routes[id] = route
 		}
 	}
 }
 
-type openRouterModel struct {
+// OpenRouterModel is the subset of OpenRouter model metadata used for catalog
+// enrichment.
+type OpenRouterModel struct {
 	ID                  string             `json:"id"`
 	CanonicalSlug       string             `json:"canonical_slug"`
 	Name                string             `json:"name"`
@@ -189,11 +239,13 @@ type openRouterModel struct {
 	KnowledgeCutoff     string             `json:"knowledge_cutoff"`
 }
 
-func matchOpenRouterModel(route ModelRoute, candidates []openRouterModel) (openRouterModel, string, bool) {
+type openRouterModel = OpenRouterModel
+
+func MatchOpenRouterModel(route ModelRoute, candidates []OpenRouterModel) (OpenRouterModel, string, bool) {
 	keys := []string{route.RealModel, route.ID, route.Name}
 	bestScore := 0
 	bestBy := ""
-	var best openRouterModel
+	var best OpenRouterModel
 	for _, candidate := range candidates {
 		score, matchedBy := matchScore(keys, candidate)
 		if score > bestScore || (score == bestScore && score > 0 && candidate.ID < best.ID) {
@@ -205,7 +257,11 @@ func matchOpenRouterModel(route ModelRoute, candidates []openRouterModel) (openR
 	return best, bestBy, bestScore >= 80
 }
 
-func matchScore(keys []string, candidate openRouterModel) (int, string) {
+func matchOpenRouterModel(route ModelRoute, candidates []openRouterModel) (openRouterModel, string, bool) {
+	return MatchOpenRouterModel(route, candidates)
+}
+
+func matchScore(keys []string, candidate OpenRouterModel) (int, string) {
 	fields := []struct {
 		name  string
 		value string
@@ -250,19 +306,30 @@ func normalizeModelKey(s string) string {
 	return modelKeyCleaner.ReplaceAllString(strings.ToLower(s), "")
 }
 
-func applyOpenRouterMetadata(route *ModelRoute, metadata openRouterModel, matchedBy string) {
+// ApplyOpenRouterMetadata attaches OpenRouter metadata to a route without
+// overwriting admin-customized protected fields.
+func ApplyOpenRouterMetadata(route *ModelRoute, metadata OpenRouterModel, matchedBy string) {
 	route.OpenRouterID = metadata.ID
 	route.OpenRouterName = metadata.Name
 	route.OpenRouterMatchedBy = matchedBy
-	if metadata.ContextLength > 0 {
+	if metadata.ContextLength > 0 && !IsModelFieldCustomized(*route, "context_len") {
 		route.ContextLen = metadata.ContextLength
 	}
 	route.Architecture = metadata.Architecture
-	route.Pricing = metadata.Pricing
+	if !IsModelFieldCustomized(*route, "pricing") {
+		route.Pricing = copyStringMap(metadata.Pricing)
+	}
 	route.SupportedParameters = append([]string(nil), metadata.SupportedParameters...)
 	sort.Strings(route.SupportedParameters)
+	if !IsModelFieldCustomized(*route, "tags") {
+		route.Tags = DeriveModelTags(*route, metadata)
+	}
 	route.Description = metadata.Description
 	route.KnowledgeCutoff = metadata.KnowledgeCutoff
+}
+
+func applyOpenRouterMetadata(route *ModelRoute, metadata openRouterModel, matchedBy string) {
+	ApplyOpenRouterMetadata(route, metadata, matchedBy)
 }
 
 func applyLocalModelDefaults(route *ModelRoute) {
@@ -278,4 +345,151 @@ func applyLocalModelDefaults(route *ModelRoute) {
 	if route.Name == "" {
 		route.Name = route.ID
 	}
+	if route.Status == nil {
+		route.Status = ModelStatusPtr(ModelStatusEnabled)
+	}
+	if route.Tags != nil {
+		route.Tags = NormalizeModelTags(route.Tags)
+	}
+	route.CustomizedFields = NormalizeCustomizedFields(route.CustomizedFields)
+	route.IsCustomized = route.IsCustomized || len(route.CustomizedFields) > 0
+}
+
+// IsModelFieldCustomized reports whether automatic sync should preserve a
+// locally edited field.
+func IsModelFieldCustomized(route ModelRoute, field string) bool {
+	field = normalizeCustomizedField(field)
+	for _, f := range route.CustomizedFields {
+		if normalizeCustomizedField(f) == field {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizeCustomizedFields returns a sorted, de-duplicated field list.
+func NormalizeCustomizedFields(fields []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = normalizeCustomizedField(field)
+		if field == "" || seen[field] {
+			continue
+		}
+		seen[field] = true
+		out = append(out, field)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeCustomizedField(field string) string {
+	field = strings.TrimSpace(strings.ToLower(field))
+	switch field {
+	case "context_length":
+		return "context_len"
+	case "capabilities", "capability":
+		return "tags"
+	case "price", "prices", "billing", "billing_rates":
+		return "pricing"
+	case "display_name":
+		return "name"
+	default:
+		return field
+	}
+}
+
+// NormalizeModelTags returns sorted, de-duplicated capability tags.
+func NormalizeModelTags(tags []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		tag = strings.TrimSpace(strings.ToLower(tag))
+		tag = strings.ReplaceAll(tag, "_", "-")
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		out = append(out, tag)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// DeriveModelTags turns OpenRouter metadata into simple user-facing capability
+// tags used by the admin UI and public model catalog.
+func DeriveModelTags(route ModelRoute, metadata OpenRouterModel) []string {
+	var tags []string
+	modalities := append([]string{}, metadata.ArchitectureInputModalities()...)
+	if len(modalities) == 0 && route.Architecture != nil {
+		modalities = append(modalities, route.Architecture.InputModalities...)
+	}
+	if len(modalities) == 0 {
+		tags = append(tags, "text")
+	}
+	for _, modality := range modalities {
+		switch strings.ToLower(strings.TrimSpace(modality)) {
+		case "text":
+			tags = append(tags, "text")
+		case "image":
+			tags = append(tags, "vision")
+		case "video":
+			tags = append(tags, "video")
+		case "audio":
+			tags = append(tags, "audio")
+		}
+	}
+	params := append([]string{}, metadata.SupportedParameters...)
+	if len(params) == 0 {
+		params = append(params, route.SupportedParameters...)
+	}
+	for _, p := range params {
+		switch strings.ToLower(strings.TrimSpace(p)) {
+		case "tools", "tool_choice":
+			tags = append(tags, "tools")
+		case "structured_outputs", "response_format":
+			tags = append(tags, "structured")
+		case "reasoning", "include_reasoning":
+			tags = append(tags, "reasoning")
+		}
+	}
+	haystack := strings.ToLower(route.ID + " " + route.Name + " " + route.RealModel + " " + metadata.ID + " " + metadata.Name + " " + metadata.Description)
+	if strings.Contains(haystack, "code") || strings.Contains(haystack, "coder") || strings.Contains(haystack, "coding") {
+		tags = append(tags, "code")
+	}
+	if strings.Contains(haystack, "reason") || strings.Contains(haystack, "thinking") {
+		tags = append(tags, "reasoning")
+	}
+	return NormalizeModelTags(tags)
+}
+
+// ArchitectureInputModalities safely returns OpenRouter input modalities.
+func (m OpenRouterModel) ArchitectureInputModalities() []string {
+	if m.Architecture == nil {
+		return nil
+	}
+	return m.Architecture.InputModalities
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func sortModelRoutes(ms []ModelRoute) {
+	sort.SliceStable(ms, func(i, j int) bool {
+		if ms[i].Priority != ms[j].Priority {
+			return ms[i].Priority > ms[j].Priority
+		}
+		if ms[i].Name != ms[j].Name {
+			return strings.ToLower(ms[i].Name) < strings.ToLower(ms[j].Name)
+		}
+		return ms[i].ID < ms[j].ID
+	})
 }

@@ -1,17 +1,19 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/opencode-sw/gateway/admin"
 	"github.com/opencode-sw/gateway/api"
 	"github.com/opencode-sw/gateway/config"
+	"github.com/opencode-sw/gateway/modelsync"
 	"github.com/opencode-sw/gateway/pool"
 	"github.com/opencode-sw/gateway/store"
 	"github.com/opencode-sw/gateway/web"
@@ -29,7 +31,20 @@ func main() {
 	// Load model routes from DB; seed defaults if DB is empty.
 	loadModelRoutes()
 	loadModelMappings()
-	config.EnrichModelsFromOpenRouter()
+	if result, err := modelsync.Sync(context.Background(), modelsync.Options{}); err != nil {
+		log.Printf("warn: model catalog sync failed: %v", err)
+	} else {
+		log.Printf("synced model catalog: opencode=%d openrouter=%d matched=%d created=%d updated=%d warnings=%v",
+			result.OpenCodeCount, result.OpenRouterCount, result.MatchedCount, result.CreatedCount, result.UpdatedCount, result.Warnings)
+	}
+	modelsync.StartBackground(context.Background(), 6*time.Hour, modelsync.Options{}, func(result modelsync.Result, err error) {
+		if err != nil {
+			log.Printf("warn: background model catalog sync failed: %v", err)
+			return
+		}
+		log.Printf("background model catalog synced: opencode=%d matched=%d created=%d updated=%d warnings=%v",
+			result.OpenCodeCount, result.MatchedCount, result.CreatedCount, result.UpdatedCount, result.Warnings)
+	})
 
 	// Release mode in production.
 	if os.Getenv("GIN_MODE") == "" {
@@ -95,46 +110,32 @@ func loadModelRoutes() {
 	if len(rows) == 0 {
 		// First run: seed defaults into DB.
 		for _, m := range defaults {
-			store.SaveModelRoute(&store.ModelRouteRow{
-			ID: m.ID, Name: m.Name, Upstream: string(m.Upstream),
-			Protocol: string(m.Protocol), RealModel: m.RealModel,
-			Group: m.Group, ContextLen: m.ContextLen,
-		})
+			row := store.NewModelRouteRow(m)
+			store.SaveModelRoute(&row)
 		}
-		config.RegisterModels(defaults)
+		config.ReplaceModels(defaults)
 		log.Printf("seeded %d default model routes into DB", len(defaults))
 		return
 	}
 	// Load from DB into config.
-	allowed := map[string]bool{}
-	for _, m := range defaults {
-		allowed[m.ID] = true
-	}
 	var routes []config.ModelRoute
 	for _, r := range rows {
-		if r.Upstream != string(config.UpstreamGo) || r.Group != "go" || !allowed[r.ID] {
+		if r.Upstream != string(config.UpstreamGo) || r.Group != "go" {
 			continue
 		}
-		routes = append(routes, config.ModelRoute{
-			ID: r.ID, Name: r.Name, Upstream: config.Upstream(r.Upstream),
-			Protocol: config.Protocol(r.Protocol), RealModel: r.RealModel,
-			Group: r.Group, ContextLen: r.ContextLen,
-		})
+		routes = append(routes, store.ModelRouteFromRow(r))
 	}
 	if len(routes) == 0 {
 		defaults := config.DefaultModels()
 		for _, m := range defaults {
-			store.SaveModelRoute(&store.ModelRouteRow{
-				ID: m.ID, Name: m.Name, Upstream: string(m.Upstream),
-				Protocol: string(m.Protocol), RealModel: m.RealModel,
-				Group: m.Group, ContextLen: m.ContextLen,
-			})
+			row := store.NewModelRouteRow(m)
+			store.SaveModelRoute(&row)
 		}
-		config.RegisterModels(defaults)
+		config.ReplaceModels(defaults)
 		log.Printf("seeded %d default Go model routes into DB", len(defaults))
 		return
 	}
-	config.RegisterModels(routes)
+	config.ReplaceModels(routes)
 	log.Printf("loaded %d model routes from DB", len(rows))
 }
 
@@ -159,23 +160,4 @@ func ensureBootstrapToken() {
 	fmt.Printf("   %s\n", t.Token)
 	fmt.Println(" Use this as the api key in opencode / clients.")
 	fmt.Println("==================================================")
-}
-
-// encodeCaps serializes a string slice to JSON for DB storage.
-func encodeCaps(caps []string) string {
-	if len(caps) == 0 {
-		return ""
-	}
-	b, _ := json.Marshal(caps)
-	return string(b)
-}
-
-// decodeCaps deserializes capabilities from DB.
-func decodeCaps(s string) []string {
-	if s == "" {
-		return nil
-	}
-	var caps []string
-	json.Unmarshal([]byte(s), &caps)
-	return caps
 }

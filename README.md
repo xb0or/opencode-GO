@@ -83,17 +83,32 @@ curl localhost:3000/v1/models
 
 ## OpenCode Go models
 
-The default Go catalog includes:
+The gateway keeps a SQLite-backed Go model catalog. On first run it seeds a
+small local fallback list, then synchronizes from the live OpenCode Go endpoint:
 
 - Chat Completions: `glm-5.1`, `glm-5`, `kimi-k2.7-code`, `kimi-k2.6`, `mimo-v2.5`, `mimo-v2.5-pro`, `deepseek-v4-pro`, `deepseek-v4-flash`
 - Messages: `minimax-m3`, `minimax-m2.7`, `minimax-m2.5`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`
 
-At startup the gateway best-effort enriches the in-memory model catalog from
-`https://openrouter.ai/api/v1/models`. The matching result adds context length,
-architecture metadata, supported parameters, pricing, description, and knowledge
-cutoff to `GET /v1/models` and to the admin model table. Internal upstream
-model ids and OpenRouter match ids are not shown in the admin catalog view. If
-OpenRouter is unavailable, startup continues with the local catalog.
+The synchronizer:
+
+1. Fetches `https://opencode.ai/zen/go/v1/models` as the authoritative base
+   model list.
+2. Fetches `https://openrouter.ai/api/v1/models` and best-effort matches by
+   model id/name/slug, including provider-prefixed ids such as
+   `openai/gpt-4o`.
+3. Persists context length, architecture metadata, supported parameters,
+   pricing, description, knowledge cutoff, and derived capability tags.
+
+Startup performs one best-effort sync and then repeats it in the background
+every 6 hours. Admins can also click **Sync Models** on the Models page. If
+OpenRouter is unavailable, the OpenCode base list is still saved and startup
+continues.
+
+Admins can disable a model in the model table. Disabled models are hidden from
+`GET /v1/models` and rejected by proxy endpoints with `model_disabled`. Manual
+edits to display name, protocol/real model, context length, priority, pricing,
+and tags are recorded as customized fields and are not overwritten by later
+automatic syncs.
 
 Go usage limits are value-based: 5-hour `$12`, weekly `$30`, and monthly `$60`. Request counts vary by model cost. If limits are reached, the upstream service may fall back to balance usage when enabled in the OpenCode console.
 
@@ -197,7 +212,7 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 - **Dashboard** — total calls, key/token counts, avg latency, calls-by-model chart, calls-by-protocol chart, recent call log
 - **API Keys** — add/remove/toggle keys, edit key value/label/weight/proxy settings, reset cooldown, view fail counts and usage
 - **Tokens** — create/delete/copy `sk-` gateway tokens with optional rate limits
-- **Models** — manage the Go model routing table and view OpenRouter-enriched context length, input/output/cache pricing, and capability tags
+- **Models** — sync the Go model catalog, enable/disable models, edit display name/protocol/context/priority/pricing/tags, and view OpenRouter-enriched metadata
 - **Model Mappings** — manage client model → upstream model rewrite rules, persisted in SQLite and applied immediately
 
 ### Admin Panel UI
@@ -239,6 +254,8 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 ├── config/              # Env-based config + model routing table
 │   ├── config.go
 │   └── models.go
+├── modelsync/           # OpenCode + OpenRouter catalog synchronization
+│   └── sync.go
 ├── store/               # SQLite models (Key, Token, UsageLog)
 │   └── sqlite.go
 ├── pool/                # Key pool (weighted picker, cooldown) + token mgmt
