@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -693,6 +693,7 @@
                       <th>{{t('table.proxy')}}</th>
                       <th>{{t('table.cooldown')}}</th>
                       <th>{{t('table.usage')}}</th>
+                      <th>Go 限额</th>
                       <th>{{t('table.actions')}}</th>
                     </tr>
                     <tr v-for="k in keys" :key="k.id">
@@ -733,6 +734,26 @@
                         {{k.cooldown_until?fmtTime(k.cooldown_until):'—'}}
                       </td>
                       <td>{{k.usage_count}}</td>
+                      <td style="font-size: 11px; white-space: nowrap;">
+                        <span v-if="quotaLoading[k.id]" style="color:var(--muted)">加载中...</span>
+                        <template v-else-if="quotaData[k.id]">
+                          <template v-if="quotaData[k.id].configured && quotaData[k.id].quota">
+                            <div style="margin-bottom:2px">
+                              <span :class="'badge ' + quotaBadgeClass(quotaData[k.id].quota.weekly.usagePercent)">
+                                周 {{quotaData[k.id].quota.weekly.usagePercent}}%
+                              </span>
+                              <span :class="'badge ' + quotaBadgeClass(quotaData[k.id].quota.monthly.usagePercent)" style="margin-left:2px">
+                                月 {{quotaData[k.id].quota.monthly.usagePercent}}%
+                              </span>
+                            </div>
+                          </template>
+                          <template v-else-if="quotaData[k.id].configured">
+                            <span class="badge badge-red">查询失败</span>
+                          </template>
+                          <span v-else class="badge badge-blue" style="cursor:pointer" @click.stop="fetchQuota(k.id)">查询</span>
+                        </template>
+                        <button v-else class="btn btn-ghost btn-xs" style="font-size:11px;padding:1px 6px" @click.stop="fetchQuota(k.id)">查询</button>
+                      </td>
                       <td class="btn-group">
                         <button
                           class="btn btn-ghost btn-sm"
@@ -1177,6 +1198,26 @@
               <input
                 v-model="newKey.proxy_url"
                 placeholder="http://proxy:8080"
+              />
+            </div>
+          </div>
+          <div style="border-top:1px solid var(--border);margin:8px 0"></div>
+          <h3 style="margin:8px 0;font-size:14px">Go 订阅限额查询（可选）</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Cookie</label>
+              <input
+                v-model="newKey.cookie"
+                placeholder="auth=Fe26.2..."
+              />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Workspace ID</label>
+              <input
+                v-model="newKey.workspace_id"
+                placeholder="wsp_xxx"
               />
             </div>
           </div>
