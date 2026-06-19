@@ -1211,8 +1211,9 @@ func fetchKeyQuota(c *gin.Context) {
 	}
 
 	workspaceID := strings.TrimSpace(k.WorkspaceID)
+	var result *GoQuotaResponse
 	if workspaceID == "" {
-		workspaces, err := fetchOpenCodeWorkspaces(cookie)
+		resolvedWorkspaceID, resolvedResult, err := resolveWorkspaceForQuota(cookie)
 		if err != nil {
 			c.JSON(http.StatusOK, gin.H{
 				"configured": true,
@@ -1221,7 +1222,8 @@ func fetchKeyQuota(c *gin.Context) {
 			})
 			return
 		}
-		workspaceID = workspaces[0].ID
+		workspaceID = resolvedWorkspaceID
+		result = resolvedResult
 		store.DB().Model(&store.Key{}).Where("id = ?", k.ID).Updates(map[string]any{
 			"cookie":       cookie,
 			"workspace_id": workspaceID,
@@ -1241,7 +1243,10 @@ func fetchKeyQuota(c *gin.Context) {
 		maskedCookie = "****"
 	}
 
-	result, err := fetchGoQuota(cookie, workspaceID)
+	var err error
+	if result == nil {
+		result, err = fetchGoQuota(cookie, workspaceID)
+	}
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"configured":  true,

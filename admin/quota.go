@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -32,9 +33,12 @@ type GoQuotaBucket struct {
 // serverRefHash values are fixed server reference hashes observed from opencode.ai.
 const quotaServerHash = "c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229bab753498cd"
 const workspacesServerHash = "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f"
+const maxServerFnInstance = 80
 
 var authCookiePattern = regexp.MustCompile(`(?i)(?:^|[;\s])auth=([^;\s]+)`)
 var workspaceIDPattern = regexp.MustCompile(`(?i)"(?:workspace[_-]?id|workspaceID|id)"\s*:\s*"([^";\s]+)"`)
+var quotedStringPattern = regexp.MustCompile(`"([^"\\]*(?:\\.[^"\\]*)*)"`)
+var workspaceCandidatePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{5,127}$`)
 
 // normalizeAuthCookie accepts pasted browser cookie/header fragments and returns
 // the minimal Cookie header value required by opencode.ai quota RPC: auth=<token>.
@@ -70,7 +74,8 @@ func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
 	}
 
 	var lastErr error
-	for instance := 0; instance < 6; instance++ {
+	seen := map[string]OpenCodeWorkspace{}
+	for instance := 0; instance <= maxServerFnInstance; instance++ {
 		req, err := http.NewRequest(http.MethodPost, "https://opencode.ai/_server", nil)
 		if err != nil {
 			return nil, fmt.Errorf("build workspaces request: %w", err)
@@ -100,10 +105,13 @@ func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
 			lastErr = err
 			continue
 		}
-		if len(workspaces) > 0 {
-			return workspaces, nil
+		for _, ws := range workspaces {
+			addWorkspaceCandidate(seen, ws.ID, ws.Name)
 		}
-		lastErr = fmt.Errorf("workspace list is empty")
+	}
+	out := workspaceCandidateList(seen)
+	if len(out) > 0 {
+		return out, nil
 	}
 	if lastErr != nil {
 		return nil, lastErr
@@ -111,15 +119,42 @@ func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
 	return nil, fmt.Errorf("workspace list is empty")
 }
 
+func resolveWorkspaceForQuota(cookie string) (string, *GoQuotaResponse, error) {
+	workspaces, err := fetchOpenCodeWorkspaces(cookie)
+	if err != nil {
+		return "", nil, err
+	}
+	var lastErr error
+	for _, ws := range workspaces {
+		result, err := fetchGoQuota(cookie, ws.ID)
+		if err == nil && result != nil {
+			return ws.ID, result, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return "", nil, fmt.Errorf("found %d workspace candidates but quota validation failed: %w", len(workspaces), lastErr)
+	}
+	return "", nil, fmt.Errorf("workspace list is empty")
+}
+
 func parseOpenCodeWorkspaces(raw []byte) ([]OpenCodeWorkspace, error) {
+	seen := map[string]OpenCodeWorkspace{}
 	payload, err := decodeFirstJSONValue(raw)
 	if err == nil {
-		if workspaces := collectOpenCodeWorkspaces(payload); len(workspaces) > 0 {
-			return workspaces, nil
+		for _, ws := range collectOpenCodeWorkspaces(payload) {
+			addWorkspaceCandidate(seen, ws.ID, ws.Name)
+		}
+		for _, id := range collectStringCandidatesFromJSON(payload) {
+			addWorkspaceCandidate(seen, id, "")
 		}
 	}
-	if workspaces := collectWorkspaceIDsFromText(string(raw)); len(workspaces) > 0 {
-		return workspaces, nil
+	for _, ws := range collectWorkspaceIDsFromText(string(raw)) {
+		addWorkspaceCandidate(seen, ws.ID, ws.Name)
+	}
+	out := workspaceCandidateList(seen)
+	if len(out) > 0 {
+		return out, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("decode workspaces response: %w", err)
@@ -151,25 +186,23 @@ func decodeFirstJSONValue(raw []byte) (any, error) {
 }
 
 func collectWorkspaceIDsFromText(raw string) []OpenCodeWorkspace {
-	seen := map[string]bool{}
-	var out []OpenCodeWorkspace
+	seen := map[string]OpenCodeWorkspace{}
 	for _, match := range workspaceIDPattern.FindAllStringSubmatch(raw, -1) {
-		if len(match) != 2 {
-			continue
+		if len(match) == 2 {
+			addWorkspaceCandidate(seen, match[1], "")
 		}
-		id := strings.TrimSpace(match[1])
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		out = append(out, OpenCodeWorkspace{ID: id})
 	}
-	return out
+	for _, match := range quotedStringPattern.FindAllStringSubmatch(raw, -1) {
+		if len(match) == 2 {
+			candidate := strings.ReplaceAll(match[1], `\"`, `"`)
+			addWorkspaceCandidate(seen, candidate, "")
+		}
+	}
+	return workspaceCandidateList(seen)
 }
 
 func collectOpenCodeWorkspaces(v any) []OpenCodeWorkspace {
-	seen := map[string]bool{}
-	var out []OpenCodeWorkspace
+	seen := map[string]OpenCodeWorkspace{}
 	var walk func(any)
 	walk = func(x any) {
 		switch value := x.(type) {
@@ -179,12 +212,33 @@ func collectOpenCodeWorkspaces(v any) []OpenCodeWorkspace {
 			}
 		case map[string]any:
 			id, _ := value["id"].(string)
-			id = strings.TrimSpace(id)
-			if id != "" && !seen[id] {
-				name := firstStringField(value, "name", "title", "slug")
-				out = append(out, OpenCodeWorkspace{ID: id, Name: name})
-				seen[id] = true
+			name := firstStringField(value, "name", "title", "slug")
+			addWorkspaceCandidate(seen, id, name)
+			for _, item := range value {
+				walk(item)
 			}
+		}
+	}
+	walk(v)
+	return workspaceCandidateList(seen)
+}
+
+func collectStringCandidatesFromJSON(v any) []string {
+	seen := map[string]bool{}
+	var out []string
+	var walk func(any)
+	walk = func(x any) {
+		switch value := x.(type) {
+		case string:
+			if !seen[value] && looksLikeWorkspaceCandidate(value) {
+				seen[value] = true
+				out = append(out, value)
+			}
+		case []any:
+			for _, item := range value {
+				walk(item)
+			}
+		case map[string]any:
 			for _, item := range value {
 				walk(item)
 			}
@@ -192,6 +246,69 @@ func collectOpenCodeWorkspaces(v any) []OpenCodeWorkspace {
 	}
 	walk(v)
 	return out
+}
+
+func addWorkspaceCandidate(seen map[string]OpenCodeWorkspace, id, name string) {
+	id = strings.TrimSpace(id)
+	if !looksLikeWorkspaceCandidate(id) {
+		return
+	}
+	if existing, ok := seen[id]; ok {
+		if existing.Name == "" && strings.TrimSpace(name) != "" {
+			existing.Name = strings.TrimSpace(name)
+			seen[id] = existing
+		}
+		return
+	}
+	seen[id] = OpenCodeWorkspace{ID: id, Name: strings.TrimSpace(name)}
+}
+
+func workspaceCandidateList(seen map[string]OpenCodeWorkspace) []OpenCodeWorkspace {
+	out := make([]OpenCodeWorkspace, 0, len(seen))
+	for _, ws := range seen {
+		out = append(out, ws)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return workspaceCandidateScore(out[i].ID) > workspaceCandidateScore(out[j].ID)
+	})
+	if len(out) > 50 {
+		out = out[:50]
+	}
+	return out
+}
+
+func workspaceCandidateScore(id string) int {
+	lower := strings.ToLower(id)
+	score := 0
+	if strings.Contains(lower, "workspace") || strings.HasPrefix(lower, "wsp_") || strings.HasPrefix(lower, "ws_") {
+		score += 100
+	}
+	if strings.Contains(lower, "user") || strings.Contains(lower, "session") || strings.Contains(lower, "token") {
+		score -= 100
+	}
+	if len(id) >= 16 {
+		score += 10
+	}
+	return score
+}
+
+func looksLikeWorkspaceCandidate(id string) bool {
+	if !workspaceCandidatePattern.MatchString(id) {
+		return false
+	}
+	lower := strings.ToLower(id)
+	blocked := map[string]bool{
+		"rollingusage": true, "weeklyusage": true, "monthlyusage": true,
+		"usebalance": true, "configured": true, "workspace": true,
+		"workspaceid": true, "server-fn": true,
+	}
+	if blocked[lower] {
+		return false
+	}
+	if strings.HasPrefix(lower, "http") || strings.Contains(lower, ".") {
+		return false
+	}
+	return true
 }
 
 func firstStringField(m map[string]any, keys ...string) string {
@@ -222,6 +339,22 @@ func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
 		return nil, nil
 	}
 
+	var lastErr error
+	for instance := 0; instance <= maxServerFnInstance; instance++ {
+		result, err := fetchGoQuotaWithInstance(cookie, workspaceID, instance)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return result, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("unexpected response (cookie may be invalid or expired)")
+}
+
+func fetchGoQuotaWithInstance(cookie, workspaceID string, instance int) (*GoQuotaResponse, error) {
 	body := serovalString(workspaceID)
 	req, err := http.NewRequest(http.MethodPost, "https://opencode.ai/_server", bytes.NewReader(body))
 	if err != nil {
@@ -229,7 +362,7 @@ func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Server-Id", quotaServerHash)
-	req.Header.Set("X-Server-Instance", "server-fn:0")
+	req.Header.Set("X-Server-Instance", fmt.Sprintf("server-fn:%d", instance))
 	req.Header.Set("Cookie", cookie)
 
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -253,7 +386,6 @@ func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
 	if errMsg := result.Error; errMsg != "" {
 		return &result, nil
 	}
-	// Check if we got a valid response (not an auth error / HTML page).
 	if result.RollingUsage == nil && result.WeeklyUsage == nil && result.MonthlyUsage == nil {
 		return nil, fmt.Errorf("unexpected response (cookie may be invalid or expired)")
 	}
