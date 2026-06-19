@@ -1413,3 +1413,43 @@ select:focus {
     flex-direction: column;
   }
 }
+
+/* ─── Filter card enhancements ──────────────── */
+.filter-select {
+  min-width: 140px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  cursor: pointer;
+  transition: border 0.2s;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2712%27 height=%2712%27 viewBox=%270 0 12 12%27%3E%3Cpath fill=%27%238892b0%27 d=%27M6 8L1 3h10z%27/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+.filter-select:focus {
+  border-color: var(--accent);
+}
+.filter-select option {
+  background: var(--card);
+  color: var(--text);
+}
+
+/* ─── Compact filter row spacing ────────────── */
+.usage-filter-card .form-row {
+  gap: 10px;
+}
+.usage-filter-card .form-group {
+  min-width: 120px;
+}
+.usage-filter-card .filter-actions {
+  padding-bottom: 16px;
+  flex: 0 0 auto;
+}

@@ -10,12 +10,13 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M13 2L3 14h9l-1 8 10-12h-9l1-8z' fill='%236366f1'/%3E%3C/svg%3E"
     />
     <base href="/admin/" />
+    <style>[v-cloak]{display:none!important}</style>
     <link rel="stylesheet" href="css/admin.css?v=20260619a" />
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   </head>
   <body>
-    <div id="app">
+    <div id="app" v-cloak>
       <!-- Login -->
       <div v-if="!token" class="login-wrap">
         <div class="login-box">
@@ -517,14 +518,19 @@
                   </div>
                   <div class="form-group compact-select">
                     <label>{{t('table.protocol')}}</label>
-                    <input v-model="usageFilters.protocol" placeholder="chat/messages" @keyup.enter="applyUsageFilters" />
+                    <select v-model="usageFilters.protocol" class="filter-select" @change="applyUsageFilters">
+                      <option value="">{{t('usage.protocolAll')}}</option>
+                      <option value="chat">{{t('usage.protocolChat')}}</option>
+                      <option value="messages">{{t('usage.protocolMessages')}}</option>
+                      <option value="responses">{{t('usage.protocolResponses')}}</option>
+                    </select>
                   </div>
                   <div class="form-group compact-select">
                     <label>{{t('table.stream')}}</label>
-                    <select v-model="usageFilters.stream" @change="applyUsageFilters">
-                      <option value="">{{t('usage.all')}}</option>
-                      <option value="true">stream</option>
-                      <option value="false">sync</option>
+                    <select v-model="usageFilters.stream" class="filter-select" @change="applyUsageFilters">
+                      <option value="">{{t('usage.streamAll')}}</option>
+                      <option value="true">{{t('usage.streamYes')}}</option>
+                      <option value="false">{{t('usage.streamNo')}}</option>
                     </select>
                   </div>
                   <div class="form-group usage-time-filter">
@@ -662,13 +668,19 @@
             </div>
 
             <!-- Keys -->
-            <div v-if="page==='keys'">
-              <h1 class="page-title">
-                {{t('keys.title')}}
-                <button class="btn btn-primary" @click="openKeyModal">
-                  {{t('keys.addKey')}}
-                </button>
-              </h1>
+            <div v-if="page==='keys'" class="keys-page">
+              <div class="page-hero">
+                <div>
+                  <div class="eyebrow">{{t('keys.eyebrow')}}</div>
+                  <h1>{{t('keys.title')}}</h1>
+                  <p>{{t('keys.subtitle')}}</p>
+                </div>
+                <div class="hero-actions">
+                  <button class="btn btn-primary" @click="openKeyModal">
+                    {{t('keys.addKey')}}
+                  </button>
+                </div>
+              </div>
               <div class="card">
                 <h2>{{t('keys.registered',{count:keys.length})}}</h2>
                 <div class="table-wrap">
@@ -748,13 +760,19 @@
             </div>
 
             <!-- Tokens -->
-            <div v-if="page==='tokens'">
-              <h1 class="page-title">
-                {{t('tokens.title')}}
-                <button class="btn btn-primary" @click="openTokenModal">
-                  {{t('tokens.createToken')}}
-                </button>
-              </h1>
+            <div v-if="page==='tokens'" class="tokens-page">
+              <div class="page-hero">
+                <div>
+                  <div class="eyebrow">{{t('tokens.eyebrow')}}</div>
+                  <h1>{{t('tokens.title')}}</h1>
+                  <p>{{t('tokens.subtitle')}}</p>
+                </div>
+                <div class="hero-actions">
+                  <button class="btn btn-primary" @click="openTokenModal">
+                    {{t('tokens.createToken')}}
+                  </button>
+                </div>
+              </div>
               <div class="card">
                 <h2>{{t('tokens.activeTokens')}}</h2>
                 <div class="table-wrap">
@@ -798,13 +816,19 @@
             </div>
 
             <!-- Models -->
-            <div v-if="page==='models'">
-              <h1 class="page-title">
-                {{t('models.title')}}
-                <button class="btn btn-primary" @click="openModal">
-                  {{t('models.addModel')}}
-                </button>
-              </h1>
+            <div v-if="page==='models'" class="models-page">
+              <div class="page-hero">
+                <div>
+                  <div class="eyebrow">{{t('models.eyebrow')}}</div>
+                  <h1>{{t('models.title')}}</h1>
+                  <p>{{t('models.subtitle')}}</p>
+                </div>
+                <div class="hero-actions">
+                  <button class="btn btn-primary" @click="openModal">
+                    {{t('models.addModel')}}
+                  </button>
+                </div>
+              </div>
               <div class="card">
                 <h2>{{t('models.registered',{count:models.length})}}</h2>
                 <div class="table-wrap">
@@ -857,13 +881,19 @@
             </div>
 
             <!-- Model Mappings -->
-            <div v-if="page==='mappings'">
-              <h1 class="page-title">
-                {{t('mappings.title')}}
-                <button class="btn btn-primary" @click="openMappingModal">
-                  {{t('mappings.addMapping')}}
-                </button>
-              </h1>
+            <div v-if="page==='mappings'" class="mappings-page">
+              <div class="page-hero">
+                <div>
+                  <div class="eyebrow">{{t('mappings.eyebrow')}}</div>
+                  <h1>{{t('mappings.title')}}</h1>
+                  <p>{{t('mappings.subtitle')}}</p>
+                </div>
+                <div class="hero-actions">
+                  <button class="btn btn-primary" @click="openMappingModal">
+                    {{t('mappings.addMapping')}}
+                  </button>
+                </div>
+              </div>
               <div class="card">
                 <h2>{{t('mappings.registered',{count:mappings.length})}}</h2>
                 <p class="hint-text">{{t('mappings.description')}}</p>
@@ -978,7 +1008,7 @@
               <label>{{t('models.goModel')}}</label>
               <select v-model="newModel.real_model">
                 <option value="" disabled>
-                  — {{t('models.select') || '请选择'}} —
+                  — {{t('models.select')}} —
                 </option>
                 <option v-for="m in availableModels" :key="m.id" :value="m.id">
                   {{m.name}} ({{m.id}})
@@ -998,7 +1028,7 @@
           </div>
           <div class="btn-group">
             <button class="btn btn-ghost" @click="closeModal">
-              {{t('models.cancel') || '取消'}}
+              {{t('common.cancel')}}
             </button>
             <button class="btn btn-primary" @click="addModel">
               {{t('models.addBtn')}}
@@ -1035,7 +1065,7 @@
           </div>
           <div class="btn-group">
             <button class="btn btn-ghost" @click="closeTokenModal">
-              {{t('tokens.cancel') || '取消'}}
+              {{t('common.cancel')}}
             </button>
             <button class="btn btn-primary" @click="addToken">
               {{t('tokens.create')}}
@@ -1087,7 +1117,7 @@
           </div>
           <div class="btn-group">
             <button class="btn btn-ghost" @click="closeKeyModal">
-              {{t('keys.cancel') || '取消'}}
+              {{t('common.cancel')}}
             </button>
             <button class="btn btn-primary" @click="addKey">
               {{editingKeyId?t('keys.updateBtn'):t('keys.addBtn')}}
@@ -1107,13 +1137,13 @@
           <p>{{confirm.msg}}</p>
           <div class="btn-group">
             <button class="btn btn-ghost" @click="confirmCancel">
-              {{confirm.cancelText||'取消'}}
+              {{confirm.cancelText||t('common.cancel')}}
             </button>
             <button
               :class="'btn '+(confirm.danger?'btn-danger':'btn-primary')"
               @click="confirmOk"
             >
-              {{confirm.okText||'确定'}}
+              {{confirm.okText||t('common.confirm')}}
             </button>
           </div>
         </div>
