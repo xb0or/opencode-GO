@@ -34,6 +34,7 @@ const quotaServerHash = "c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229ba
 const workspacesServerHash = "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f"
 
 var authCookiePattern = regexp.MustCompile(`(?i)(?:^|[;\s])auth=([^;\s]+)`)
+var workspaceIDPattern = regexp.MustCompile(`(?i)"(?:workspace[_-]?id|workspaceID|id)"\s*:\s*"([^";\s]+)"`)
 
 // normalizeAuthCookie accepts pasted browser cookie/header fragments and returns
 // the minimal Cookie header value required by opencode.ai quota RPC: auth=<token>.
@@ -94,12 +95,11 @@ func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
 			lastErr = fmt.Errorf("workspaces returned HTTP %d", resp.StatusCode)
 			continue
 		}
-		var payload any
-		if err := json.Unmarshal(raw, &payload); err != nil {
-			lastErr = fmt.Errorf("decode workspaces response: %w", err)
+		workspaces, err := parseOpenCodeWorkspaces(raw)
+		if err != nil {
+			lastErr = err
 			continue
 		}
-		workspaces := collectOpenCodeWorkspaces(payload)
 		if len(workspaces) > 0 {
 			return workspaces, nil
 		}
@@ -109,6 +109,62 @@ func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("workspace list is empty")
+}
+
+func parseOpenCodeWorkspaces(raw []byte) ([]OpenCodeWorkspace, error) {
+	payload, err := decodeFirstJSONValue(raw)
+	if err == nil {
+		if workspaces := collectOpenCodeWorkspaces(payload); len(workspaces) > 0 {
+			return workspaces, nil
+		}
+	}
+	if workspaces := collectWorkspaceIDsFromText(string(raw)); len(workspaces) > 0 {
+		return workspaces, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("decode workspaces response: %w", err)
+	}
+	return nil, fmt.Errorf("workspace list is empty")
+}
+
+func decodeFirstJSONValue(raw []byte) (any, error) {
+	s := strings.TrimSpace(string(raw))
+	if s == "" {
+		return nil, fmt.Errorf("empty response")
+	}
+	start := -1
+	for i, r := range s {
+		if r == '{' || r == '[' {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return nil, fmt.Errorf("response does not contain JSON")
+	}
+	dec := json.NewDecoder(strings.NewReader(s[start:]))
+	var payload any
+	if err := dec.Decode(&payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func collectWorkspaceIDsFromText(raw string) []OpenCodeWorkspace {
+	seen := map[string]bool{}
+	var out []OpenCodeWorkspace
+	for _, match := range workspaceIDPattern.FindAllStringSubmatch(raw, -1) {
+		if len(match) != 2 {
+			continue
+		}
+		id := strings.TrimSpace(match[1])
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, OpenCodeWorkspace{ID: id})
+	}
+	return out
 }
 
 func collectOpenCodeWorkspaces(v any) []OpenCodeWorkspace {
