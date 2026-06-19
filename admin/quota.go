@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -38,6 +39,7 @@ const maxServerFnInstance = 80
 var authCookiePattern = regexp.MustCompile(`(?i)(?:^|[;\s])auth=([^;\s]+)`)
 var workspaceIDPattern = regexp.MustCompile(`(?i)"(?:workspace[_-]?id|workspaceID|id)"\s*:\s*"([^";\s]+)"`)
 var quotedStringPattern = regexp.MustCompile(`"([^"\\]*(?:\\.[^"\\]*)*)"`)
+var serovalErrorPattern = regexp.MustCompile(`new Error\("((?:\\.|[^"\\])*)"\)`)
 var workspaceCandidatePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{5,127}$`)
 
 // normalizeAuthCookie accepts pasted browser cookie/header fragments and returns
@@ -65,6 +67,24 @@ func normalizeAuthCookie(raw string) string {
 type OpenCodeWorkspace struct {
 	ID   string `json:"id"`
 	Name string `json:"name,omitempty"`
+}
+
+type workspaceAutoDetectError struct {
+	Candidates []OpenCodeWorkspace
+	Cause      error
+}
+
+func (e *workspaceAutoDetectError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if len(e.Candidates) > 0 {
+		return fmt.Sprintf("found %d workspace candidates but %v", len(e.Candidates), e.Cause)
+	}
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	return "workspace auto-detect failed"
 }
 
 func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
@@ -122,7 +142,7 @@ func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
 func resolveWorkspaceForQuota(cookie string) (string, *GoQuotaResponse, error) {
 	workspaces, err := fetchOpenCodeWorkspaces(cookie)
 	if err != nil {
-		return "", nil, err
+		return "", nil, &workspaceAutoDetectError{Cause: err}
 	}
 	var lastErr error
 	for _, ws := range workspaces {
@@ -133,12 +153,22 @@ func resolveWorkspaceForQuota(cookie string) (string, *GoQuotaResponse, error) {
 		lastErr = err
 	}
 	if lastErr != nil {
-		return "", nil, fmt.Errorf("found %d workspace candidates but quota validation failed: %w", len(workspaces), lastErr)
+		return "", nil, &workspaceAutoDetectError{
+			Candidates: workspaces,
+			Cause:      fmt.Errorf("quota validation failed: %w", lastErr),
+		}
 	}
 	return "", nil, fmt.Errorf("workspace list is empty")
 }
 
 func parseOpenCodeWorkspaces(raw []byte) ([]OpenCodeWorkspace, error) {
+	if msg := serovalErrorMessage(raw); msg != "" {
+		return nil, fmt.Errorf("workspaces returned upstream error: %s (cookie may be invalid or expired)", msg)
+	}
+	if looksLikeHTML(raw) {
+		return nil, fmt.Errorf("workspaces returned HTML login page (cookie may be invalid or expired)")
+	}
+
 	seen := map[string]OpenCodeWorkspace{}
 	payload, err := decodeFirstJSONValue(raw)
 	if err == nil {
@@ -160,6 +190,24 @@ func parseOpenCodeWorkspaces(raw []byte) ([]OpenCodeWorkspace, error) {
 		return nil, fmt.Errorf("decode workspaces response: %w", err)
 	}
 	return nil, fmt.Errorf("workspace list is empty")
+}
+
+func serovalErrorMessage(raw []byte) string {
+	match := serovalErrorPattern.FindSubmatch(raw)
+	if len(match) != 2 {
+		return ""
+	}
+	quoted := `"` + string(match[1]) + `"`
+	msg, err := strconv.Unquote(quoted)
+	if err != nil {
+		msg = string(match[1])
+	}
+	return strings.TrimSpace(msg)
+}
+
+func looksLikeHTML(raw []byte) bool {
+	s := strings.TrimSpace(strings.ToLower(string(raw)))
+	return strings.HasPrefix(s, "<!doctype html") || strings.HasPrefix(s, "<html") || strings.Contains(s, "<body")
 }
 
 func decodeFirstJSONValue(raw []byte) (any, error) {
@@ -300,7 +348,8 @@ func looksLikeWorkspaceCandidate(id string) bool {
 	blocked := map[string]bool{
 		"rollingusage": true, "weeklyusage": true, "monthlyusage": true,
 		"usebalance": true, "configured": true, "workspace": true,
-		"workspaceid": true, "server-fn": true,
+		"workspaceid": true, "server-fn": true, "public": true,
+		"account": true, "openauth": true,
 	}
 	if blocked[lower] {
 		return false

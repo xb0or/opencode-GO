@@ -334,9 +334,12 @@ createApp({
       toggleKey: keys.toggle,
       resetCooldown: keys.resetCooldown,
       fetchQuota: keys.fetchQuota,
+      useQuotaWorkspaceCandidate: keys.useQuotaWorkspaceCandidate,
       deleteKey: keys.remove,
       quotaPercent: keys.quotaPercent,
       quotaBadgeClass: keys.quotaBadgeClass,
+      quotaWorkspaceCandidates: keys.quotaWorkspaceCandidates,
+      quotaCandidateLabel: keys.quotaCandidateLabel,
       normalizeKeyCookie: keys.normalizeKeyCookie,
 
       // 令牌管理

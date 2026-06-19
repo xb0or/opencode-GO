@@ -126,11 +126,49 @@ export function useKeys(api, showToast, t, showConfirm) {
     try {
       const d = await api("/keys/" + id + "/quota", "GET", null, t);
       quotaData.value[id] = d;
+      if (d && d.error) {
+        showToast(d.hint || d.error, "error");
+      }
     } catch (e) {
       quotaData.value[id] = { error: e.message, configured: false };
       showToast(e.message, "error");
     } finally {
       quotaLoading.value[id] = false;
+    }
+  }
+
+  async function useQuotaWorkspaceCandidate(id, candidate) {
+    const workspaceID =
+      typeof candidate === "string" ? candidate : String(candidate?.id || "").trim();
+    if (!workspaceID) return;
+
+    const key = keys.value.find((item) => item.id === id);
+    if (!key) {
+      showToast("未找到对应密钥", "error");
+      return;
+    }
+
+    try {
+      await api(
+        "/keys/" + id,
+        "PATCH",
+        {
+          label: key.label || "",
+          weight: key.weight || 1,
+          proxy_url: key.proxy_url || "",
+          cookie: key.cookie || "",
+          workspace_id: workspaceID,
+          enabled: Boolean(key.enabled),
+        },
+        t
+      );
+      key.workspace_id = workspaceID;
+      quotaData.value[id] = null;
+      showToast("Workspace ID 已保存，正在重新查询 ✓");
+      await fetchQuota(id);
+      load();
+    } catch (e) {
+      showToast(e.message, "error");
     }
   }
 
@@ -164,6 +202,20 @@ export function useKeys(api, showToast, t, showConfirm) {
     return "badge-green";
   }
 
+  function quotaWorkspaceCandidates(data) {
+    if (!data || !Array.isArray(data.workspaceCandidates)) return [];
+    return data.workspaceCandidates.filter((item) =>
+      typeof item === "string" ? item.trim() : item && item.id
+    );
+  }
+
+  function quotaCandidateLabel(candidate) {
+    if (typeof candidate === "string") return candidate;
+    const id = String(candidate?.id || "");
+    const name = String(candidate?.name || "").trim();
+    return name ? name + " (" + id + ")" : id;
+  }
+
   return {
     keys,
     newKey,
@@ -179,9 +231,12 @@ export function useKeys(api, showToast, t, showConfirm) {
     toggle,
     resetCooldown,
     fetchQuota,
+    useQuotaWorkspaceCandidate,
     remove,
     quotaPercent,
     quotaBadgeClass,
+    quotaWorkspaceCandidates,
+    quotaCandidateLabel,
     normalizeCookieInput,
     normalizeKeyCookie,
   };

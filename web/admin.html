@@ -748,7 +748,29 @@
                             </div>
                           </template>
                           <template v-else-if="quotaData[k.id].configured">
-                            <span class="badge badge-red">查询失败</span>
+                            <span class="badge badge-red" :title="quotaData[k.id].error || ''">查询失败</span>
+                            <div
+                              v-if="quotaWorkspaceCandidates(quotaData[k.id]).length"
+                              style="margin-top:4px;white-space:normal;max-width:260px"
+                            >
+                              <div style="color:var(--muted);margin-bottom:3px">候选 Workspace：</div>
+                              <button
+                                v-for="candidate in quotaWorkspaceCandidates(quotaData[k.id])"
+                                :key="typeof candidate === 'string' ? candidate : candidate.id"
+                                class="btn btn-ghost btn-xs"
+                                style="font-size:10px;padding:1px 5px;margin:1px;max-width:240px;overflow:hidden;text-overflow:ellipsis"
+                                :title="quotaCandidateLabel(candidate)"
+                                @click.stop="useQuotaWorkspaceCandidate(k.id, candidate)"
+                              >
+                                使用 {{quotaCandidateLabel(candidate)}}
+                              </button>
+                            </div>
+                            <div
+                              v-else-if="quotaData[k.id].hint"
+                              style="margin-top:3px;color:var(--muted);white-space:normal;max-width:240px"
+                            >
+                              {{quotaData[k.id].hint}}
+                            </div>
                           </template>
                           <span v-else class="badge badge-blue" style="cursor:pointer" @click.stop="fetchQuota(k.id)">查询</span>
                         </template>
@@ -1175,7 +1197,7 @@
                 v-model="newKey.workspace_id"
                 placeholder="留空时使用 Cookie 自动获取"
               />
-              <small class="hint-text">多个工作区时默认使用第一个；需指定时再手动填写。</small>
+              <small class="hint-text">建议先留空；如果自动识别失败，查询结果会展示候选 Workspace，可一键保存后重试。</small>
             </div>
           </div>
           <div class="btn-group">

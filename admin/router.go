@@ -1215,11 +1215,18 @@ func fetchKeyQuota(c *gin.Context) {
 	if workspaceID == "" {
 		resolvedWorkspaceID, resolvedResult, err := resolveWorkspaceForQuota(cookie)
 		if err != nil {
-			c.JSON(http.StatusOK, gin.H{
+			payload := gin.H{
 				"configured": true,
 				"error":      "workspace_id not configured and auto-detect failed: " + err.Error(),
 				"quota":      nil,
-			})
+				"hint":       "请确认 Cookie 包含有效 auth=...；如果返回了候选 Workspace ID，可点击候选保存后重试。",
+			}
+			if autoErr, ok := err.(*workspaceAutoDetectError); ok {
+				if candidates := workspaceCandidatePayload(autoErr.Candidates); len(candidates) > 0 {
+					payload["workspaceCandidates"] = candidates
+				}
+			}
+			c.JSON(http.StatusOK, payload)
 			return
 		}
 		workspaceID = resolvedWorkspaceID
@@ -1310,6 +1317,22 @@ func fetchKeyQuota(c *gin.Context) {
 }
 
 // --- helpers ---
+
+func workspaceCandidatePayload(workspaces []OpenCodeWorkspace) []gin.H {
+	out := make([]gin.H, 0, len(workspaces))
+	for _, ws := range workspaces {
+		id := strings.TrimSpace(ws.ID)
+		if id == "" {
+			continue
+		}
+		item := gin.H{"id": id}
+		if name := strings.TrimSpace(ws.Name); name != "" {
+			item["name"] = name
+		}
+		out = append(out, item)
+	}
+	return out
+}
 
 func maskSecret(s string) string {
 	if len(s) <= 8 {

@@ -1,3 +1,9 @@
+## 2026-06-20
+
+- 修复 OpenCode Go 限额查询的 Workspace 自动识别误判：`workspaces` 返回 Seroval `new Error(...)` 或 HTML 登录页时不再把错误文本中的普通字符串当作候选 Workspace。
+- 自动识别失败时后端返回结构化 `workspaceCandidates` 与操作提示，前端在 API 密钥页展示候选并支持一键保存后重试。
+- 新增 `admin/quota_test.go` 覆盖 Seroval 错误响应与 Seroval 文本中的 Workspace ID 提取，验证 `go test ./...` 通过。
+
 ## 2026-06-19
 
 - ??????????? Cloudflare/???????? HTML ? ES Module ??????????????????????? `app.js` ??? `usageTokenLabel is not a function`?
