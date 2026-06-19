@@ -1170,11 +1170,12 @@
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label>Workspace ID</label>
+              <label>Workspace ID（可选）</label>
               <input
                 v-model="newKey.workspace_id"
-                placeholder="wsp_xxx"
+                placeholder="留空时使用 Cookie 自动获取"
               />
+              <small class="hint-text">多个工作区时默认使用第一个；需指定时再手动填写。</small>
             </div>
           </div>
           <div class="btn-group">

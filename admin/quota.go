@@ -29,8 +29,9 @@ type GoQuotaBucket struct {
 	UsagePercent int    `json:"usagePercent"`
 }
 
-// serverRefHash is the fixed server reference hash for lite.subscription.get.
+// serverRefHash values are fixed server reference hashes observed from opencode.ai.
 const quotaServerHash = "c7389bd0e731f80f49593e5ee53835475f4e28594dd6bd83eb229bab753498cd"
+const workspacesServerHash = "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb4608459ba0234f"
 
 var authCookiePattern = regexp.MustCompile(`(?i)(?:^|[;\s])auth=([^;\s]+)`)
 
@@ -53,6 +54,97 @@ func normalizeAuthCookie(raw string) string {
 		return "auth=" + s
 	}
 	return s
+}
+
+// OpenCodeWorkspace is the minimal workspace shape used for quota discovery.
+type OpenCodeWorkspace struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
+	cookie = normalizeAuthCookie(cookie)
+	if cookie == "" {
+		return nil, fmt.Errorf("cookie is empty")
+	}
+
+	var lastErr error
+	for instance := 0; instance < 6; instance++ {
+		req, err := http.NewRequest(http.MethodPost, "https://opencode.ai/_server", nil)
+		if err != nil {
+			return nil, fmt.Errorf("build workspaces request: %w", err)
+		}
+		req.Header.Set("X-Server-Id", workspacesServerHash)
+		req.Header.Set("X-Server-Instance", fmt.Sprintf("server-fn:%d", instance))
+		req.Header.Set("Cookie", cookie)
+
+		client := &http.Client{Timeout: 15 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		raw, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			lastErr = fmt.Errorf("workspaces returned HTTP %d", resp.StatusCode)
+			continue
+		}
+		var payload any
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			lastErr = fmt.Errorf("decode workspaces response: %w", err)
+			continue
+		}
+		workspaces := collectOpenCodeWorkspaces(payload)
+		if len(workspaces) > 0 {
+			return workspaces, nil
+		}
+		lastErr = fmt.Errorf("workspace list is empty")
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("workspace list is empty")
+}
+
+func collectOpenCodeWorkspaces(v any) []OpenCodeWorkspace {
+	seen := map[string]bool{}
+	var out []OpenCodeWorkspace
+	var walk func(any)
+	walk = func(x any) {
+		switch value := x.(type) {
+		case []any:
+			for _, item := range value {
+				walk(item)
+			}
+		case map[string]any:
+			id, _ := value["id"].(string)
+			id = strings.TrimSpace(id)
+			if id != "" && !seen[id] {
+				name := firstStringField(value, "name", "title", "slug")
+				out = append(out, OpenCodeWorkspace{ID: id, Name: name})
+				seen[id] = true
+			}
+			for _, item := range value {
+				walk(item)
+			}
+		}
+	}
+	walk(v)
+	return out
+}
+
+func firstStringField(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if s, ok := m[key].(string); ok && strings.TrimSpace(s) != "" {
+			return strings.TrimSpace(s)
+		}
+	}
+	return ""
 }
 
 // serovalString encodes a single string argument as the Seroval format expected

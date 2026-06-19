@@ -1201,28 +1201,52 @@ func fetchKeyQuota(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "key not found"})
 		return
 	}
-	if k.Cookie == "" || k.WorkspaceID == "" {
+	cookie := normalizeAuthCookie(k.Cookie)
+	if cookie == "" {
 		c.JSON(http.StatusOK, gin.H{
 			"configured": false,
-			"message":    "cookie or workspace_id not configured",
+			"message":    "cookie not configured",
 		})
 		return
 	}
 
+	workspaceID := strings.TrimSpace(k.WorkspaceID)
+	if workspaceID == "" {
+		workspaces, err := fetchOpenCodeWorkspaces(cookie)
+		if err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"configured": true,
+				"error":      "workspace_id not configured and auto-detect failed: " + err.Error(),
+				"quota":      nil,
+			})
+			return
+		}
+		workspaceID = workspaces[0].ID
+		store.DB().Model(&store.Key{}).Where("id = ?", k.ID).Updates(map[string]any{
+			"cookie":       cookie,
+			"workspace_id": workspaceID,
+		})
+		k.Cookie = cookie
+		k.WorkspaceID = workspaceID
+	} else if cookie != k.Cookie {
+		store.DB().Model(&store.Key{}).Where("id = ?", k.ID).Update("cookie", cookie)
+		k.Cookie = cookie
+	}
+
 	// Mask cookie value in response
 	maskedCookie := ""
-	if len(k.Cookie) > 12 {
-		maskedCookie = k.Cookie[:8] + "..." + k.Cookie[len(k.Cookie)-4:]
-	} else if len(k.Cookie) > 0 {
+	if len(cookie) > 12 {
+		maskedCookie = cookie[:8] + "..." + cookie[len(cookie)-4:]
+	} else if len(cookie) > 0 {
 		maskedCookie = "****"
 	}
 
-	result, err := fetchGoQuota(k.Cookie, k.WorkspaceID)
+	result, err := fetchGoQuota(cookie, workspaceID)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"configured":  true,
 			"cookie":      maskedCookie,
-			"workspaceID": k.WorkspaceID,
+			"workspaceID": workspaceID,
 			"error":       err.Error(),
 			"quota":       nil,
 		})
@@ -1234,7 +1258,7 @@ func fetchKeyQuota(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"configured":  true,
 			"cookie":      maskedCookie,
-			"workspaceID": k.WorkspaceID,
+			"workspaceID": workspaceID,
 			"error":       result.Error,
 			"quota":       nil,
 		})
@@ -1258,7 +1282,7 @@ func fetchKeyQuota(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"configured":  true,
 		"cookie":      maskedCookie,
-		"workspaceID": k.WorkspaceID,
+		"workspaceID": workspaceID,
 		"useBalance":  result.UseBalance,
 		"quota": gin.H{
 			"rolling": gin.H{
