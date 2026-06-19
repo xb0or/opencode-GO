@@ -324,6 +324,8 @@ createApp({
       newKey: keys.newKey,
       editingKeyId: keys.editingKeyId,
       showKeyModal: keys.showKeyModal,
+      quotaLoading: keys.quotaLoading,
+      quotaData: keys.quotaData,
       openKeyModal: keys.openKeyModal,
       openKeySettings: keys.openKeySettings,
       closeKeyModal: keys.closeKeyModal,
@@ -331,7 +333,10 @@ createApp({
       addKey: keys.add,
       toggleKey: keys.toggle,
       resetCooldown: keys.resetCooldown,
+      fetchQuota: keys.fetchQuota,
       deleteKey: keys.remove,
+      quotaPercent: keys.quotaPercent,
+      quotaBadgeClass: keys.quotaBadgeClass,
 
       // 令牌管理
       tokens: tokens.tokens,

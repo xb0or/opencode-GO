@@ -815,7 +815,7 @@
                           ><input
                             type="checkbox"
                             :checked="tk.enabled"
-                            @change="toggleToken(tk.id)" /><span
+                            @change="toggleToken(tk.id, $event.target.checked)" /><span
                             class="slider"
                           ></span
                         ></label>

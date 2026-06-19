@@ -84,9 +84,9 @@ export function useTokens(api, showToast, t, showConfirm) {
     }
   }
 
-  async function toggle(id) {
+  async function toggle(id, enabled) {
     try {
-      await api("/tokens/" + id, "PATCH", { enabled: false }, t);
+      await api("/tokens/" + id, "PATCH", { enabled: Boolean(enabled) }, t);
       load();
     } catch (e) {
       showToast(e.message, "error");

@@ -1,4 +1,4 @@
-﻿package api
+package api
 
 import (
 	"bufio"
@@ -17,11 +17,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/opencode-sw/gateway/config"
-	"gorm.io/gorm"
 	"github.com/opencode-sw/gateway/pool"
 	"github.com/opencode-sw/gateway/protocol"
 	"github.com/opencode-sw/gateway/store"
 	"github.com/opencode-sw/gateway/upstream"
+	"gorm.io/gorm"
 )
 
 // proxyChat handles POST /v1/chat/completions (OpenAI Chat Completions).

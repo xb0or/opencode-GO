@@ -1,4 +1,4 @@
-﻿package admin
+package admin
 
 import (
 	"context"
@@ -68,6 +68,7 @@ func Mount(rg *gin.RouterGroup) {
 
 		authed.GET("/tokens", listTokens)
 		authed.POST("/tokens", createTokenAdmin)
+		authed.PATCH("/tokens/:id", updateToken)
 		authed.DELETE("/tokens/:id", deleteToken)
 
 		authed.GET("/stats", stats)
@@ -294,8 +295,10 @@ func listTokens(c *gin.Context) {
 func createTokenAdmin(c *gin.Context) {
 	var body struct {
 		Name          string     `json:"name"`
+		Description   string     `json:"description"`
 		AllowedGroups string     `json:"allowed_groups"`
 		RateLimit     int        `json:"rate_limit"`
+		MaxRequests   int        `json:"max_requests"`
 		ExpiresAt     *time.Time `json:"expires_at"`
 	}
 	_ = c.ShouldBindJSON(&body)
@@ -304,12 +307,69 @@ func createTokenAdmin(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only go group is supported"})
 		return
 	}
-	t, err := pool.CreateToken(body.Name, allowedGroups, body.RateLimit, body.ExpiresAt)
+	var opts []pool.TokenOption
+	if body.MaxRequests > 0 {
+		opts = append(opts, pool.WithMaxRequests(body.MaxRequests))
+	}
+	if body.Description != "" {
+		opts = append(opts, pool.WithDescription(body.Description))
+	}
+	t, err := pool.CreateToken(body.Name, allowedGroups, body.RateLimit, body.ExpiresAt, opts...)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, t)
+}
+
+func updateToken(c *gin.Context) {
+	var tk store.Token
+	if err := store.DB().First(&tk, c.Param("id")).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+		return
+	}
+
+	var body struct {
+		Name        *string    `json:"name"`
+		Description *string    `json:"description"`
+		RateLimit   *int       `json:"rate_limit"`
+		MaxRequests *int       `json:"max_requests"`
+		Enabled     *bool      `json:"enabled"`
+		ExpiresAt   *time.Time `json:"expires_at"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	updates := map[string]any{}
+	if body.Name != nil {
+		updates["name"] = *body.Name
+	}
+	if body.Description != nil {
+		updates["description"] = *body.Description
+	}
+	if body.RateLimit != nil {
+		updates["rate_limit"] = *body.RateLimit
+	}
+	if body.MaxRequests != nil {
+		updates["max_requests"] = *body.MaxRequests
+	}
+	if body.Enabled != nil {
+		updates["enabled"] = *body.Enabled
+	}
+	if body.ExpiresAt != nil {
+		updates["expires_at"] = *body.ExpiresAt
+	}
+
+	if len(updates) > 0 {
+		if err := store.DB().Model(&store.Token{}).Where("id = ?", tk.ID).Updates(updates).Error; err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	store.DB().First(&tk, tk.ID)
+	c.JSON(http.StatusOK, tk)
 }
 
 func deleteToken(c *gin.Context) {
