@@ -1,4 +1,4 @@
-package admin
+﻿package admin
 
 import (
 	"context"
@@ -63,6 +63,7 @@ func Mount(rg *gin.RouterGroup) {
 		authed.PATCH("/keys/:id", updateKey)
 		authed.POST("/keys/:id/toggle", toggleKey)
 		authed.POST("/keys/:id/reset", resetKeyCooldown)
+		authed.GET("/keys/:id/quota", fetchKeyQuota)
 		authed.DELETE("/keys/:id", deleteKey)
 
 		authed.GET("/tokens", listTokens)
@@ -1118,6 +1119,93 @@ func countLatencyRange(minMs, maxMs int64) int64 {
 	var count int64
 	q.Count(&count)
 	return count
+}
+
+// --- Key Quota ---
+
+func fetchKeyQuota(c *gin.Context) {
+	var k store.Key
+	if err := store.DB().First(&k, c.Param("id")).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "key not found"})
+		return
+	}
+	if k.Cookie == "" || k.WorkspaceID == "" {
+		c.JSON(http.StatusOK, gin.H{
+			"configured": false,
+			"message":    "cookie or workspace_id not configured",
+		})
+		return
+	}
+
+	// Mask cookie value in response
+	maskedCookie := ""
+	if len(k.Cookie) > 12 {
+		maskedCookie = k.Cookie[:8] + "..." + k.Cookie[len(k.Cookie)-4:]
+	} else if len(k.Cookie) > 0 {
+		maskedCookie = "****"
+	}
+
+	result, err := fetchGoQuota(k.Cookie, k.WorkspaceID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"configured":  true,
+			"cookie":      maskedCookie,
+			"workspaceID": k.WorkspaceID,
+			"error":       err.Error(),
+			"quota":       nil,
+		})
+		return
+	}
+
+	// Show error from upstream
+	if result.Error != "" {
+		c.JSON(http.StatusOK, gin.H{
+			"configured":  true,
+			"cookie":      maskedCookie,
+			"workspaceID": k.WorkspaceID,
+			"error":       result.Error,
+			"quota":       nil,
+		})
+		return
+	}
+
+	// Build response
+	rollingReset := ""
+	weeklyReset := ""
+	monthlyReset := ""
+	if result.RollingUsage != nil {
+		rollingReset = formatGoQuotaReset(result.RollingUsage.ResetInSec)
+	}
+	if result.WeeklyUsage != nil {
+		weeklyReset = formatGoQuotaReset(result.WeeklyUsage.ResetInSec)
+	}
+	if result.MonthlyUsage != nil {
+		monthlyReset = formatGoQuotaReset(result.MonthlyUsage.ResetInSec)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"configured":  true,
+		"cookie":      maskedCookie,
+		"workspaceID": k.WorkspaceID,
+		"useBalance":  result.UseBalance,
+		"quota": gin.H{
+			"rolling": gin.H{
+				"usagePercent": result.RollingUsage.UsagePercent,
+				"resetIn":      rollingReset,
+				"status":       result.RollingUsage.Status,
+			},
+			"weekly": gin.H{
+				"usagePercent": result.WeeklyUsage.UsagePercent,
+				"resetIn":      weeklyReset,
+				"status":       result.WeeklyUsage.Status,
+			},
+			"monthly": gin.H{
+				"usagePercent": result.MonthlyUsage.UsagePercent,
+				"resetIn":      monthlyReset,
+				"status":       result.MonthlyUsage.Status,
+			},
+		},
+	})
 }
 
 // --- helpers ---

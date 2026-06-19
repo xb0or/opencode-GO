@@ -1,6 +1,6 @@
-/**
+﻿/**
  * API 密钥管理页面 - 组合式函数
- * 支持模态框添加和修改密钥设置
+ * 支持模态框添加和修改密钥设置，以及 Go 限额查询
  */
 
 import { validateRequired } from "../api.js?v=20260619a";
@@ -10,12 +10,16 @@ export function useKeys(api, showToast, t, showConfirm) {
   const keys = ref([]);
   const showKeyModal = ref(false);
   const editingKeyId = ref(null);
+  const quotaLoading = ref({});
+  const quotaData = ref({});
 
   const newKey = reactive({
     value: "",
     label: "",
     weight: 1,
     proxy_url: "",
+    cookie: "",
+    workspace_id: "",
   });
 
   function openKeyModal() {
@@ -24,6 +28,8 @@ export function useKeys(api, showToast, t, showConfirm) {
     newKey.label = "";
     newKey.weight = 1;
     newKey.proxy_url = "";
+    newKey.cookie = "";
+    newKey.workspace_id = "";
     showKeyModal.value = true;
   }
 
@@ -33,6 +39,8 @@ export function useKeys(api, showToast, t, showConfirm) {
     newKey.label = key.label || "";
     newKey.weight = key.weight || 1;
     newKey.proxy_url = key.proxy_url || "";
+    newKey.cookie = key.cookie || "";
+    newKey.workspace_id = key.workspace_id || "";
     showKeyModal.value = true;
   }
 
@@ -60,6 +68,8 @@ export function useKeys(api, showToast, t, showConfirm) {
         label: newKey.label,
         weight: newKey.weight || 1,
         proxy_url: newKey.proxy_url,
+        cookie: newKey.cookie,
+        workspace_id: newKey.workspace_id,
       };
       if (editing) {
         await api("/keys/" + editingKeyId.value, "PATCH", payload, t);
@@ -94,6 +104,19 @@ export function useKeys(api, showToast, t, showConfirm) {
     }
   }
 
+  async function fetchQuota(id) {
+    quotaLoading.value[id] = true;
+    try {
+      const d = await api("/keys/" + id + "/quota", "GET", null, t);
+      quotaData.value[id] = d;
+    } catch (e) {
+      quotaData.value[id] = { error: e.message, configured: false };
+      showToast(e.message, "error");
+    } finally {
+      quotaLoading.value[id] = false;
+    }
+  }
+
   async function remove(id) {
     const item = keys.value.find((k) => k.id === id);
     const name = item ? item.label || item.value : "";
@@ -112,11 +135,25 @@ export function useKeys(api, showToast, t, showConfirm) {
     );
   }
 
+  // Format quota percent display
+  function quotaPercent(percent) {
+    if (percent === null || percent === undefined) return "—";
+    return percent + "%";
+  }
+
+  function quotaBadgeClass(percent) {
+    if (percent >= 80) return "badge-red";
+    if (percent >= 50) return "badge-yellow";
+    return "badge-green";
+  }
+
   return {
     keys,
     newKey,
     editingKeyId,
     showKeyModal,
+    quotaLoading,
+    quotaData,
     openKeyModal,
     openKeySettings,
     closeKeyModal,
@@ -124,6 +161,9 @@ export function useKeys(api, showToast, t, showConfirm) {
     add,
     toggle,
     resetCooldown,
+    fetchQuota,
     remove,
+    quotaPercent,
+    quotaBadgeClass,
   };
 }

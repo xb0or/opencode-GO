@@ -1,4 +1,4 @@
-/**
+﻿/**
  * OpenCode-SW Admin 管理面板 - 主入口
  *
  * ES Module 入口文件，导入各模块并创建 Vue 3 应用。
