@@ -1,5 +1,6 @@
 ## 2026-06-20
 
+- 根据历史 HAR 补充 Go 限额查询：Workspace ID 输入支持从 `/workspace/wrk_.../go` URL 自动提取，并在 `_server` quota 失败时回退解析工作区 Go 页面 SSR hydration 中的限额数据。
 - 增强 OpenCode Go 限额查询错误解析：上游 `{status,message}`、Seroval error、HTML 登录页、缺失 usage buckets 不再统一显示 `unexpected response`，改为透出具体原因与排查提示。
 - 修复 OpenCode Go 限额查询的 Workspace 自动识别误判：`workspaces` 返回 Seroval `new Error(...)` 或 HTML 登录页时不再把错误文本中的普通字符串当作候选 Workspace。
 - 自动识别失败时后端返回结构化 `workspaceCandidates` 与操作提示，前端在 API 密钥页展示候选并支持一键保存后重试。

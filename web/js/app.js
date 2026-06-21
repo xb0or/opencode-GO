@@ -341,6 +341,7 @@ createApp({
       quotaWorkspaceCandidates: keys.quotaWorkspaceCandidates,
       quotaCandidateLabel: keys.quotaCandidateLabel,
       normalizeKeyCookie: keys.normalizeKeyCookie,
+      normalizeKeyWorkspace: keys.normalizeKeyWorkspace,
 
       // 令牌管理
       tokens: tokens.tokens,

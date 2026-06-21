@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -37,10 +38,12 @@ const workspacesServerHash = "def39973159c7f0483d8793a822b8dbb10d067e12c65455fcb
 const maxServerFnInstance = 80
 
 var authCookiePattern = regexp.MustCompile(`(?i)(?:^|[;\s])auth=([^;\s]+)`)
+var workspaceInputPattern = regexp.MustCompile(`(?i)\b(wrk_[A-Za-z0-9][A-Za-z0-9_-]{5,127})\b`)
 var workspaceIDPattern = regexp.MustCompile(`(?i)"(?:workspace[_-]?id|workspaceID|id)"\s*:\s*"([^";\s]+)"`)
 var quotedStringPattern = regexp.MustCompile(`"([^"\\]*(?:\\.[^"\\]*)*)"`)
 var serovalErrorPattern = regexp.MustCompile(`new Error\("((?:\\.|[^"\\])*)"\)`)
 var workspaceCandidatePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{5,127}$`)
+var hydratedQuotaPattern = regexp.MustCompile(`mine:!(0|1),useBalance:!(0|1),rollingUsage:(?:\$R\[\d+\]=)?\{status:"([^"]+)",resetInSec:(\d+),usagePercent:(\d+)\},weeklyUsage:(?:\$R\[\d+\]=)?\{status:"([^"]+)",resetInSec:(\d+),usagePercent:(\d+)\},monthlyUsage:(?:\$R\[\d+\]=)?\{status:"([^"]+)",resetInSec:(\d+),usagePercent:(\d+)\}`)
 
 // normalizeAuthCookie accepts pasted browser cookie/header fragments and returns
 // the minimal Cookie header value required by opencode.ai quota RPC: auth=<token>.
@@ -59,6 +62,17 @@ func normalizeAuthCookie(raw string) string {
 	}
 	if !strings.Contains(s, "=") {
 		return "auth=" + s
+	}
+	return s
+}
+
+func normalizeWorkspaceID(raw string) string {
+	s := strings.TrimSpace(strings.Trim(raw, `"'`))
+	if s == "" {
+		return ""
+	}
+	if m := workspaceInputPattern.FindStringSubmatch(s); len(m) == 2 {
+		return m[1]
 	}
 	return s
 }
@@ -384,6 +398,7 @@ func serovalString(s string) json.RawMessage {
 // cookie configured (silent skip).
 func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
 	cookie = normalizeAuthCookie(cookie)
+	workspaceID = normalizeWorkspaceID(workspaceID)
 	if cookie == "" || workspaceID == "" {
 		return nil, nil
 	}
@@ -396,6 +411,11 @@ func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
 			continue
 		}
 		return result, nil
+	}
+	if pageResult, pageErr := fetchGoQuotaFromWorkspacePage(cookie, workspaceID); pageErr == nil && pageResult != nil {
+		return pageResult, nil
+	} else if lastErr != nil {
+		return nil, fmt.Errorf("%w; workspace page fallback failed: %v", lastErr, pageErr)
 	}
 	if lastErr != nil {
 		return nil, lastErr
@@ -460,6 +480,86 @@ func parseGoQuotaResponse(raw []byte, statusCode int) (*GoQuotaResponse, error) 
 		return nil, fmt.Errorf("quota response missing usage buckets: %s", responseSummary(payload, raw))
 	}
 	return &result, nil
+}
+
+func fetchGoQuotaFromWorkspacePage(cookie, workspaceID string) (*GoQuotaResponse, error) {
+	cookie = normalizeAuthCookie(cookie)
+	workspaceID = normalizeWorkspaceID(workspaceID)
+	if cookie == "" || workspaceID == "" {
+		return nil, fmt.Errorf("cookie or workspace ID is empty")
+	}
+
+	pageURL := fmt.Sprintf("https://opencode.ai/workspace/%s/go", url.PathEscape(workspaceID))
+	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build workspace page request: %w", err)
+	}
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Cookie", cookie)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("workspace page http call: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read workspace page: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("workspace page returned HTTP %d", resp.StatusCode)
+	}
+	return parseGoQuotaFromWorkspacePage(raw)
+}
+
+func parseGoQuotaFromWorkspacePage(raw []byte) (*GoQuotaResponse, error) {
+	match := hydratedQuotaPattern.FindSubmatch(raw)
+	if len(match) != 12 {
+		if looksLikeHTML(raw) {
+			return nil, fmt.Errorf("workspace page does not include Go quota data (cookie may be invalid, expired, or not subscribed)")
+		}
+		return nil, fmt.Errorf("workspace page response does not include Go quota data")
+	}
+
+	bucket := func(status, reset, percent []byte) (*GoQuotaBucket, error) {
+		resetInSec, err := strconv.ParseInt(string(reset), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse resetInSec: %w", err)
+		}
+		usagePercent, err := strconv.Atoi(string(percent))
+		if err != nil {
+			return nil, fmt.Errorf("parse usagePercent: %w", err)
+		}
+		return &GoQuotaBucket{
+			Status:       string(status),
+			ResetInSec:   resetInSec,
+			UsagePercent: usagePercent,
+		}, nil
+	}
+
+	rolling, err := bucket(match[3], match[4], match[5])
+	if err != nil {
+		return nil, err
+	}
+	weekly, err := bucket(match[6], match[7], match[8])
+	if err != nil {
+		return nil, err
+	}
+	monthly, err := bucket(match[9], match[10], match[11])
+	if err != nil {
+		return nil, err
+	}
+
+	return &GoQuotaResponse{
+		Mine:         string(match[1]) == "0",
+		UseBalance:   string(match[2]) == "0",
+		RollingUsage: rolling,
+		WeeklyUsage:  weekly,
+		MonthlyUsage: monthly,
+		Raw:          json.RawMessage("{}"),
+	}, nil
 }
 
 func responseSummary(payload any, raw []byte) string {

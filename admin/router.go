@@ -202,7 +202,7 @@ func createKey(c *gin.Context) {
 		Weight:      w,
 		ProxyURL:    strings.TrimSpace(body.ProxyURL),
 		Cookie:      normalizeAuthCookie(body.Cookie),
-		WorkspaceID: strings.TrimSpace(body.WorkspaceID),
+		WorkspaceID: normalizeWorkspaceID(body.WorkspaceID),
 	}
 	if err := store.DB().Create(k).Error; err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -239,9 +239,7 @@ func updateKey(c *gin.Context) {
 	if cookie := normalizeAuthCookie(body.Cookie); cookie != "" {
 		updates["cookie"] = cookie
 	}
-	if workspaceID := strings.TrimSpace(body.WorkspaceID); workspaceID != "" {
-		updates["workspace_id"] = workspaceID
-	}
+	updates["workspace_id"] = normalizeWorkspaceID(body.WorkspaceID)
 	if body.Weight != nil {
 		weight := *body.Weight
 		if weight <= 0 {
@@ -1210,7 +1208,7 @@ func fetchKeyQuota(c *gin.Context) {
 		return
 	}
 
-	workspaceID := strings.TrimSpace(k.WorkspaceID)
+	workspaceID := normalizeWorkspaceID(k.WorkspaceID)
 	var result *GoQuotaResponse
 	if workspaceID == "" {
 		resolvedWorkspaceID, resolvedResult, err := resolveWorkspaceForQuota(cookie)
@@ -1237,9 +1235,19 @@ func fetchKeyQuota(c *gin.Context) {
 		})
 		k.Cookie = cookie
 		k.WorkspaceID = workspaceID
-	} else if cookie != k.Cookie {
-		store.DB().Model(&store.Key{}).Where("id = ?", k.ID).Update("cookie", cookie)
-		k.Cookie = cookie
+	} else {
+		updates := map[string]any{}
+		if cookie != k.Cookie {
+			updates["cookie"] = cookie
+			k.Cookie = cookie
+		}
+		if workspaceID != strings.TrimSpace(k.WorkspaceID) {
+			updates["workspace_id"] = workspaceID
+			k.WorkspaceID = workspaceID
+		}
+		if len(updates) > 0 {
+			store.DB().Model(&store.Key{}).Where("id = ?", k.ID).Updates(updates)
+		}
 	}
 
 	// Mask cookie value in response

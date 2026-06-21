@@ -32,6 +32,13 @@ func TestParseOpenCodeWorkspacesFindsIDsInSerovalText(t *testing.T) {
 	}
 }
 
+func TestNormalizeWorkspaceIDAcceptsWorkspaceURL(t *testing.T) {
+	got := normalizeWorkspaceID("https://opencode.ai/workspace/wrk_01KQ1EE29WRRFXGACZ6XB9QVSS/go")
+	if got != "wrk_01KQ1EE29WRRFXGACZ6XB9QVSS" {
+		t.Fatalf("workspace ID = %q", got)
+	}
+}
+
 func TestParseGoQuotaResponseSurfacesHTTPMessage(t *testing.T) {
 	raw := []byte(`{"status":500,"unhandled":true,"message":"HTTPError"}`)
 
@@ -41,6 +48,24 @@ func TestParseGoQuotaResponseSurfacesHTTPMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "quota returned HTTP 500: 500 HTTPError") {
 		t.Fatalf("unexpected error: %q", err.Error())
+	}
+}
+
+func TestParseGoQuotaFromWorkspacePage(t *testing.T) {
+	raw := []byte(`$R[28]($R[18],$R[33]={mine:!0,useBalance:!1,rollingUsage:$R[34]={status:"ok",resetInSec:18000,usagePercent:0},weeklyUsage:$R[35]={status:"ok",resetInSec:490728,usagePercent:15},monthlyUsage:$R[36]={status:"ok",resetInSec:2591627,usagePercent:7}});`)
+
+	result, err := parseGoQuotaFromWorkspacePage(raw)
+	if err != nil {
+		t.Fatalf("parse page quota: %v", err)
+	}
+	if !result.Mine || result.UseBalance {
+		t.Fatalf("unexpected quota flags: %#v", result)
+	}
+	if result.WeeklyUsage == nil || result.WeeklyUsage.UsagePercent != 15 {
+		t.Fatalf("unexpected weekly usage: %#v", result.WeeklyUsage)
+	}
+	if result.MonthlyUsage == nil || result.MonthlyUsage.UsagePercent != 7 {
+		t.Fatalf("unexpected monthly usage: %#v", result.MonthlyUsage)
 	}
 }
 

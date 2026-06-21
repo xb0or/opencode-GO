@@ -66,6 +66,17 @@ export function useKeys(api, showToast, t, showConfirm) {
     newKey.cookie = normalizeCookieInput(newKey.cookie);
   }
 
+  function normalizeWorkspaceInput(raw) {
+    const value = String(raw || "").trim();
+    if (!value) return "";
+    const match = value.match(/\b(wrk_[A-Za-z0-9][A-Za-z0-9_-]{5,127})\b/i);
+    return match && match[1] ? match[1] : value;
+  }
+
+  function normalizeKeyWorkspace() {
+    newKey.workspace_id = normalizeWorkspaceInput(newKey.workspace_id);
+  }
+
   async function load() {
     try {
       const d = await api("/keys", "GET", null, t);
@@ -86,7 +97,7 @@ export function useKeys(api, showToast, t, showConfirm) {
         weight: newKey.weight || 1,
         proxy_url: newKey.proxy_url,
         cookie: normalizeCookieInput(newKey.cookie),
-        workspace_id: newKey.workspace_id,
+        workspace_id: normalizeWorkspaceInput(newKey.workspace_id),
       };
       if (editing) {
         await api("/keys/" + editingKeyId.value, "PATCH", payload, t);
@@ -239,5 +250,7 @@ export function useKeys(api, showToast, t, showConfirm) {
     quotaCandidateLabel,
     normalizeCookieInput,
     normalizeKeyCookie,
+    normalizeWorkspaceInput,
+    normalizeKeyWorkspace,
   };
 }
