@@ -1,4 +1,4 @@
-﻿* {
+* {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
@@ -1101,6 +1101,31 @@ select:focus {
   font-size: 12px;
 }
 
+.quota-cell {
+  min-width: 190px;
+  font-size: 11px;
+  white-space: normal;
+}
+.quota-list {
+  display: grid;
+  gap: 5px;
+}
+.quota-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.quota-item small,
+.quota-checked {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.quota-checked {
+  margin-top: 2px;
+}
+
 .filter-card {
   padding-bottom: 8px;
 }
@@ -1323,6 +1348,23 @@ select:focus {
 }
 .billing-section {
   grid-column: 1 / -1;
+}
+.error-detail-section {
+  grid-column: 1 / -1;
+  border-color: rgba(239,68,68,0.28);
+  background: rgba(239,68,68,0.06);
+}
+.error-detail-section h3 {
+  color: var(--red);
+}
+.error-detail-section pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 .detail-list {
   display: grid;

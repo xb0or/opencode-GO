@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 使用记录页面组合式函数。
  * 负责筛选、全局统计、详情弹窗和计费展示格式化。
  */
@@ -227,6 +227,10 @@ export function useUsage(api, showToast, t) {
     return (row?.billing_mode || 'token') === 'token' ? '按 Token' : row?.billing_mode;
   }
 
+  function errorDetail(row) {
+    return String(row?.error || '').trim();
+  }
+
   function pageRange() {
     if (!pagination.total) return '0 / 0';
     const start = (pagination.page - 1) * pagination.page_size + 1;
@@ -264,6 +268,7 @@ export function useUsage(api, showToast, t) {
     cacheCreationTokens,
     finalCost,
     billingMode,
+    errorDetail,
     pageRange,
   };
 }

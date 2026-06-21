@@ -16,21 +16,23 @@ import (
 
 // Key is an upstream OpenCode API key belonging to a pool group.
 type Key struct {
-	ID            uint       `gorm:"primaryKey" json:"id"`
-	Value         string     `gorm:"uniqueIndex;size:255;not null" json:"value"`
-	Group         string     `gorm:"index;size:32;not null" json:"group"` // go | custom
-	Label         string     `gorm:"size:128" json:"label"`
-	Enabled       bool       `gorm:"default:true" json:"enabled"`
-	Weight        int        `gorm:"default:1" json:"weight"`
-	ProxyURL      string     `gorm:"size:512" json:"proxy_url"`
-	Cookie        string     `gorm:"size:1024" json:"cookie"`      // opencode.ai session cookie for quota
-	WorkspaceID   string     `gorm:"size:128" json:"workspace_id"` // opencode.ai workspace ID for quota
-	FailCount     int        `json:"fail_count"`
-	CooldownUntil *time.Time `json:"cooldown_until,omitempty"`
-	LastUsed      *time.Time `json:"last_used,omitempty"`
-	UsageCount    int64      `gorm:"default:0" json:"usage_count"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID             uint       `gorm:"primaryKey" json:"id"`
+	Value          string     `gorm:"uniqueIndex;size:255;not null" json:"value"`
+	Group          string     `gorm:"index;size:32;not null" json:"group"` // go | custom
+	Label          string     `gorm:"size:128" json:"label"`
+	Enabled        bool       `gorm:"default:true" json:"enabled"`
+	Weight         int        `gorm:"default:1" json:"weight"`
+	ProxyURL       string     `gorm:"size:512" json:"proxy_url"`
+	Cookie         string     `gorm:"size:1024" json:"cookie"`      // opencode.ai session cookie for quota
+	WorkspaceID    string     `gorm:"size:128" json:"workspace_id"` // opencode.ai workspace ID for quota
+	QuotaSnapshot  string     `gorm:"type:text" json:"-"`           // last quota query payload, persisted for admin UI
+	QuotaUpdatedAt *time.Time `json:"quota_updated_at,omitempty"`
+	FailCount      int        `json:"fail_count"`
+	CooldownUntil  *time.Time `json:"cooldown_until,omitempty"`
+	LastUsed       *time.Time `json:"last_used,omitempty"`
+	UsageCount     int64      `gorm:"default:0" json:"usage_count"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 // Token is a gateway-facing credential a client uses to access the gateway.

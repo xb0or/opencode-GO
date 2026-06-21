@@ -240,14 +240,18 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 		c.Writer.WriteHeader(resp.StatusCode)
 		_, writeErr := c.Writer.Write(body)
 		usage := usageFromResponse(inbound, body)
+		errMsg := copyErrString(writeErr)
+		if errMsg == "" && resp.StatusCode >= http.StatusBadRequest {
+			errMsg = summarizeUpstreamError(resp.StatusCode, body)
+		}
 		if resp.StatusCode < 400 && writeErr == nil {
 			p.MarkSuccess(key.ID)
 			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, "")
 		} else if shouldMarkUpstreamFailure(resp.StatusCode) {
 			p.MarkFailure(key.ID)
-			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, copyErrString(writeErr))
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, errMsg)
 		} else {
-			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, copyErrString(writeErr))
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, errMsg)
 		}
 		return
 	}

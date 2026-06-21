@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"math"
 	"net/http"
 	"strconv"
@@ -162,10 +163,29 @@ func listKeys(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	for i := range keys {
-		keys[i].Value = maskSecret(keys[i].Value)
+	items := make([]keyDTO, 0, len(keys))
+	for _, k := range keys {
+		items = append(items, decorateKey(k))
 	}
-	c.JSON(http.StatusOK, gin.H{"data": keys})
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+type keyDTO struct {
+	store.Key
+	LastQuota any `json:"last_quota,omitempty"`
+}
+
+func decorateKey(k store.Key) keyDTO {
+	k.Value = maskSecret(k.Value)
+	dto := keyDTO{Key: k}
+	if strings.TrimSpace(k.QuotaSnapshot) == "" {
+		return dto
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(k.QuotaSnapshot), &payload); err == nil && len(payload) > 0 {
+		dto.LastQuota = payload
+	}
+	return dto
 }
 
 func createKey(c *gin.Context) {
@@ -236,10 +256,19 @@ func updateKey(c *gin.Context) {
 		"label":     body.Label,
 		"proxy_url": strings.TrimSpace(body.ProxyURL),
 	}
+	oldCookie := normalizeAuthCookie(k.Cookie)
+	oldWorkspaceID := normalizeWorkspaceID(k.WorkspaceID)
+	nextCookie := oldCookie
 	if cookie := normalizeAuthCookie(body.Cookie); cookie != "" {
 		updates["cookie"] = cookie
+		nextCookie = cookie
 	}
-	updates["workspace_id"] = normalizeWorkspaceID(body.WorkspaceID)
+	nextWorkspaceID := normalizeWorkspaceID(body.WorkspaceID)
+	updates["workspace_id"] = nextWorkspaceID
+	if nextCookie != oldCookie || nextWorkspaceID != oldWorkspaceID {
+		updates["quota_snapshot"] = ""
+		updates["quota_updated_at"] = nil
+	}
 	if body.Weight != nil {
 		weight := *body.Weight
 		if weight <= 0 {
@@ -1201,7 +1230,7 @@ func fetchKeyQuota(c *gin.Context) {
 	}
 	cookie := normalizeAuthCookie(k.Cookie)
 	if cookie == "" {
-		c.JSON(http.StatusOK, gin.H{
+		respondKeyQuota(c, k.ID, gin.H{
 			"configured": false,
 			"message":    "cookie not configured",
 		})
@@ -1224,7 +1253,7 @@ func fetchKeyQuota(c *gin.Context) {
 					payload["workspaceCandidates"] = candidates
 				}
 			}
-			c.JSON(http.StatusOK, payload)
+			respondKeyQuota(c, k.ID, payload)
 			return
 		}
 		workspaceID = resolvedWorkspaceID
@@ -1263,7 +1292,7 @@ func fetchKeyQuota(c *gin.Context) {
 		result, err = fetchGoQuota(cookie, workspaceID)
 	}
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
+		respondKeyQuota(c, k.ID, gin.H{
 			"configured":  true,
 			"cookie":      maskedCookie,
 			"workspaceID": workspaceID,
@@ -1276,7 +1305,7 @@ func fetchKeyQuota(c *gin.Context) {
 
 	// Show error from upstream
 	if result.Error != "" {
-		c.JSON(http.StatusOK, gin.H{
+		respondKeyQuota(c, k.ID, gin.H{
 			"configured":  true,
 			"cookie":      maskedCookie,
 			"workspaceID": workspaceID,
@@ -1287,43 +1316,52 @@ func fetchKeyQuota(c *gin.Context) {
 		return
 	}
 
-	// Build response
-	rollingReset := ""
-	weeklyReset := ""
-	monthlyReset := ""
-	if result.RollingUsage != nil {
-		rollingReset = formatGoQuotaReset(result.RollingUsage.ResetInSec)
-	}
-	if result.WeeklyUsage != nil {
-		weeklyReset = formatGoQuotaReset(result.WeeklyUsage.ResetInSec)
-	}
-	if result.MonthlyUsage != nil {
-		monthlyReset = formatGoQuotaReset(result.MonthlyUsage.ResetInSec)
-	}
-
-	c.JSON(http.StatusOK, gin.H{
+	respondKeyQuota(c, k.ID, gin.H{
 		"configured":  true,
 		"cookie":      maskedCookie,
 		"workspaceID": workspaceID,
 		"useBalance":  result.UseBalance,
 		"quota": gin.H{
-			"rolling": gin.H{
-				"usagePercent": result.RollingUsage.UsagePercent,
-				"resetIn":      rollingReset,
-				"status":       result.RollingUsage.Status,
-			},
-			"weekly": gin.H{
-				"usagePercent": result.WeeklyUsage.UsagePercent,
-				"resetIn":      weeklyReset,
-				"status":       result.WeeklyUsage.Status,
-			},
-			"monthly": gin.H{
-				"usagePercent": result.MonthlyUsage.UsagePercent,
-				"resetIn":      monthlyReset,
-				"status":       result.MonthlyUsage.Status,
-			},
+			"rolling": goQuotaBucketPayload(result.RollingUsage),
+			"weekly":  goQuotaBucketPayload(result.WeeklyUsage),
+			"monthly": goQuotaBucketPayload(result.MonthlyUsage),
 		},
 	})
+}
+
+func respondKeyQuota(c *gin.Context, keyID uint, payload gin.H) {
+	checkedAt := time.Now().UTC()
+	payload["checkedAt"] = checkedAt.Format(time.RFC3339)
+	persistKeyQuotaSnapshot(keyID, payload, checkedAt)
+	c.JSON(http.StatusOK, payload)
+}
+
+func persistKeyQuotaSnapshot(keyID uint, payload gin.H, checkedAt time.Time) {
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	store.DB().Model(&store.Key{}).Where("id = ?", keyID).Updates(map[string]any{
+		"quota_snapshot":   string(b),
+		"quota_updated_at": checkedAt,
+	})
+}
+
+func goQuotaBucketPayload(usage *GoQuotaBucket) gin.H {
+	if usage == nil {
+		return gin.H{
+			"usagePercent": nil,
+			"resetInSec":   nil,
+			"resetIn":      "",
+			"status":       "",
+		}
+	}
+	return gin.H{
+		"usagePercent": usage.UsagePercent,
+		"resetInSec":   usage.ResetInSec,
+		"resetIn":      formatGoQuotaReset(usage.ResetInSec),
+		"status":       usage.Status,
+	}
 }
 
 // --- helpers ---

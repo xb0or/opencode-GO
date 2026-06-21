@@ -1,8 +1,13 @@
 package admin
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/opencode-sw/gateway/store"
 )
 
 func TestParseOpenCodeWorkspacesRejectsSerovalError(t *testing.T) {
@@ -96,5 +101,43 @@ func TestParseGoQuotaResponseMissingBucketsIncludesSummary(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "quota response missing usage buckets") {
 		t.Fatalf("unexpected error: %q", err.Error())
+	}
+}
+
+func TestPersistKeyQuotaSnapshotDecoratesKey(t *testing.T) {
+	if err := store.InitForTest("file:admin_quota_snapshot?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	key := &store.Key{Value: "sk-test", Group: "go", Enabled: true, Weight: 1}
+	if err := store.DB().Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	checkedAt := time.Date(2026, 6, 21, 9, 0, 0, 0, time.UTC)
+	persistKeyQuotaSnapshot(key.ID, gin.H{
+		"configured": true,
+		"checkedAt":  checkedAt.Format(time.RFC3339),
+		"quota": gin.H{
+			"rolling": gin.H{"usagePercent": 2, "resetIn": "4 小时", "resetInSec": int64(14400)},
+		},
+	}, checkedAt)
+
+	var saved store.Key
+	if err := store.DB().First(&saved, key.ID).Error; err != nil {
+		t.Fatalf("load key: %v", err)
+	}
+	if saved.QuotaSnapshot == "" || saved.QuotaUpdatedAt == nil {
+		t.Fatalf("quota snapshot was not persisted: %#v", saved)
+	}
+	dto := decorateKey(saved)
+	body, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatalf("marshal dto: %v", err)
+	}
+	if !strings.Contains(string(body), `"last_quota"`) || !strings.Contains(string(body), `"usagePercent":2`) {
+		t.Fatalf("decorated key missing quota snapshot: %s", body)
+	}
+	if strings.Contains(string(body), "quota_snapshot") {
+		t.Fatalf("internal quota snapshot leaked in response: %s", body)
 	}
 }

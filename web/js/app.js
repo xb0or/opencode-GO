@@ -1,19 +1,19 @@
-﻿/**
+/**
  * OpenCode-SW Admin 管理面板 - 主入口
  *
  * ES Module 入口文件，导入各模块并创建 Vue 3 应用。
  */
 
-import { icons } from "./icons.js?v=20260619a";
-import { locales } from "./locales.js?v=20260619a";
-import { createApi, fmtTime } from "./api.js?v=20260619a";
-import { useDashboard } from "./pages/dashboard.js?v=20260619a";
-import { useKeys } from "./pages/keys.js?v=20260619a";
-import { useTokens } from "./pages/tokens.js?v=20260619a";
-import { useModels } from "./pages/models.js?v=20260619a";
-import { useMappings } from "./pages/mappings.js?v=20260619a";
-import { useOps } from "./pages/ops.js?v=20260619a";
-import { useUsage } from "./pages/usage.js?v=20260619a";
+import { icons } from "./icons.js?v=20260621b";
+import { locales } from "./locales.js?v=20260621b";
+import { createApi, fmtTime } from "./api.js?v=20260621b";
+import { useDashboard } from "./pages/dashboard.js?v=20260621b";
+import { useKeys } from "./pages/keys.js?v=20260621b";
+import { useTokens } from "./pages/tokens.js?v=20260621b";
+import { useModels } from "./pages/models.js?v=20260621b";
+import { useMappings } from "./pages/mappings.js?v=20260621b";
+import { useOps } from "./pages/ops.js?v=20260621b";
+import { useUsage } from "./pages/usage.js?v=20260621b";
 
 const { createApp, reactive, ref, watch } = Vue;
 
@@ -317,6 +317,7 @@ createApp({
       usageCacheCreationTokens: usage.cacheCreationTokens,
       usageFinalCost: usage.finalCost,
       usageBillingMode: usage.billingMode,
+      usageErrorDetail: usage.errorDetail,
       usagePageRange: usage.pageRange,
 
       // 密钥管理
@@ -338,6 +339,9 @@ createApp({
       deleteKey: keys.remove,
       quotaPercent: keys.quotaPercent,
       quotaBadgeClass: keys.quotaBadgeClass,
+      quotaBuckets: keys.quotaBuckets,
+      quotaResetLabel: keys.quotaResetLabel,
+      quotaCheckedLabel: keys.quotaCheckedLabel,
       quotaWorkspaceCandidates: keys.quotaWorkspaceCandidates,
       quotaCandidateLabel: keys.quotaCandidateLabel,
       normalizeKeyCookie: keys.normalizeKeyCookie,

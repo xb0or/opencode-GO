@@ -1,4 +1,4 @@
-﻿/**
+/**
  * API 密钥管理页面 - 组合式函数
  * 支持模态框添加和修改密钥设置，以及 Go 限额查询
  */
@@ -80,7 +80,13 @@ export function useKeys(api, showToast, t, showConfirm) {
   async function load() {
     try {
       const d = await api("/keys", "GET", null, t);
-      keys.value = d.data || [];
+      const rows = d.data || [];
+      keys.value = rows;
+      const nextQuota = {};
+      for (const key of rows) {
+        if (key.last_quota) nextQuota[key.id] = key.last_quota;
+      }
+      quotaData.value = nextQuota;
     } catch (e) {
       showToast(e.message, "error");
     }
@@ -137,6 +143,12 @@ export function useKeys(api, showToast, t, showConfirm) {
     try {
       const d = await api("/keys/" + id + "/quota", "GET", null, t);
       quotaData.value[id] = d;
+      const key = keys.value.find((item) => item.id === id);
+      if (key) {
+        if (d?.workspaceID) key.workspace_id = d.workspaceID;
+        if (d?.checkedAt) key.quota_updated_at = d.checkedAt;
+        key.last_quota = d;
+      }
       if (d && d.error) {
         showToast(d.hint || d.error, "error");
       }
@@ -208,9 +220,49 @@ export function useKeys(api, showToast, t, showConfirm) {
   }
 
   function quotaBadgeClass(percent) {
+    if (percent === null || percent === undefined || percent === "") return "badge";
     if (percent >= 80) return "badge-red";
     if (percent >= 50) return "badge-yellow";
     return "badge-green";
+  }
+
+  function quotaBuckets(data) {
+    const quota = data?.quota || {};
+    return [
+      { key: "rolling", label: t("keys.quotaRolling"), ...(quota.rolling || {}) },
+      { key: "weekly", label: t("keys.quotaWeekly"), ...(quota.weekly || {}) },
+      { key: "monthly", label: t("keys.quotaMonthly"), ...(quota.monthly || {}) },
+    ];
+  }
+
+  function quotaResetLabel(bucket) {
+    if (!bucket || (!bucket.resetIn && bucket.resetInSec !== 0)) return t("keys.quotaResetUnknown");
+    const resetIn =
+      bucket.resetInSec !== null && bucket.resetInSec !== undefined
+        ? formatQuotaReset(bucket.resetInSec)
+        : bucket.resetIn;
+    return t("keys.quotaResetIn", { time: resetIn });
+  }
+
+  function quotaCheckedLabel(data) {
+    const raw = data?.checkedAt || data?.checked_at;
+    if (!raw) return "";
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) return "";
+    return t("keys.quotaCheckedAt", { time: date.toLocaleString() });
+  }
+
+  function formatQuotaReset(seconds) {
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n < 0) return "—";
+    const days = Math.floor(n / 86400);
+    const hours = Math.floor((n % 86400) / 3600);
+    const minutes = Math.floor((n % 3600) / 60);
+    const parts = [];
+    if (days) parts.push(days + " " + t("keys.quotaDay"));
+    if (hours) parts.push(hours + " " + t("keys.quotaHour"));
+    if (minutes || parts.length === 0) parts.push(minutes + " " + t("keys.quotaMinute"));
+    return parts.slice(0, 2).join(" ");
   }
 
   function quotaWorkspaceCandidates(data) {
@@ -246,6 +298,9 @@ export function useKeys(api, showToast, t, showConfirm) {
     remove,
     quotaPercent,
     quotaBadgeClass,
+    quotaBuckets,
+    quotaResetLabel,
+    quotaCheckedLabel,
     quotaWorkspaceCandidates,
     quotaCandidateLabel,
     normalizeCookieInput,

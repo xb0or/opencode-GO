@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -11,7 +11,7 @@
     />
     <base href="/admin/" />
     <style>[v-cloak]{display:none!important}</style>
-    <link rel="stylesheet" href="css/admin.css?v=20260619a" />
+    <link rel="stylesheet" href="css/admin.css?v=20260621b" />
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   </head>
@@ -640,6 +640,11 @@
                       </div>
                     </section>
 
+                    <section v-if="usageErrorDetail(usageSelected)" class="usage-detail-section error-detail-section">
+                      <h3>{{t('usage.errorDetail')}}</h3>
+                      <pre>{{usageErrorDetail(usageSelected)}}</pre>
+                    </section>
+
                     <section class="usage-detail-section token-breakdown-section">
                       <h3>{{t('usage.tokenDetail')}}</h3>
                       <div class="token-breakdown-grid">
@@ -734,17 +739,24 @@
                         {{k.cooldown_until?fmtTime(k.cooldown_until):'—'}}
                       </td>
                       <td>{{k.usage_count}}</td>
-                      <td style="font-size: 11px; white-space: nowrap;">
+                      <td class="quota-cell">
                         <span v-if="quotaLoading[k.id]" style="color:var(--muted)">加载中...</span>
                         <template v-else-if="quotaData[k.id]">
                           <template v-if="quotaData[k.id].configured && quotaData[k.id].quota">
-                            <div style="margin-bottom:2px">
-                              <span :class="'badge ' + quotaBadgeClass(quotaData[k.id].quota.weekly.usagePercent)">
-                                周 {{quotaData[k.id].quota.weekly.usagePercent}}%
-                              </span>
-                              <span :class="'badge ' + quotaBadgeClass(quotaData[k.id].quota.monthly.usagePercent)" style="margin-left:2px">
-                                月 {{quotaData[k.id].quota.monthly.usagePercent}}%
-                              </span>
+                            <div class="quota-list">
+                              <div
+                                v-for="bucket in quotaBuckets(quotaData[k.id])"
+                                :key="k.id + '-' + bucket.key"
+                                class="quota-item"
+                              >
+                                <span :class="'badge ' + quotaBadgeClass(bucket.usagePercent)">
+                                  {{bucket.label}} {{quotaPercent(bucket.usagePercent)}}
+                                </span>
+                                <small>{{quotaResetLabel(bucket)}}</small>
+                              </div>
+                              <div v-if="quotaCheckedLabel(quotaData[k.id])" class="quota-checked">
+                                {{quotaCheckedLabel(quotaData[k.id])}}
+                              </div>
                             </div>
                           </template>
                           <template v-else-if="quotaData[k.id].configured">
@@ -1340,6 +1352,6 @@
       <div v-if="toast.show" :class="'toast '+toast.type">{{toast.msg}}</div>
     </div>
 
-    <script type="module" src="js/app.js?v=20260619a"></script>
+    <script type="module" src="js/app.js?v=20260621b"></script>
   </body>
 </html>
