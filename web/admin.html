@@ -693,7 +693,7 @@
                       <th>{{t('table.proxy')}}</th>
                       <th>{{t('table.cooldown')}}</th>
                       <th>{{t('table.usage')}}</th>
-                      <th>Go 限额</th>
+                      <th>{{t('table.goQuota')}}</th>
                       <th>{{t('table.actions')}}</th>
                     </tr>
                     <tr v-for="k in keys" :key="k.id">
@@ -772,11 +772,18 @@
                               {{quotaData[k.id].hint}}
                             </div>
                           </template>
-                          <span v-else class="badge badge-blue" style="cursor:pointer" @click.stop="fetchQuota(k.id)">查询</span>
+                          <span v-else class="badge" :title="quotaData[k.id].message || quotaData[k.id].hint || ''">{{t('keys.quotaNotConfigured')}}</span>
                         </template>
-                        <button v-else class="btn btn-ghost btn-xs" style="font-size:11px;padding:1px 6px" @click.stop="fetchQuota(k.id)">查询</button>
+                        <span v-else style="color:var(--muted)">—</span>
                       </td>
                       <td class="btn-group">
+                        <button
+                          class="btn btn-ghost btn-sm"
+                          @click="fetchQuota(k.id)"
+                          :disabled="quotaLoading[k.id]"
+                        >
+                          {{quotaLoading[k.id]?t('keys.quotaLoading'):(quotaData[k.id]?t('keys.refreshQuota'):t('keys.queryQuota'))}}
+                        </button>
                         <button
                           class="btn btn-ghost btn-sm"
                           @click="resetCooldown(k.id)"
@@ -877,7 +884,101 @@
                   </table>
                 </div>
               </div>
-            </div><div v-if="page==='mappings'" class="mappings-page">
+            </div>
+
+            <!-- Models -->
+            <div v-if="page==='models'" class="models-page">
+              <div class="page-hero">
+                <div>
+                  <div class="eyebrow">{{t('models.eyebrow')}}</div>
+                  <h1>{{t('models.title')}}</h1>
+                  <p>{{t('models.subtitle')}}</p>
+                </div>
+                <div class="hero-actions">
+                  <button
+                    class="btn btn-ghost"
+                    @click="syncModels"
+                    :disabled="syncingModels"
+                  >
+                    {{syncingModels?t('models.syncing'):t('models.sync')}}
+                  </button>
+                  <button class="btn btn-primary" @click="openModal">
+                    {{t('models.addModel')}}
+                  </button>
+                </div>
+              </div>
+              <div class="card">
+                <h2>{{t('models.registered',{count:models.length})}}</h2>
+                <div class="table-wrap">
+                  <table>
+                    <tr>
+                      <th>{{t('table.active')}}</th>
+                      <th>{{t('table.id')}}</th>
+                      <th>{{t('table.name')}}</th>
+                      <th>{{t('table.protocol')}}</th>
+                      <th>{{t('table.context')}}</th>
+                      <th>{{t('table.priority')}}</th>
+                      <th>{{t('table.promptPrice')}}</th>
+                      <th>{{t('table.completionPrice')}}</th>
+                      <th>{{t('table.cachePrice')}}</th>
+                      <th>{{t('table.capabilities')}}</th>
+                      <th>{{t('table.actions')}}</th>
+                    </tr>
+                    <tr v-for="m in models" :key="m.id">
+                      <td>
+                        <label class="toggle"
+                          ><input
+                            type="checkbox"
+                            :checked="m.status!==0"
+                            @change="toggleModel(m.id)" /><span
+                            class="slider"
+                          ></span
+                        ></label>
+                      </td>
+                      <td><code>{{m.id}}</code></td>
+                      <td>{{m.name}}</td>
+                      <td>{{m.protocol}}</td>
+                      <td>{{fmtNumber(m.context_len || m.context_length)}}</td>
+                      <td>{{m.priority||0}}</td>
+                      <td>{{fmtPrice(m.pricing, 'prompt')}}</td>
+                      <td>{{fmtPrice(m.pricing, 'completion')}}</td>
+                      <td style="font-size: 12px">
+                        <div>{{fmtPrice(m.pricing, 'input_cache_read')}}</div>
+                        <div style="color: var(--muted)">
+                          {{fmtPrice(m.pricing, 'input_cache_write')}}
+                        </div>
+                      </td>
+                      <td>
+                        <span
+                          v-for="cap in fmtCapabilities(m)"
+                          :key="m.id + '-' + cap"
+                          class="badge badge-accent capability-badge"
+                        >
+                          {{capabilityLabel(cap)}}
+                        </span>
+                      </td>
+                      <td class="btn-group">
+                        <button
+                          class="btn btn-ghost btn-sm"
+                          @click="openModelSettings(m)"
+                        >
+                          {{t('models.settings')}}
+                        </button>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          @click="deleteModel(m.id)"
+                        >
+                          {{t('models.delete')}}
+                        </button>
+                      </td>
+                    </tr>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Model Mappings -->
+            <div v-if="page==='mappings'" class="mappings-page">
               <div class="page-hero">
                 <div>
                   <div class="eyebrow">{{t('mappings.eyebrow')}}</div>
