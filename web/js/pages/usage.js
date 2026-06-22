@@ -203,8 +203,12 @@ export function useUsage(api, showToast, t) {
     const output = numberOrZero(row?.output_tokens);
     const totalMs = numberOrZero(row?.duration_ms);
     const frt = numberOrZero(row?.first_response_ms);
-    const activeMs = Math.max(1, totalMs - (frt > 0 ? frt : 0));
-    if (!row?.stream || output <= 0 || totalMs <= 0) return '—';
+    // t/s = output / (active传输时间)。需要 frt 才能算出真实的活跃传输窗口；
+    // 跨协议流式是 buffer-then-emit，frt 未记录，totalMs 不能反映逐 token 速率。
+    // 活跃窗口过短（<100ms）时测量误差会被放大成几百几千 t/s，同样不可靠。
+    if (!row?.stream || output <= 0 || totalMs <= 0 || frt <= 0) return '—';
+    const activeMs = totalMs - frt;
+    if (activeMs < 100) return '—';
     return (output / (activeMs / 1000)).toFixed(1) + ' t/s';
   }
 
