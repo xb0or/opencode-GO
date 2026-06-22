@@ -3,12 +3,14 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/opencode-sw/gateway/config"
@@ -76,6 +78,30 @@ func TestShouldMarkUpstreamFailure(t *testing.T) {
 		if got := shouldMarkUpstreamFailure(tt.status); got != tt.want {
 			t.Fatalf("shouldMarkUpstreamFailure(%d) = %v, want %v", tt.status, got, tt.want)
 		}
+	}
+}
+
+func TestUpstreamRequestContextSkipsTimeoutForStreams(t *testing.T) {
+	cfg := config.Get()
+	oldTimeout := cfg.UpstreamTimeout
+	cfg.UpstreamTimeout = 1
+	defer func() { cfg.UpstreamTimeout = oldTimeout }()
+
+	streamCtx, streamCancel := upstreamRequestContext(context.Background(), true)
+	defer streamCancel()
+	if deadline, ok := streamCtx.Deadline(); ok {
+		t.Fatalf("streaming context should not have gateway deadline, got %s", deadline)
+	}
+
+	nonStreamCtx, nonStreamCancel := upstreamRequestContext(context.Background(), false)
+	defer nonStreamCancel()
+	deadline, ok := nonStreamCtx.Deadline()
+	if !ok {
+		t.Fatal("non-streaming context should have a deadline when UPSTREAM_TIMEOUT > 0")
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 || remaining > 2*time.Second {
+		t.Fatalf("non-streaming deadline remaining = %s, want about 1s", remaining)
 	}
 }
 

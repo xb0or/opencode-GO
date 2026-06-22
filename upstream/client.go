@@ -48,7 +48,8 @@ func newClientWithProxy(proxyURL string) *http.Client {
 	}
 }
 
-// Timeout returns the configured upstream timeout for context deadlines.
+// Timeout returns the configured upstream timeout for non-streaming request
+// context deadlines. A non-positive value disables the gateway deadline.
 func Timeout() time.Duration {
 	cfg := config.Get()
 	return time.Duration(cfg.UpstreamTimeout) * time.Second

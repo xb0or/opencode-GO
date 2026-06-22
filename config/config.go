@@ -17,7 +17,7 @@ type Config struct {
 	AdminPassword   string
 	JWTSecret       string
 	DBPath          string
-	UpstreamTimeout int // seconds
+	UpstreamTimeout int // seconds, 0 = no gateway deadline
 
 	// Go upstream base URL (without trailing slash).
 	GoBaseURL string
@@ -51,7 +51,7 @@ func Load() *Config {
 			AdminPassword:    envStr("ADMIN_PASSWORD", "admin"),
 			JWTSecret:        envStr("JWT_SECRET", "opencode-sw-default-secret-change-me"),
 			DBPath:           envStr("DB_PATH", "./data/opencode-sw.db"),
-			UpstreamTimeout:  envInt("UPSTREAM_TIMEOUT", 120),
+			UpstreamTimeout:  envInt("UPSTREAM_TIMEOUT", 0),
 			GoBaseURL:        strings.TrimRight(envStr("GO_BASE_URL", "https://opencode.ai/zen/go"), "/"),
 			ModelMappings:    envStr("MODEL_MAPPINGS", ""),
 			ModelMappingFile: envStr("MODEL_MAPPING_FILE", ""),

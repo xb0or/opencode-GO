@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -143,7 +144,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	baseURL := config.BaseURLFor(route.Upstream)
 	target := baseURL + actualUpstreamPath
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), upstream.Timeout())
+	ctx, cancel := upstreamRequestContext(c.Request.Context(), head.Stream)
 	defer cancel()
 
 	var lastErrMsg string
@@ -164,8 +165,17 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		upstreamClient := upstream.NewClientForProxy(key.ProxyURL)
 		resp, err := upstreamClient.Do(req)
 		if err != nil {
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			lastErrMsg = "failed to reach upstream: " + err.Error()
+			if status, errType, message, ok := classifyProxyContextError(err); ok {
+				lastErrMsg = message
+				markAndLog(c, p, key, route, inbound, status, start, head.Stream, nil, message)
+				if i+1 < len(attempts) && status != statusClientClosedRequest {
+					continue
+				}
+				writeOpenAIError(c, status, errType, message)
+				return
+			}
+			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, lastErrMsg)
 			if i+1 < len(attempts) {
 				continue
@@ -178,6 +188,12 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			body, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
 			if readErr != nil {
+				if status, errType, message, ok := classifyProxyContextError(readErr); ok {
+					lastErrMsg = message
+					markAndLog(c, p, key, route, inbound, status, start, head.Stream, nil, message)
+					writeOpenAIError(c, status, errType, message)
+					return
+				}
 				markKeyFailure(p, key, resp.StatusCode, nil)
 				lastErrMsg = "failed to read upstream error response: " + readErr.Error()
 				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, lastErrMsg)
@@ -213,6 +229,11 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 	if resp.StatusCode >= 400 {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
+			if status, errType, message, ok := classifyProxyContextError(err); ok {
+				markAndLog(c, p, key, route, inbound, status, start, stream, nil, message)
+				writeOpenAIError(c, status, errType, message)
+				return
+			}
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, err.Error())
 			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream error response")
@@ -232,6 +253,11 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 	if !stream {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
+			if status, errType, message, ok := classifyProxyContextError(err); ok {
+				markAndLog(c, p, key, route, inbound, status, start, false, nil, message)
+				writeOpenAIError(c, status, errType, message)
+				return
+			}
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, err.Error())
 			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream response")
@@ -264,6 +290,8 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 	if resp.StatusCode < 400 && copyErr == nil {
 		p.MarkSuccess(key.ID)
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, "", firstResponseMs)
+	} else if status, _, message, ok := classifyProxyContextError(copyErr); ok {
+		markAndLog(c, p, key, route, inbound, status, start, stream, usage, message, firstResponseMs)
 	} else if shouldMarkUpstreamFailure(resp.StatusCode) {
 		markKeyFailure(p, key, resp.StatusCode, nil)
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, copyErrString(copyErr), firstResponseMs)
@@ -282,6 +310,11 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		// Don't convert error responses; pass them through.
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
+			if status, errType, message, ok := classifyProxyContextError(err); ok {
+				markAndLog(c, p, key, route, inbound, status, start, stream, nil, message)
+				writeOpenAIError(c, status, errType, message)
+				return
+			}
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, err.Error())
 			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream error response")
@@ -308,6 +341,11 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		// after having already committed a 200 status to the client.
 		upstreamBody, err := io.ReadAll(resp.Body)
 		if err != nil {
+			if status, errType, message, ok := classifyProxyContextError(err); ok {
+				markAndLog(c, p, key, route, inbound, status, start, true, nil, message)
+				writeOpenAIError(c, status, errType, message)
+				return
+			}
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, err.Error())
 			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream response")
@@ -349,6 +387,11 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		// Non-streaming: buffer, convert, write.
 		upstreamBody, err := io.ReadAll(resp.Body)
 		if err != nil {
+			if status, errType, message, ok := classifyProxyContextError(err); ok {
+				markAndLog(c, p, key, route, inbound, status, start, false, nil, message)
+				writeOpenAIError(c, status, errType, message)
+				return
+			}
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, err.Error())
 			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream response")
@@ -584,6 +627,32 @@ func shouldMarkUpstreamFailure(status int) bool {
 // retried with another available key before returning it to the client.
 func shouldRetryWithNextKey(status int) bool {
 	return shouldMarkUpstreamFailure(status)
+}
+
+const statusClientClosedRequest = 499
+
+func upstreamRequestContext(parent context.Context, stream bool) (context.Context, context.CancelFunc) {
+	if stream {
+		return parent, func() {}
+	}
+	timeout := upstream.Timeout()
+	if timeout <= 0 {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func classifyProxyContextError(err error) (int, string, string, bool) {
+	if err == nil {
+		return 0, "", "", false
+	}
+	if errors.Is(err, context.Canceled) {
+		return statusClientClosedRequest, "client_closed_request", "client canceled request", true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusGatewayTimeout, "upstream_timeout", "upstream request timed out", true
+	}
+	return 0, "", "", false
 }
 
 func markKeyFailure(p *pool.Picker, key *store.Key, status int, body []byte) {
