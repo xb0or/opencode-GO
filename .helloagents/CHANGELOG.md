@@ -1,3 +1,10 @@
+## 2026-06-23
+
+- 修复 `/v1/responses` 跨协议返回空回复风险：Responses 非流式响应补齐 `output_text`，解码时支持 `output_text` 兜底，Chat 数组内容中的 `input_text`/`output_text` 会归一为可见文本。
+- 修复 Chat SSE 转 Responses SSE 的事件兼容性：文本流补齐 `response.content_part.added/done`，`output_index=0`、`content_index=0`、`item_id` 不再因零值省略，`response.completed` 同步带 `output_text`。
+- 使用记录页隐藏不可信的流式吞吐：活跃传输窗口小于 1 秒或推算速率超过 250 t/s 时显示 `—`，避免上游缓冲/测量误差产生几百几千 t/s；更新前端资源版本到 `20260623a`。
+- 补充 Responses 可见文本、`output_text` 兜底和 Chat→Responses 流式事件回归测试，验证 `go test ./...` 通过。
+
 ## 2026-06-22
 
 - ???????? `UPSTREAM_TIMEOUT=120` ???????????????????????????? 120 ???? 200 ???? `context deadline exceeded`?
@@ -162,4 +169,3 @@
 - 修复代理遇到上游 KEY 相关错误时直接返回的问题：`401/402/403/429/5xx` 会先记录失败 KEY，再自动尝试同组其它可用 KEY。
 - 最近调用记录现在会从上游非 2xx 响应体提取并脱敏错误摘要，写入 `UsageLog.Error`，便于后台定位具体失败原因。
 - 新增 API 与 KEY 池回归测试，覆盖 fallback 成功、最终上游错误展示、候选 KEY 顺序。
-

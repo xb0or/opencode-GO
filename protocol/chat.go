@@ -331,8 +331,12 @@ func chatMsgToIR(m ChatMessage) IRMessage {
 			b, _ := json.Marshal(item)
 			var bc ChatContent
 			if err := json.Unmarshal(b, &bc); err == nil {
+				contentType := bc.Type
+				if contentType == "input_text" || contentType == "output_text" {
+					contentType = "text"
+				}
 				ir.Content = append(ir.Content, IRContent{
-					Type: bc.Type,
+					Type: contentType,
 					Text: bc.Text,
 					Source: func() *IRImageSource {
 						if bc.ImageURL != nil {

@@ -516,6 +516,16 @@ func emitResponsesStream(dst io.Writer, resp *IRResponse) error {
 			}
 		}
 		if text != "" {
+			partAdded := &IRStreamEvent{
+				Type: "response.content_part.added",
+				Choice: &IRChoice{
+					Index: outputIndex,
+					Delta: &IRMessage{Content: []IRContent{{Type: "text"}}},
+				},
+			}
+			if err := enc.WriteEvent(partAdded); err != nil {
+				return err
+			}
 			deltaEv := &IRStreamEvent{
 				Type:         "response.output_text.delta",
 				ContentDelta: text,
@@ -525,10 +535,19 @@ func emitResponsesStream(dst io.Writer, resp *IRResponse) error {
 				return err
 			}
 			doneEv := &IRStreamEvent{
-				Type:   "response.output_text.done",
-				Choice: &IRChoice{Index: outputIndex},
+				Type:         "response.output_text.done",
+				ContentDelta: text,
+				Choice:       &IRChoice{Index: outputIndex},
 			}
 			if err := enc.WriteEvent(doneEv); err != nil {
+				return err
+			}
+			partDone := &IRStreamEvent{
+				Type:         "response.content_part.done",
+				ContentDelta: text,
+				Choice:       &IRChoice{Index: outputIndex},
+			}
+			if err := enc.WriteEvent(partDone); err != nil {
 				return err
 			}
 		}

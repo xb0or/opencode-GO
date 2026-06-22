@@ -19,6 +19,9 @@ function round2(v) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 }
 
+const MIN_STREAM_RATE_ACTIVE_MS = 1000;
+const MAX_REASONABLE_STREAM_TPS = 250;
+
 function dateTimeLocalValue(date) {
   const pad = (n) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -205,11 +208,14 @@ export function useUsage(api, showToast, t) {
     const frt = numberOrZero(row?.first_response_ms);
     // t/s = output / (active传输时间)。需要 frt 才能算出真实的活跃传输窗口；
     // 跨协议流式是 buffer-then-emit，frt 未记录，totalMs 不能反映逐 token 速率。
-    // 活跃窗口过短（<100ms）时测量误差会被放大成几百几千 t/s，同样不可靠。
+    // 活跃窗口过短、FRT 接近总耗时或上游一次性吐出缓冲时，测量误差会被放大成几百几千 t/s。
+    // 这种值不代表模型真实生成速度，直接隐藏，避免误导使用记录。
     if (!row?.stream || output <= 0 || totalMs <= 0 || frt <= 0) return '—';
     const activeMs = totalMs - frt;
-    if (activeMs < 100) return '—';
-    return (output / (activeMs / 1000)).toFixed(1) + ' t/s';
+    if (activeMs < MIN_STREAM_RATE_ACTIVE_MS) return '—';
+    const rate = output / (activeMs / 1000);
+    if (!Number.isFinite(rate) || rate <= 0 || rate > MAX_REASONABLE_STREAM_TPS) return '—';
+    return rate.toFixed(1) + ' t/s';
   }
 
   function latencyLine(row) {

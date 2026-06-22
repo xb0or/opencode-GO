@@ -640,6 +640,53 @@ func TestConvertResponse_ChatToMessages(t *testing.T) {
 	}
 }
 
+func TestConvertResponse_ChatToResponsesIncludesVisibleText(t *testing.T) {
+	body := []byte(`{
+		"id": "chatcmpl-123",
+		"object": "chat.completion",
+		"model": "glm-5.2",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "Hello from responses"},
+			"finish_reason": "stop"
+		}],
+		"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+	}`)
+	out, err := ConvertResponse(config.ProtocolChat, config.ProtocolResponses, body)
+	if err != nil {
+		t.Fatalf("chat→responses: %v", err)
+	}
+
+	var resp RespResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("chat→responses output JSON: %v", err)
+	}
+	if resp.OutputText != "Hello from responses" {
+		t.Fatalf("output_text = %q, want visible assistant text; body=%s", resp.OutputText, string(out))
+	}
+	if len(resp.Output) != 1 || len(resp.Output[0].Content) != 1 || resp.Output[0].Content[0].Text != "Hello from responses" {
+		t.Fatalf("responses output missing visible content: %#v", resp.Output)
+	}
+}
+
+func TestDecodeResponsesResponseUsesOutputTextFallback(t *testing.T) {
+	body := []byte(`{
+		"id": "resp_123",
+		"object": "response",
+		"model": "glm-5.2",
+		"status": "completed",
+		"output_text": "fallback text",
+		"usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+	}`)
+	ir, err := DecodeResponsesResponse(body)
+	if err != nil {
+		t.Fatalf("decode responses: %v", err)
+	}
+	if len(ir.Choices) != 1 || ir.Choices[0].Message == nil || visibleText(*ir.Choices[0].Message) != "fallback text" {
+		t.Fatalf("output_text fallback not preserved: %#v", ir.Choices)
+	}
+}
+
 func TestConvertResponse_MessagesToChat(t *testing.T) {
 	body := []byte(`{
 		"id": "msg-123",
@@ -871,6 +918,36 @@ func TestStreamConverterWithUsageReturnsBufferedUsage(t *testing.T) {
 	}
 	if !strings.Contains(dst.String(), `"type":"message_stop"`) {
 		t.Fatalf("converted stream missing message_stop event: %s", dst.String())
+	}
+}
+
+func TestStreamConverterChatToResponsesEmitsIndexedTextEvents(t *testing.T) {
+	src := strings.NewReader("data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n")
+	var dst bytes.Buffer
+	resp, err := StreamConverterWithUsage(&dst, src, config.ProtocolChat, config.ProtocolResponses)
+	if err != nil {
+		t.Fatalf("StreamConverterWithUsage error: %v", err)
+	}
+	if resp == nil || len(resp.Choices) != 1 || resp.Choices[0].Message == nil || visibleText(*resp.Choices[0].Message) != "hi there" {
+		t.Fatalf("buffered response missing visible text: %#v", resp)
+	}
+	out := dst.String()
+	for _, want := range []string{
+		`"type":"response.content_part.added"`,
+		`"type":"response.output_text.delta"`,
+		`"output_index":0`,
+		`"content_index":0`,
+		`"item_id":"msg_0"`,
+		`"delta":"hi there"`,
+		`"type":"response.content_part.done"`,
+		`"type":"response.completed"`,
+		`"output_text":"hi there"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("responses stream missing %s:\n%s", want, out)
+		}
 	}
 }
 

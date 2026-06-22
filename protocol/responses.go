@@ -58,6 +58,7 @@ type RespResponse struct {
 	Object       string           `json:"object"` // response
 	Model        string           `json:"model"`
 	Output       []RespOutputItem `json:"output"`
+	OutputText   string           `json:"output_text,omitempty"`
 	Usage        *RespUsage       `json:"usage,omitempty"`
 	Status       string           `json:"status,omitempty"`
 	Instructions string           `json:"instructions,omitempty"`
@@ -211,6 +212,29 @@ func DecodeResponsesResponse(data []byte) (*IRResponse, error) {
 			FinishReason: mapFinishReason(resp.Status),
 		})
 	}
+	if resp.OutputText != "" {
+		if len(ir.Choices) == 0 {
+			msg := IRMessage{Role: "assistant", Text: resp.OutputText}
+			msg.Content = appendTextContent(msg.Content, resp.OutputText)
+			ir.Choices = append(ir.Choices, IRChoice{
+				Index:        0,
+				Message:      &msg,
+				FinishReason: mapFinishReason(resp.Status),
+			})
+		} else {
+			hasVisible := false
+			for _, ch := range ir.Choices {
+				if ch.Message != nil && visibleText(*ch.Message) != "" {
+					hasVisible = true
+					break
+				}
+			}
+			if !hasVisible && ir.Choices[0].Message != nil {
+				ir.Choices[0].Message.Text = resp.OutputText
+				ir.Choices[0].Message.Content = appendTextContent(ir.Choices[0].Message.Content, resp.OutputText)
+			}
+		}
+	}
 	return ir, nil
 }
 
@@ -232,6 +256,7 @@ func EncodeResponsesResponse(ir *IRResponse) ([]byte, error) {
 	for _, ch := range ir.Choices {
 		if ch.Message != nil {
 			resp.Output = append(resp.Output, irMsgToRespOutput(*ch.Message))
+			resp.OutputText += visibleText(*ch.Message)
 		}
 	}
 	return json.Marshal(resp)
@@ -320,68 +345,109 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 
 	case "response.output_item.added":
 		item := &RespOutputItem{Type: "message", Role: "assistant"}
+		idx := responseOutputIndex(ev)
 		if ev.Choice != nil && ev.Choice.Delta != nil && len(ev.Choice.Delta.ToolCalls) > 0 {
 			tc := ev.Choice.Delta.ToolCalls[0]
-			item = &RespOutputItem{Type: "function_call", Name: tc.Name, CallID: tc.ID}
+			item = &RespOutputItem{Type: "function_call", ID: responseItemID(idx), Name: tc.Name, CallID: tc.ID}
+		} else {
+			item.ID = responseItemID(idx)
 		}
-		idx := 0
-		if ev.Choice != nil {
-			idx = ev.Choice.Index
-		}
-		return json.Marshal(RespStreamEvent{Type: "response.output_item.added", OutputIndex: idx, Item: item})
+		return json.Marshal(map[string]any{
+			"type":         "response.output_item.added",
+			"output_index": idx,
+			"item":         item,
+		})
 
 	case "response.content_part.added":
-		idx := 0
-		if ev.Choice != nil {
-			idx = ev.Choice.Index
+		idx := responseOutputIndex(ev)
+		part := RespContent{Type: "output_text", Text: ""}
+		if ev.Choice != nil && ev.Choice.Delta != nil {
+			if thinking := thinkingText(*ev.Choice.Delta); thinking != "" {
+				part = RespContent{Type: "reasoning_text", Text: thinking, ReasoningContent: stringPtr(thinking)}
+			}
 		}
-		return json.Marshal(RespStreamEvent{Type: "response.content_part.added", OutputIndex: idx})
+		return json.Marshal(map[string]any{
+			"type":          "response.content_part.added",
+			"item_id":       responseItemID(idx),
+			"output_index":  idx,
+			"content_index": 0,
+			"part":          part,
+		})
 
 	case "response.output_text.delta":
-		idx := 0
-		if ev.Choice != nil {
-			idx = ev.Choice.Index
-		}
-		return json.Marshal(RespStreamEvent{Type: "response.output_text.delta", OutputIndex: idx, Delta: ev.ContentDelta})
+		idx := responseOutputIndex(ev)
+		return json.Marshal(map[string]any{
+			"type":          "response.output_text.delta",
+			"item_id":       responseItemID(idx),
+			"output_index":  idx,
+			"content_index": 0,
+			"delta":         ev.ContentDelta,
+		})
 
 	case "response.reasoning_text.delta", "response.reasoning.delta", "response.reasoning_content.delta":
-		idx := 0
+		idx := responseOutputIndex(ev)
 		delta := ev.ContentDelta
 		if ev.Choice != nil {
-			idx = ev.Choice.Index
 			if ev.Choice.Delta != nil {
 				if text := thinkingText(*ev.Choice.Delta); text != "" {
 					delta = text
 				}
 			}
 		}
-		return json.Marshal(RespStreamEvent{Type: ev.Type, OutputIndex: idx, Delta: delta, ReasoningContent: stringPtr(delta)})
+		return json.Marshal(map[string]any{
+			"type":              ev.Type,
+			"item_id":           responseItemID(idx),
+			"output_index":      idx,
+			"content_index":     0,
+			"delta":             delta,
+			"reasoning_content": delta,
+		})
 
 	case "response.output_text.done":
-		idx := 0
-		if ev.Choice != nil {
-			idx = ev.Choice.Index
-		}
-		return json.Marshal(RespStreamEvent{Type: "response.output_text.done", OutputIndex: idx})
+		idx := responseOutputIndex(ev)
+		return json.Marshal(map[string]any{
+			"type":          "response.output_text.done",
+			"item_id":       responseItemID(idx),
+			"output_index":  idx,
+			"content_index": 0,
+			"text":          ev.ContentDelta,
+		})
+
+	case "response.content_part.done":
+		idx := responseOutputIndex(ev)
+		return json.Marshal(map[string]any{
+			"type":          "response.content_part.done",
+			"item_id":       responseItemID(idx),
+			"output_index":  idx,
+			"content_index": 0,
+			"part":          RespContent{Type: "output_text", Text: ev.ContentDelta},
+		})
 
 	case "response.reasoning_text.done", "response.reasoning.done", "response.reasoning_content.done":
-		idx := 0
-		if ev.Choice != nil {
-			idx = ev.Choice.Index
-		}
-		return json.Marshal(RespStreamEvent{Type: ev.Type, OutputIndex: idx})
+		idx := responseOutputIndex(ev)
+		return json.Marshal(map[string]any{
+			"type":          ev.Type,
+			"item_id":       responseItemID(idx),
+			"output_index":  idx,
+			"content_index": 0,
+		})
 
 	case "response.function_call_arguments.delta":
-		idx := 0
+		idx := responseOutputIndex(ev)
 		delta := ""
 		if ev.ToolCallDelta != nil {
 			idx = ev.ToolCallDelta.Index
 			delta = ev.ToolCallDelta.Arguments
 		}
-		return json.Marshal(RespStreamEvent{Type: "response.function_call_arguments.delta", OutputIndex: idx, Delta: delta})
+		return json.Marshal(map[string]any{
+			"type":         "response.function_call_arguments.delta",
+			"item_id":      responseItemID(idx),
+			"output_index": idx,
+			"delta":        delta,
+		})
 
 	case "response.function_call_arguments.done":
-		idx := 0
+		idx := responseOutputIndex(ev)
 		var item *RespOutputItem
 		if ev.Choice != nil {
 			idx = ev.Choice.Index
@@ -389,25 +455,36 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 				tc := ev.Choice.Message.ToolCalls[0]
 				item = &RespOutputItem{
 					Type:      "function_call",
+					ID:        responseItemID(idx),
 					Name:      tc.Name,
 					CallID:    tc.ID,
 					Arguments: tc.Arguments,
 				}
 			}
 		}
-		return json.Marshal(RespStreamEvent{Type: "response.function_call_arguments.done", OutputIndex: idx, Item: item})
+		return json.Marshal(map[string]any{
+			"type":         "response.function_call_arguments.done",
+			"item_id":      responseItemID(idx),
+			"output_index": idx,
+			"item":         item,
+		})
 
 	case "response.output_item.done":
-		idx := 0
+		idx := responseOutputIndex(ev)
 		var item *RespOutputItem
 		if ev.Choice != nil {
 			idx = ev.Choice.Index
 			if ev.Choice.Message != nil {
 				itemVal := irMsgToRespOutput(*ev.Choice.Message)
+				itemVal.ID = responseItemID(idx)
 				item = &itemVal
 			}
 		}
-		return json.Marshal(RespStreamEvent{Type: "response.output_item.done", OutputIndex: idx, Item: item})
+		return json.Marshal(map[string]any{
+			"type":         "response.output_item.done",
+			"output_index": idx,
+			"item":         item,
+		})
 
 	case "response.completed":
 		var resp *RespResponse
@@ -423,6 +500,7 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 			for _, ch := range ev.Response.Choices {
 				if ch.Message != nil {
 					resp.Output = append(resp.Output, irMsgToRespOutput(*ch.Message))
+					resp.OutputText += visibleText(*ch.Message)
 				}
 			}
 		}
@@ -435,6 +513,17 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 }
 
 // ──────────────────────── helpers ───────────────────────────────────
+
+func responseOutputIndex(ev *IRStreamEvent) int {
+	if ev != nil && ev.Choice != nil {
+		return ev.Choice.Index
+	}
+	return 0
+}
+
+func responseItemID(index int) string {
+	return fmt.Sprintf("msg_%d", index)
+}
 
 func decodeResponsesInputItems(items []RespInputItem) []IRMessage {
 	messages := make([]IRMessage, 0, len(items))
