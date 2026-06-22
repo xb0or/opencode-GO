@@ -141,3 +141,44 @@ func TestPersistKeyQuotaSnapshotDecoratesKey(t *testing.T) {
 		t.Fatalf("internal quota snapshot leaked in response: %s", body)
 	}
 }
+
+func TestKeyUsagePayloadReturnsLocalUsage(t *testing.T) {
+	if err := store.InitForTest("file:admin_key_usage?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	key := &store.Key{Value: "sk-usage", Group: "go", Enabled: true, Weight: 1}
+	if err := store.DB().Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	now := time.Now()
+	rows := []store.UsageLog{
+		{KeyID: key.ID, StatusCode: 200, InputTokens: 10, OutputTokens: 5, TotalTokens: 15, CreatedAt: now.Add(-30 * time.Minute)},
+		{KeyID: key.ID, StatusCode: 200, InputTokens: 20, OutputTokens: 10, TotalTokens: 30, CreatedAt: now.Add(-3 * 24 * time.Hour)},
+		{KeyID: key.ID, StatusCode: 200, InputTokens: 30, OutputTokens: 20, TotalTokens: 50, CreatedAt: now.Add(-20 * 24 * time.Hour)},
+		{KeyID: key.ID, StatusCode: 200, InputTokens: 40, OutputTokens: 20, TotalTokens: 60, CreatedAt: now.Add(-40 * 24 * time.Hour)},
+	}
+	for _, row := range rows {
+		if err := store.DB().Create(&row).Error; err != nil {
+			t.Fatalf("create usage log: %v", err)
+		}
+	}
+
+	payload := keyUsagePayload(key.ID)
+	total := payload["total"].(quotaUsageStats)
+	rolling := payload["rolling"].(quotaUsageStats)
+	weekly := payload["weekly"].(quotaUsageStats)
+	monthly := payload["monthly"].(quotaUsageStats)
+
+	if total.Requests != 4 || total.TotalTokens != 155 {
+		t.Fatalf("total usage=%#v, want 4 requests / 155 tokens", total)
+	}
+	if rolling.Requests != 1 || rolling.TotalTokens != 15 {
+		t.Fatalf("rolling usage=%#v, want 1 request / 15 tokens", rolling)
+	}
+	if weekly.Requests != 2 || weekly.TotalTokens != 45 {
+		t.Fatalf("weekly usage=%#v, want 2 requests / 45 tokens", weekly)
+	}
+	if monthly.Requests != 3 || monthly.TotalTokens != 95 {
+		t.Fatalf("monthly usage=%#v, want 3 requests / 95 tokens", monthly)
+	}
+}

@@ -328,7 +328,84 @@ func listTokens(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"data": ts})
+	c.JSON(http.StatusOK, gin.H{"data": decorateTokens(ts)})
+}
+
+type tokenDTO struct {
+	store.Token
+	TotalRequests     int64 `json:"total_requests"`
+	TotalInputTokens  int64 `json:"total_input_tokens"`
+	TotalOutputTokens int64 `json:"total_output_tokens"`
+	TotalTokens       int64 `json:"total_tokens"`
+	TodayRequests     int64 `json:"today_requests"`
+	TodayTokens       int64 `json:"today_tokens"`
+	LastHourRequests  int64 `json:"last_hour_requests"`
+	LastHourTokens    int64 `json:"last_hour_tokens"`
+}
+
+type tokenUsageAggregate struct {
+	TokenID      uint  `gorm:"column:token_id"`
+	Requests     int64 `gorm:"column:requests"`
+	InputTokens  int64 `gorm:"column:input_tokens"`
+	OutputTokens int64 `gorm:"column:output_tokens"`
+	TotalTokens  int64 `gorm:"column:total_tokens"`
+}
+
+func decorateTokens(tokens []store.Token) []tokenDTO {
+	items := make([]tokenDTO, 0, len(tokens))
+	if len(tokens) == 0 {
+		return items
+	}
+	ids := make([]uint, 0, len(tokens))
+	for _, tk := range tokens {
+		ids = append(ids, tk.ID)
+	}
+	now := time.Now()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	lastHour := now.Add(-time.Hour)
+
+	total := tokenUsageAggregates(ids, nil)
+	today := tokenUsageAggregates(ids, &todayStart)
+	lastHourStats := tokenUsageAggregates(ids, &lastHour)
+
+	for _, tk := range tokens {
+		dto := tokenDTO{Token: tk}
+		if s, ok := total[tk.ID]; ok {
+			dto.TotalRequests = s.Requests
+			dto.TotalInputTokens = s.InputTokens
+			dto.TotalOutputTokens = s.OutputTokens
+			dto.TotalTokens = s.TotalTokens
+		}
+		if s, ok := today[tk.ID]; ok {
+			dto.TodayRequests = s.Requests
+			dto.TodayTokens = s.TotalTokens
+		}
+		if s, ok := lastHourStats[tk.ID]; ok {
+			dto.LastHourRequests = s.Requests
+			dto.LastHourTokens = s.TotalTokens
+		}
+		items = append(items, dto)
+	}
+	return items
+}
+
+func tokenUsageAggregates(tokenIDs []uint, since *time.Time) map[uint]tokenUsageAggregate {
+	out := map[uint]tokenUsageAggregate{}
+	if len(tokenIDs) == 0 {
+		return out
+	}
+	q := store.DB().Model(&store.UsageLog{}).Where("token_id IN ?", tokenIDs)
+	if since != nil {
+		q = q.Where("created_at >= ?", *since)
+	}
+	var rows []tokenUsageAggregate
+	q.Select("token_id, count(*) as requests, coalesce(sum(input_tokens),0) as input_tokens, coalesce(sum(output_tokens),0) as output_tokens, coalesce(sum(total_tokens),0) as total_tokens").
+		Group("token_id").
+		Scan(&rows)
+	for _, row := range rows {
+		out[row.TokenID] = row
+	}
+	return out
 }
 
 func createTokenAdmin(c *gin.Context) {
@@ -1332,6 +1409,9 @@ func fetchKeyQuota(c *gin.Context) {
 func respondKeyQuota(c *gin.Context, keyID uint, payload gin.H) {
 	checkedAt := time.Now().UTC()
 	payload["checkedAt"] = checkedAt.Format(time.RFC3339)
+	if _, exists := payload["usage"]; !exists {
+		payload["usage"] = keyUsagePayload(keyID)
+	}
 	persistKeyQuotaSnapshot(keyID, payload, checkedAt)
 	c.JSON(http.StatusOK, payload)
 }
@@ -1362,6 +1442,37 @@ func goQuotaBucketPayload(usage *GoQuotaBucket) gin.H {
 		"resetIn":      formatGoQuotaReset(usage.ResetInSec),
 		"status":       usage.Status,
 	}
+}
+
+type quotaUsageStats struct {
+	Requests     int64 `json:"requests" gorm:"column:requests"`
+	InputTokens  int64 `json:"inputTokens" gorm:"column:input_tokens"`
+	OutputTokens int64 `json:"outputTokens" gorm:"column:output_tokens"`
+	TotalTokens  int64 `json:"totalTokens" gorm:"column:total_tokens"`
+}
+
+func keyUsagePayload(keyID uint) gin.H {
+	now := time.Now()
+	rollingStart := now.Add(-time.Hour)
+	weeklyStart := now.Add(-7 * 24 * time.Hour)
+	monthlyStart := now.Add(-30 * 24 * time.Hour)
+	return gin.H{
+		"total":   keyUsageStats(keyID, nil),
+		"rolling": keyUsageStats(keyID, &rollingStart),
+		"weekly":  keyUsageStats(keyID, &weeklyStart),
+		"monthly": keyUsageStats(keyID, &monthlyStart),
+	}
+}
+
+func keyUsageStats(keyID uint, since *time.Time) quotaUsageStats {
+	var stats quotaUsageStats
+	q := store.DB().Model(&store.UsageLog{}).Where("key_id = ?", keyID)
+	if since != nil {
+		q = q.Where("created_at >= ?", *since)
+	}
+	q.Select("count(*) as requests, coalesce(sum(input_tokens),0) as input_tokens, coalesce(sum(output_tokens),0) as output_tokens, coalesce(sum(total_tokens),0) as total_tokens").
+		Scan(&stats)
+	return stats
 }
 
 // --- helpers ---

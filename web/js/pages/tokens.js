@@ -148,6 +148,30 @@ export function useTokens(api, showToast, t, showConfirm) {
     return "badge-green";
   }
 
+  function tokenUsageMain(tk) {
+    return `${t("tokens.cumulative")} ${formatUsageNumber(tk.total_requests)} ${t("keys.quotaRequests")}`;
+  }
+
+  function tokenUsageTokens(tk) {
+    return `${formatUsageNumber(tk.total_tokens)} ${t("keys.quotaTokens")} · I ${formatUsageNumber(
+      tk.total_input_tokens
+    )} / O ${formatUsageNumber(tk.total_output_tokens)}`;
+  }
+
+  function tokenUsageWindows(tk) {
+    return `${t("tokens.today")} ${formatUsageNumber(tk.today_requests)} ${t("keys.quotaRequests")} / ${formatUsageNumber(
+      tk.today_tokens
+    )} ${t("keys.quotaTokens")} · ${t("tokens.lastHour")} ${formatUsageNumber(tk.last_hour_requests)} ${t(
+      "keys.quotaRequests"
+    )} / ${formatUsageNumber(tk.last_hour_tokens)} ${t("keys.quotaTokens")}`;
+  }
+
+  function formatUsageNumber(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n) || n <= 0) return "0";
+    return n.toLocaleString();
+  }
+
   return {
     tokens,
     newToken,
@@ -165,5 +189,8 @@ export function useTokens(api, showToast, t, showConfirm) {
     requestUsedLabel,
     requestUsedPercent,
     requestBadgeClass,
+    tokenUsageMain,
+    tokenUsageTokens,
+    tokenUsageWindows,
   };
 }

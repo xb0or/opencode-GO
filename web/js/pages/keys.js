@@ -12,6 +12,9 @@ export function useKeys(api, showToast, t, showConfirm) {
   const editingKeyId = ref(null);
   const quotaLoading = ref({});
   const quotaData = ref({});
+  const quotaResetAt = ref({});
+  const quotaTick = ref(Date.now());
+  let quotaTimer = null;
 
   const newKey = reactive({
     value: "",
@@ -83,10 +86,16 @@ export function useKeys(api, showToast, t, showConfirm) {
       const rows = d.data || [];
       keys.value = rows;
       const nextQuota = {};
+      const nextResetAt = {};
       for (const key of rows) {
-        if (key.last_quota) nextQuota[key.id] = key.last_quota;
+        if (key.last_quota) {
+          nextQuota[key.id] = key.last_quota;
+          nextResetAt[key.id] = quotaResetTimes(key.last_quota);
+        }
       }
       quotaData.value = nextQuota;
+      quotaResetAt.value = nextResetAt;
+      if (Object.keys(nextQuota).length) startQuotaTicker();
     } catch (e) {
       showToast(e.message, "error");
     }
@@ -143,6 +152,8 @@ export function useKeys(api, showToast, t, showConfirm) {
     try {
       const d = await api("/keys/" + id + "/quota", "GET", null, t);
       quotaData.value[id] = d;
+      quotaResetAt.value[id] = quotaResetTimes(d);
+      startQuotaTicker();
       const key = keys.value.find((item) => item.id === id);
       if (key) {
         if (d?.workspaceID) key.workspace_id = d.workspaceID;
@@ -226,22 +237,37 @@ export function useKeys(api, showToast, t, showConfirm) {
     return "badge-green";
   }
 
-  function quotaBuckets(data) {
+  function quotaBuckets(data, keyId) {
+    quotaTick.value;
     const quota = data?.quota || {};
+    const usage = data?.usage || {};
+    const resets = quotaResetAt.value[keyId] || {};
     return [
-      { key: "rolling", label: t("keys.quotaRolling"), ...(quota.rolling || {}) },
-      { key: "weekly", label: t("keys.quotaWeekly"), ...(quota.weekly || {}) },
-      { key: "monthly", label: t("keys.quotaMonthly"), ...(quota.monthly || {}) },
+      { key: "total", label: t("keys.quotaTotal"), usage: usage.total || {} },
+      { key: "rolling", label: t("keys.quotaRolling"), ...(quota.rolling || {}), usage: usage.rolling || {}, resetAt: resets.rolling },
+      { key: "weekly", label: t("keys.quotaWeekly"), ...(quota.weekly || {}), usage: usage.weekly || {}, resetAt: resets.weekly },
+      { key: "monthly", label: t("keys.quotaMonthly"), ...(quota.monthly || {}), usage: usage.monthly || {}, resetAt: resets.monthly },
     ];
   }
 
   function quotaResetLabel(bucket) {
-    if (!bucket || (!bucket.resetIn && bucket.resetInSec !== 0)) return t("keys.quotaResetUnknown");
-    const resetIn =
-      bucket.resetInSec !== null && bucket.resetInSec !== undefined
-        ? formatQuotaReset(bucket.resetInSec)
-        : bucket.resetIn;
-    return t("keys.quotaResetIn", { time: resetIn });
+    quotaTick.value;
+    if (!bucket || bucket.key === "total") return "";
+    const resetAt = Number(bucket.resetAt || 0);
+    if (!Number.isFinite(resetAt) || resetAt <= 0) return t("keys.quotaResetUnknown");
+    const remaining = Math.max(0, Math.floor((resetAt - Date.now()) / 1000));
+    const resetAtLabel = new Date(resetAt).toLocaleString([], {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    return (
+      t("keys.quotaResetAt", { time: resetAtLabel }) +
+      "（" +
+      t("keys.quotaCountdown", { time: formatQuotaReset(remaining) }) +
+      "）"
+    );
   }
 
   function quotaCheckedLabel(data) {
@@ -265,6 +291,45 @@ export function useKeys(api, showToast, t, showConfirm) {
     return parts.slice(0, 2).join(" ");
   }
 
+  function quotaUsageLabel(bucket) {
+    const usage = bucket?.usage || {};
+    const requests = formatQuotaNumber(usage.requests);
+    const tokens = formatQuotaNumber(usage.totalTokens ?? usage.total_tokens);
+    return `${requests} ${t("keys.quotaRequests")} · ${tokens} ${t("keys.quotaTokens")}`;
+  }
+
+  function formatQuotaNumber(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n) || n <= 0) return "0";
+    return n.toLocaleString();
+  }
+
+  function quotaResetTimes(data) {
+    const checkedAt = new Date(data?.checkedAt || data?.checked_at || Date.now()).getTime();
+    const quota = data?.quota || {};
+    const out = {};
+    for (const key of ["rolling", "weekly", "monthly"]) {
+      const sec = Number(quota[key]?.resetInSec);
+      if (Number.isFinite(checkedAt) && Number.isFinite(sec) && sec > 0) {
+        out[key] = checkedAt + sec * 1000;
+      }
+    }
+    return out;
+  }
+
+  function startQuotaTicker() {
+    if (quotaTimer) return;
+    quotaTimer = setInterval(() => {
+      quotaTick.value = Date.now();
+    }, 60000);
+  }
+
+  function stopQuotaTicker() {
+    if (!quotaTimer) return;
+    clearInterval(quotaTimer);
+    quotaTimer = null;
+  }
+
   function quotaWorkspaceCandidates(data) {
     if (!data || !Array.isArray(data.workspaceCandidates)) return [];
     return data.workspaceCandidates.filter((item) =>
@@ -286,6 +351,7 @@ export function useKeys(api, showToast, t, showConfirm) {
     showKeyModal,
     quotaLoading,
     quotaData,
+    quotaResetAt,
     openKeyModal,
     openKeySettings,
     closeKeyModal,
@@ -300,6 +366,7 @@ export function useKeys(api, showToast, t, showConfirm) {
     quotaBadgeClass,
     quotaBuckets,
     quotaResetLabel,
+    quotaUsageLabel,
     quotaCheckedLabel,
     quotaWorkspaceCandidates,
     quotaCandidateLabel,
@@ -307,5 +374,7 @@ export function useKeys(api, showToast, t, showConfirm) {
     normalizeKeyCookie,
     normalizeWorkspaceInput,
     normalizeKeyWorkspace,
+    startQuotaTicker,
+    stopQuotaTicker,
   };
 }

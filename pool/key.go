@@ -1,8 +1,13 @@
 package pool
 
 import (
+	"encoding/json"
 	"errors"
+	"log"
 	"math"
+	"net/http"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -190,6 +195,177 @@ func (p *Picker) MarkFailure(keyID uint) {
 		updates["cooldown_until"] = until
 	}
 	store.DB().Model(&store.Key{}).Where("id = ?", k.ID).Updates(updates)
+}
+
+// MarkFailureWithQuota applies Go quota-aware cooldown for upstream 429
+// responses. If a quota reset window cannot be resolved, it falls back to the
+// regular exponential-backoff MarkFailure behavior.
+func (p *Picker) MarkFailureWithQuota(keyID uint, statusCode int, errBody []byte, snapshot string) {
+	if statusCode != http.StatusTooManyRequests {
+		p.MarkFailure(keyID)
+		return
+	}
+
+	var k store.Key
+	if err := store.DB().First(&k, keyID).Error; err != nil {
+		return
+	}
+	if strings.TrimSpace(snapshot) == "" {
+		snapshot = k.QuotaSnapshot
+	}
+	bucket, resetInSec, ok := parse429QuotaBucket(errBody, snapshot)
+	if !ok || resetInSec <= 0 {
+		p.MarkFailure(keyID)
+		return
+	}
+
+	dur := time.Duration(resetInSec) * time.Second
+	if dur > 7*24*time.Hour {
+		log.Printf("warn: key %d quota cooldown from %s bucket is long: %s", keyID, bucket, dur)
+	}
+	until := time.Now().Add(dur)
+	store.DB().Model(&store.Key{}).Where("id = ?", k.ID).Updates(map[string]any{
+		"fail_count":     k.FailCount + 1,
+		"cooldown_until": until,
+	})
+}
+
+type quotaSnapshotBucket struct {
+	UsagePercent int   `json:"usagePercent"`
+	ResetInSec   int64 `json:"resetInSec"`
+}
+
+type quotaSnapshotPayload struct {
+	Quota struct {
+		Rolling quotaSnapshotBucket `json:"rolling"`
+		Weekly  quotaSnapshotBucket `json:"weekly"`
+		Monthly quotaSnapshotBucket `json:"monthly"`
+	} `json:"quota"`
+}
+
+var quotaBucketPattern = regexp.MustCompile(`(?i)\b(rolling|weekly|monthly)\b`)
+
+func parse429QuotaBucket(body []byte, snapshot string) (string, int64, bool) {
+	payload, ok := decodeQuotaSnapshot(snapshot)
+	if !ok {
+		return "", 0, false
+	}
+
+	if hint := quotaBucketHint(body); hint != "" {
+		if hint == "monthly" || hint == "weekly" {
+			if bucket := quotaSnapshotBucketByName(payload, hint); bucket.UsagePercent >= 100 && bucket.ResetInSec > 0 {
+				return hint, bucket.ResetInSec, true
+			}
+			if payload.Quota.Rolling.ResetInSec > 0 {
+				return "rolling", payload.Quota.Rolling.ResetInSec, true
+			}
+			return "", 0, false
+		}
+		if hint == "rolling" && payload.Quota.Rolling.ResetInSec > 0 {
+			return "rolling", payload.Quota.Rolling.ResetInSec, true
+		}
+	}
+
+	if bucket, resetInSec, ok := exhaustedLongQuotaBucket(payload); ok {
+		return bucket, resetInSec, true
+	}
+	if payload.Quota.Rolling.ResetInSec > 0 {
+		return "rolling", payload.Quota.Rolling.ResetInSec, true
+	}
+	return "", 0, false
+}
+
+func decodeQuotaSnapshot(snapshot string) (quotaSnapshotPayload, bool) {
+	var payload quotaSnapshotPayload
+	if strings.TrimSpace(snapshot) == "" {
+		return payload, false
+	}
+	if err := json.Unmarshal([]byte(snapshot), &payload); err != nil {
+		return payload, false
+	}
+	return payload, true
+}
+
+func quotaBucketHint(body []byte) string {
+	body = []byte(strings.ToLower(string(body)))
+	if len(body) == 0 {
+		return ""
+	}
+	var payload any
+	if err := json.Unmarshal(body, &payload); err == nil {
+		if hint := quotaBucketHintFromPayload(payload); hint != "" {
+			return hint
+		}
+	}
+	match := quotaBucketPattern.FindSubmatch(body)
+	if len(match) == 2 {
+		return string(match[1])
+	}
+	return ""
+}
+
+func quotaBucketHintFromPayload(v any) string {
+	switch value := v.(type) {
+	case map[string]any:
+		for _, key := range []string{"bucket", "quota", "type", "code", "message", "detail", "error", "error_description"} {
+			if hint := quotaBucketHintFromPayload(value[key]); hint != "" {
+				return hint
+			}
+		}
+		for _, item := range value {
+			if hint := quotaBucketHintFromPayload(item); hint != "" {
+				return hint
+			}
+		}
+	case []any:
+		for _, item := range value {
+			if hint := quotaBucketHintFromPayload(item); hint != "" {
+				return hint
+			}
+		}
+	case string:
+		match := quotaBucketPattern.FindStringSubmatch(value)
+		if len(match) == 2 {
+			return strings.ToLower(match[1])
+		}
+	}
+	return ""
+}
+
+func quotaSnapshotBucketByName(payload quotaSnapshotPayload, name string) quotaSnapshotBucket {
+	switch name {
+	case "monthly":
+		return payload.Quota.Monthly
+	case "weekly":
+		return payload.Quota.Weekly
+	default:
+		return payload.Quota.Rolling
+	}
+}
+
+func exhaustedLongQuotaBucket(payload quotaSnapshotPayload) (string, int64, bool) {
+	candidates := []struct {
+		name   string
+		bucket quotaSnapshotBucket
+	}{
+		{name: "monthly", bucket: payload.Quota.Monthly},
+		{name: "weekly", bucket: payload.Quota.Weekly},
+	}
+	var bestName string
+	var bestReset int64
+	for _, candidate := range candidates {
+		if candidate.bucket.UsagePercent < 100 || candidate.bucket.ResetInSec <= 0 {
+			continue
+		}
+		if candidate.bucket.ResetInSec > bestReset {
+			bestName = candidate.name
+			bestReset = candidate.bucket.ResetInSec
+		}
+	}
+	if bestName == "" {
+		return "", 0, false
+	}
+	return bestName, bestReset, true
 }
 
 // ResetCooldown manually clears a key's fail count and cooldown.

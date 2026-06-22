@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
@@ -11,7 +11,7 @@
     />
     <base href="/admin/" />
     <style>[v-cloak]{display:none!important}</style>
-    <link rel="stylesheet" href="css/admin.css?v=20260621b" />
+    <link rel="stylesheet" href="css/admin.css?v=20260622a" />
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   </head>
@@ -745,14 +745,15 @@
                           <template v-if="quotaData[k.id].configured && quotaData[k.id].quota">
                             <div class="quota-list">
                               <div
-                                v-for="bucket in quotaBuckets(quotaData[k.id])"
+                                v-for="bucket in quotaBuckets(quotaData[k.id], k.id)"
                                 :key="k.id + '-' + bucket.key"
                                 class="quota-item"
                               >
                                 <span :class="'badge ' + quotaBadgeClass(bucket.usagePercent)">
-                                  {{bucket.label}} {{quotaPercent(bucket.usagePercent)}}
+                                  {{bucket.label}}<template v-if="bucket.key !== 'total'"> {{quotaPercent(bucket.usagePercent)}}</template>
                                 </span>
-                                <small>{{quotaResetLabel(bucket)}}</small>
+                                <small class="quota-usage">{{quotaUsageLabel(bucket)}}</small>
+                                <small v-if="quotaResetLabel(bucket)" class="quota-reset">{{quotaResetLabel(bucket)}}</small>
                               </div>
                               <div v-if="quotaCheckedLabel(quotaData[k.id])" class="quota-checked">
                                 {{quotaCheckedLabel(quotaData[k.id])}}
@@ -847,6 +848,7 @@
                       <th>{{t('table.description')}}</th>
                       <th>{{t('table.rateLimit')}}</th>
                       <th>{{t('table.requestLimit')}}</th>
+                      <th>{{t('tokens.usage')}}</th>
                       <th>{{t('table.expires')}}</th>
                       <th>{{t('table.actions')}}</th>
                     </tr>
@@ -874,6 +876,11 @@
                           <span class="badge" :class="requestBadgeClass(tk)">{{requestUsedLabel(tk)}}</span>
                         </template>
                         <span v-else>{{t('tokens.unlimited')}}</span>
+                      </td>
+                      <td class="token-cell">
+                        <b>{{tokenUsageMain(tk)}}</b>
+                        <small>{{tokenUsageTokens(tk)}}</small>
+                        <small>{{tokenUsageWindows(tk)}}</small>
                       </td>
                       <td style="font-size: 12px">
                         <span class="badge" :class="expiryBadgeClass(tk.expires_at)">{{fmtTokenExpiry(tk.expires_at)}}</span>
@@ -1352,6 +1359,6 @@
       <div v-if="toast.show" :class="'toast '+toast.type">{{toast.msg}}</div>
     </div>
 
-    <script type="module" src="js/app.js?v=20260621b"></script>
+    <script type="module" src="js/app.js?v=20260622a"></script>
   </body>
 </html>

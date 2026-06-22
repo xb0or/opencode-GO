@@ -2,6 +2,7 @@ package pool
 
 import (
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -196,6 +197,82 @@ func TestResetCooldown(t *testing.T) {
 	store.DB().First(&updated, k.ID)
 	if updated.FailCount != 0 || updated.CooldownUntil != nil {
 		t.Errorf("reset failed: fail_count=%d, cooldown_until=%v", updated.FailCount, updated.CooldownUntil)
+	}
+}
+
+func TestParse429QuotaBucket(t *testing.T) {
+	snapshot := `{"quota":{"rolling":{"usagePercent":80,"resetInSec":120},"weekly":{"usagePercent":100,"resetInSec":3600},"monthly":{"usagePercent":40,"resetInSec":7200}}}`
+	body := []byte(`{"error":{"message":"weekly quota exceeded"}}`)
+
+	bucket, resetInSec, ok := parse429QuotaBucket(body, snapshot)
+	if !ok {
+		t.Fatal("expected quota bucket to be parsed")
+	}
+	if bucket != "weekly" || resetInSec != 3600 {
+		t.Fatalf("bucket=%s reset=%d, want weekly/3600", bucket, resetInSec)
+	}
+}
+
+func TestMarkFailureWithQuota429Monthly100(t *testing.T) {
+	setupTestDB(t)
+	snapshot := `{"quota":{"rolling":{"usagePercent":90,"resetInSec":120},"weekly":{"usagePercent":20,"resetInSec":3600},"monthly":{"usagePercent":100,"resetInSec":7200}}}`
+	k := &store.Key{Value: "quota-monthly-key", Group: "quota", Enabled: true, Weight: 1, QuotaSnapshot: snapshot}
+	store.DB().Create(k)
+
+	p := NewPicker()
+	before := time.Now()
+	p.MarkFailureWithQuota(k.ID, http.StatusTooManyRequests, []byte(`{"error":{"message":"monthly quota exceeded"}}`), snapshot)
+
+	var updated store.Key
+	store.DB().First(&updated, k.ID)
+	if updated.FailCount != 1 {
+		t.Fatalf("fail_count=%d, want 1", updated.FailCount)
+	}
+	if updated.CooldownUntil == nil {
+		t.Fatal("cooldown_until should be set")
+	}
+	got := updated.CooldownUntil.Sub(before)
+	if got < 7190*time.Second || got > 7210*time.Second {
+		t.Fatalf("cooldown=%s, want about 7200s", got)
+	}
+}
+
+func TestMarkFailureWithQuota429RollingFallback(t *testing.T) {
+	setupTestDB(t)
+	snapshot := `{"quota":{"rolling":{"usagePercent":95,"resetInSec":120},"weekly":{"usagePercent":20,"resetInSec":3600},"monthly":{"usagePercent":40,"resetInSec":7200}}}`
+	k := &store.Key{Value: "quota-rolling-key", Group: "quota", Enabled: true, Weight: 1, QuotaSnapshot: snapshot}
+	store.DB().Create(k)
+
+	p := NewPicker()
+	before := time.Now()
+	p.MarkFailureWithQuota(k.ID, http.StatusTooManyRequests, []byte(`{"error":{"message":"rate limit exceeded"}}`), snapshot)
+
+	var updated store.Key
+	store.DB().First(&updated, k.ID)
+	if updated.CooldownUntil == nil {
+		t.Fatal("cooldown_until should be set")
+	}
+	got := updated.CooldownUntil.Sub(before)
+	if got < 110*time.Second || got > 130*time.Second {
+		t.Fatalf("cooldown=%s, want about 120s", got)
+	}
+}
+
+func TestMarkFailureWithQuotaNon429Fallback(t *testing.T) {
+	setupTestDB(t)
+	k := &store.Key{Value: "quota-non429-key", Group: "quota", Enabled: true, Weight: 1}
+	store.DB().Create(k)
+
+	p := NewPicker()
+	p.MarkFailureWithQuota(k.ID, http.StatusBadGateway, nil, "")
+
+	var updated store.Key
+	store.DB().First(&updated, k.ID)
+	if updated.FailCount != 1 {
+		t.Fatalf("fail_count=%d, want 1", updated.FailCount)
+	}
+	if updated.CooldownUntil != nil {
+		t.Fatal("cooldown_until should not be set before exponential threshold")
 	}
 }
 

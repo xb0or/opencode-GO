@@ -109,6 +109,91 @@ func TestListTokensReturnsCopyableSKToken(t *testing.T) {
 	}
 }
 
+func TestListTokensReturnsUsageAggregate(t *testing.T) {
+	if err := store.InitForTest("file:admin_token_usage?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	tok, err := pool.CreateToken("usage-token", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	other, err := pool.CreateToken("other-token", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create other token: %v", err)
+	}
+	now := time.Now()
+	rows := []store.UsageLog{
+		{TokenID: tok.ID, TokenName: tok.Name, StatusCode: 200, InputTokens: 10, OutputTokens: 5, TotalTokens: 15, CreatedAt: now},
+		{TokenID: tok.ID, TokenName: tok.Name, StatusCode: 200, InputTokens: 20, OutputTokens: 10, TotalTokens: 30, CreatedAt: now.Add(-10 * time.Minute)},
+		{TokenID: tok.ID, TokenName: tok.Name, StatusCode: 200, InputTokens: 40, OutputTokens: 20, TotalTokens: 60, CreatedAt: now.Add(-48 * time.Hour)},
+		{TokenID: other.ID, TokenName: other.Name, StatusCode: 200, InputTokens: 1, OutputTokens: 2, TotalTokens: 3, CreatedAt: now.Add(-10 * time.Minute)},
+	}
+	for _, row := range rows {
+		if err := store.DB().Create(&row).Error; err != nil {
+			t.Fatalf("create usage log: %v", err)
+		}
+	}
+
+	r := gin.New()
+	MountWithPicker(r.Group("/admin"), pool.NewPicker())
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/tokens", nil)
+	req.Header.Set("Authorization", "Bearer "+signedAdminToken(t))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", w.Code, w.Body.String())
+	}
+	var payload struct {
+		Data []struct {
+			store.Token
+			TotalRequests     int64 `json:"total_requests"`
+			TotalInputTokens  int64 `json:"total_input_tokens"`
+			TotalOutputTokens int64 `json:"total_output_tokens"`
+			TotalTokens       int64 `json:"total_tokens"`
+			TodayRequests     int64 `json:"today_requests"`
+			TodayTokens       int64 `json:"today_tokens"`
+			LastHourRequests  int64 `json:"last_hour_requests"`
+			LastHourTokens    int64 `json:"last_hour_tokens"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	var got *struct {
+		store.Token
+		TotalRequests     int64 `json:"total_requests"`
+		TotalInputTokens  int64 `json:"total_input_tokens"`
+		TotalOutputTokens int64 `json:"total_output_tokens"`
+		TotalTokens       int64 `json:"total_tokens"`
+		TodayRequests     int64 `json:"today_requests"`
+		TodayTokens       int64 `json:"today_tokens"`
+		LastHourRequests  int64 `json:"last_hour_requests"`
+		LastHourTokens    int64 `json:"last_hour_tokens"`
+	}
+	for i := range payload.Data {
+		if payload.Data[i].ID == tok.ID {
+			got = &payload.Data[i]
+			break
+		}
+	}
+	if got == nil {
+		t.Fatalf("usage token not found in payload: %#v", payload.Data)
+	}
+	if got.TotalRequests != 3 || got.TotalTokens != 105 || got.TotalInputTokens != 70 || got.TotalOutputTokens != 35 {
+		t.Fatalf("unexpected total aggregate: %#v", got)
+	}
+	if got.TodayRequests != 2 || got.TodayTokens != 45 {
+		t.Fatalf("unexpected today aggregate: %#v", got)
+	}
+	if got.LastHourRequests != 2 || got.LastHourTokens != 45 {
+		t.Fatalf("unexpected last-hour aggregate: %#v", got)
+	}
+}
+
 func TestStatsIncludesDashboardAccountingFields(t *testing.T) {
 	if err := store.InitForTest("file:admin_stats_dashboard?mode=memory&cache=shared"); err != nil {
 		t.Fatalf("init test db: %v", err)

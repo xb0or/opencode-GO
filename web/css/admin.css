@@ -1102,25 +1102,35 @@ select:focus {
 }
 
 .quota-cell {
-  min-width: 190px;
+  min-width: 230px;
   font-size: 11px;
   white-space: normal;
 }
 .quota-list {
   display: grid;
-  gap: 5px;
+  gap: 8px;
 }
 .quota-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  display: grid;
+  gap: 2px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--border);
+}
+.quota-item:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
 }
 .quota-item small,
 .quota-checked {
   color: var(--muted);
   font-size: 10px;
-  white-space: nowrap;
+  white-space: normal;
+}
+.quota-usage {
+  color: var(--text) !important;
+}
+.quota-reset {
+  line-height: 1.35;
 }
 .quota-checked {
   margin-top: 2px;
