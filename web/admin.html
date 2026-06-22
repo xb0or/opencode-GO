@@ -227,6 +227,7 @@
                       <div class="value">{{formatTokens(stats.today_total_tokens)}}</div>
                       <div class="hint metric-stack">
                         <span>{{t('dashboard.input')}}: {{formatTokens(stats.today_input_tokens)}} / {{t('dashboard.output')}}: {{formatTokens(stats.today_output_tokens)}}</span>
+                        <span v-if="stats.today_reasoning_tokens>0">{{t('dashboard.reasoning')}}: {{formatTokens(stats.today_reasoning_tokens)}}</span>
                         <span>{{t('dashboard.cache')}}: {{formatTokens(stats.today_cache_tokens)}}（{{t('dashboard.cacheRead')}} {{formatTokens(stats.today_cache_read_tokens)}} / {{t('dashboard.cacheWrite')}} {{formatTokens(stats.today_cache_creation_tokens)}}）</span>
                       </div>
                     </div>
@@ -240,6 +241,7 @@
                       <div class="value">{{formatTokens(stats.total_tokens)}}</div>
                       <div class="hint metric-stack">
                         <span>{{t('dashboard.input')}}: {{formatTokens(stats.total_input_tokens)}} / {{t('dashboard.output')}}: {{formatTokens(stats.total_output_tokens)}}</span>
+                        <span v-if="stats.total_reasoning_tokens>0">{{t('dashboard.reasoning')}}: {{formatTokens(stats.total_reasoning_tokens)}}</span>
                         <span>{{t('dashboard.cache')}}: {{formatTokens(stats.total_cache_tokens)}}（{{t('dashboard.cacheRead')}} {{formatTokens(stats.total_cache_read_tokens)}} / {{t('dashboard.cacheWrite')}} {{formatTokens(stats.total_cache_creation_tokens)}}）</span>
                       </div>
                     </div>
@@ -478,7 +480,7 @@
                     <span class="value blue">{{usageTokens(usageSummary.total_tokens)}}</span>
                     <span class="usage-kpi-cost">{{usageCost(usageSummary.actual_cost || usageSummary.total_cost)}}</span>
                   </div>
-                  <div class="hint">{{t('dashboard.input')}} {{usageTokens(usageSummary.input_tokens)}} / {{t('dashboard.output')}} {{usageTokens(usageSummary.output_tokens)}} · {{t('usage.cacheRead')}} {{usageTokens(usageSummary.cache_read_tokens || usageSummary.cache_tokens)}}</div>
+                  <div class="hint">{{t('dashboard.input')}} {{usageTokens(usageSummary.input_tokens)}} / {{t('dashboard.output')}} {{usageTokens(usageSummary.output_tokens)}}<span v-if="usageSummary.reasoning_tokens>0"> · {{t('usage.reasoningTokens')}} {{usageTokens(usageSummary.reasoning_tokens)}}</span> · {{t('usage.cacheRead')}} {{usageTokens(usageSummary.cache_read_tokens || usageSummary.cache_tokens)}}</div>
                 </div>
                 <div class="usage-kpi-card">
                   <div class="label">{{t('usage.realtimeRpm')}}</div>
@@ -650,6 +652,7 @@
                       <div class="token-breakdown-grid">
                         <div><small>{{t('usage.inputTokens')}}</small><b>{{usageTokens(usageSelected.input_tokens)}}</b></div>
                         <div><small>{{t('usage.outputTokens')}}</small><b>{{usageTokens(usageSelected.output_tokens)}}</b></div>
+                        <div v-if="usageReasoningTokens(usageSelected)>0" class="reasoning-tokens"><small>{{t('usage.reasoningTokens')}}</small><b>{{usageTokens(usageReasoningTokens(usageSelected))}}</b></div>
                         <div class="cache-read"><small>{{t('usage.cacheRead')}}</small><b>{{usageTokens(usageCacheReadTokens(usageSelected))}}</b></div>
                         <div v-if="usageCacheCreationTokens(usageSelected)>0" class="cache-write"><small>{{t('usage.cacheWrite')}}</small><b>{{usageTokens(usageCacheCreationTokens(usageSelected))}}</b></div>
                       </div>

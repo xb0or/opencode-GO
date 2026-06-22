@@ -812,6 +812,7 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 		Stream:              stream,
 		InputTokens:         usage.InputTokens,
 		OutputTokens:        usage.OutputTokens,
+		ReasoningTokens:     usage.ReasoningTokens,
 		CacheTokens:         usage.CacheTokens,
 		CacheReadTokens:     usage.CacheReadTokens,
 		CacheCreationTokens: usage.CacheCreationTokens,
@@ -849,6 +850,7 @@ func usageRequestID(c *gin.Context, key *store.Key, start time.Time) string {
 type usageAccounting struct {
 	InputTokens          int
 	OutputTokens         int
+	ReasoningTokens      int
 	CacheTokens          int
 	CacheReadTokens      int
 	CacheCreationTokens  int
@@ -928,6 +930,9 @@ func mergeUsageAccounting(base, next *usageAccounting) *usageAccounting {
 	if next.OutputTokens > 0 {
 		base.OutputTokens = next.OutputTokens
 	}
+	if next.ReasoningTokens > 0 {
+		base.ReasoningTokens = next.ReasoningTokens
+	}
 	if next.CacheTokens > 0 {
 		base.CacheTokens = next.CacheTokens
 	}
@@ -1006,6 +1011,7 @@ func usageFromRawMap(u map[string]any, _ config.Protocol) *usageAccounting {
 	acct := &usageAccounting{}
 	rawInputTokens := firstNumberField(u, "prompt_tokens", "input_tokens")
 	acct.OutputTokens = firstNumberField(u, "completion_tokens", "output_tokens")
+	acct.ReasoningTokens = reasoningTokens(u)
 	acct.CacheReadTokens, acct.CacheIncludedInInput = cacheReadTokens(u)
 	var cacheCreationIncluded bool
 	acct.CacheCreationTokens, cacheCreationIncluded = cacheCreationTokens(u)
@@ -1096,6 +1102,36 @@ func cacheCreationTokens(u map[string]any) (int, bool) {
 		return maxInt(total, nested), true
 	}
 	return total, directIncluded
+}
+
+// reasoningTokens extracts the reasoning/thinking token count reported by
+// upstream. OpenAI-style providers expose it as
+// `completion_tokens_details.reasoning_tokens`; some providers emit it at the
+// top level. It is already included in completion_tokens by the upstream, so
+// it is tracked separately for visibility and not added to totals.
+func reasoningTokens(u map[string]any) int {
+	direct := firstNumberField(u,
+		"reasoning_tokens",
+		"reasoning",
+		"thinking_tokens",
+		"reasoning_output_tokens",
+	)
+	if direct > 0 {
+		return direct
+	}
+	for _, key := range []string{"completion_tokens_details", "output_tokens_details"} {
+		if details := objectField(u, key); details != nil {
+			if n := firstNumberField(details,
+				"reasoning_tokens",
+				"reasoning",
+				"thinking_tokens",
+				"reasoning_output_tokens",
+			); n > 0 {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 func numberField(m map[string]any, key string) int {

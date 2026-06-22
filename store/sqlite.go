@@ -104,6 +104,7 @@ type UsageLog struct {
 	Stream              bool      `json:"stream"`
 	InputTokens         int       `json:"input_tokens"`
 	OutputTokens        int       `json:"output_tokens"`
+	ReasoningTokens     int       `json:"reasoning_tokens"`
 	CacheTokens         int       `json:"cache_tokens"`
 	CacheReadTokens     int       `json:"cache_read_tokens"`
 	CacheCreationTokens int       `json:"cache_creation_tokens"`

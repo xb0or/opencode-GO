@@ -316,6 +316,7 @@ createApp({
       usageLatencyLine: usage.latencyLine,
       usageCacheReadTokens: usage.cacheReadTokens,
       usageCacheCreationTokens: usage.cacheCreationTokens,
+      usageReasoningTokens: usage.reasoningTokens,
       usageFinalCost: usage.finalCost,
       usageBillingMode: usage.billingMode,
       usageErrorDetail: usage.errorDetail,

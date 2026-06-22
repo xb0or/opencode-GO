@@ -196,6 +196,52 @@ func TestUsageFromResponseDeepSeekCacheHitAndMiss(t *testing.T) {
 	}
 }
 
+func TestUsageFromResponseCapturesReasoningTokens(t *testing.T) {
+	// OpenAI-style providers expose reasoning tokens inside completion_tokens_details.
+	nested := usageFromResponse(config.ProtocolChat, []byte(`{
+		"usage":{
+			"prompt_tokens":120,
+			"completion_tokens":80,
+			"total_tokens":200,
+			"completion_tokens_details":{"reasoning_tokens":50}
+		}
+	}`))
+	if nested == nil {
+		t.Fatal("usage should be parsed")
+	}
+	if nested.ReasoningTokens != 50 || nested.OutputTokens != 80 || nested.TotalTokens != 200 {
+		t.Fatalf("nested reasoning tokens not captured: %#v", nested)
+	}
+
+	// Some providers emit reasoning tokens at the top level.
+	topLevel := usageFromResponse(config.ProtocolChat, []byte(`{
+		"usage":{
+			"prompt_tokens":10,
+			"completion_tokens":20,
+			"total_tokens":30,
+			"reasoning_tokens":5
+		}
+	}`))
+	if topLevel == nil || topLevel.ReasoningTokens != 5 {
+		t.Fatalf("top-level reasoning tokens not captured: %#v", topLevel)
+	}
+
+	// Reasoning tokens must not be added into totals (already included in completion).
+	if topLevel.TotalTokens != 30 {
+		t.Fatalf("reasoning tokens leaked into total: %#v", topLevel)
+	}
+}
+
+func TestUsageFromSSELineMergesReasoningTokens(t *testing.T) {
+	merged := mergeUsageAccounting(
+		&usageAccounting{InputTokens: 10, OutputTokens: 20, ReasoningTokens: 5},
+		&usageAccounting{OutputTokens: 20, ReasoningTokens: 8},
+	)
+	if merged.ReasoningTokens != 8 {
+		t.Fatalf("reasoning tokens should be overwritten with the latest non-zero value, got %d", merged.ReasoningTokens)
+	}
+}
+
 func TestEnableStreamUsageForOpenAIProtocols(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[],"stream":true}`)
 	out, ok := enableStreamUsage(body, config.ProtocolChat, true)

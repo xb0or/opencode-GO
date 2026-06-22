@@ -828,6 +828,12 @@ func stats(c *gin.Context) {
 		Where("created_at >= ?", todayStart).
 		Scan(&todayOutputTokens)
 
+	var todayReasoningTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(reasoning_tokens),0)").
+		Where("created_at >= ?", todayStart).
+		Scan(&todayReasoningTokens)
+
 	var todayCacheTokens int64
 	store.DB().Model(&store.UsageLog{}).
 		Select("coalesce(sum(cache_tokens),0)").
@@ -861,6 +867,11 @@ func stats(c *gin.Context) {
 	store.DB().Model(&store.UsageLog{}).
 		Select("coalesce(sum(output_tokens),0)").
 		Scan(&totalOutputTokens)
+
+	var totalReasoningTokens int64
+	store.DB().Model(&store.UsageLog{}).
+		Select("coalesce(sum(reasoning_tokens),0)").
+		Scan(&totalReasoningTokens)
 
 	var totalCacheTokens int64
 	store.DB().Model(&store.UsageLog{}).
@@ -987,12 +998,14 @@ func stats(c *gin.Context) {
 		"enabled_tokens":              enabledTokens,
 		"today_input_tokens":          todayInputTokens,
 		"today_output_tokens":         todayOutputTokens,
+		"today_reasoning_tokens":      todayReasoningTokens,
 		"today_cache_tokens":          todayCacheTokens,
 		"today_cache_read_tokens":     todayCacheReadTokens,
 		"today_cache_creation_tokens": todayCacheCreationTokens,
 		"today_total_tokens":          todayTotalTokens,
 		"total_input_tokens":          totalInputTokens,
 		"total_output_tokens":         totalOutputTokens,
+		"total_reasoning_tokens":      totalReasoningTokens,
 		"total_cache_tokens":          totalCacheTokens,
 		"total_cache_read_tokens":     totalCacheReadTokens,
 		"total_cache_creation_tokens": totalCacheCreationTokens,
@@ -1124,6 +1137,7 @@ func usageLogSummary(c *gin.Context) gin.H {
 	type sums struct {
 		InputTokens         int64   `gorm:"column:input_tokens"`
 		OutputTokens        int64   `gorm:"column:output_tokens"`
+		ReasoningTokens     int64   `gorm:"column:reasoning_tokens"`
 		CacheReadTokens     int64   `gorm:"column:cache_read_tokens"`
 		CacheCreationTokens int64   `gorm:"column:cache_creation_tokens"`
 		TotalTokens         int64   `gorm:"column:total_tokens"`
@@ -1134,7 +1148,7 @@ func usageLogSummary(c *gin.Context) gin.H {
 	}
 	var s sums
 	usageLogQueryForSummary(c).
-		Select("coalesce(sum(input_tokens),0) as input_tokens, coalesce(sum(output_tokens),0) as output_tokens, coalesce(sum(cache_read_tokens),0) as cache_read_tokens, coalesce(sum(cache_creation_tokens),0) as cache_creation_tokens, coalesce(sum(total_tokens),0) as total_tokens, coalesce(sum(total_cost),0) as total_cost, coalesce(sum(case when actual_cost > 0 then actual_cost else total_cost end),0) as actual_cost, coalesce(sum(case when account_cost > 0 then account_cost else case when actual_cost > 0 then actual_cost else total_cost end end),0) as account_cost, coalesce(avg(duration_ms),0) as avg_duration_ms").
+		Select("coalesce(sum(input_tokens),0) as input_tokens, coalesce(sum(output_tokens),0) as output_tokens, coalesce(sum(reasoning_tokens),0) as reasoning_tokens, coalesce(sum(cache_read_tokens),0) as cache_read_tokens, coalesce(sum(cache_creation_tokens),0) as cache_creation_tokens, coalesce(sum(total_tokens),0) as total_tokens, coalesce(sum(total_cost),0) as total_cost, coalesce(sum(case when actual_cost > 0 then actual_cost else total_cost end),0) as actual_cost, coalesce(sum(case when account_cost > 0 then account_cost else case when actual_cost > 0 then actual_cost else total_cost end end),0) as account_cost, coalesce(avg(duration_ms),0) as avg_duration_ms").
 		Scan(&s)
 
 	lastMinute := time.Now().Add(-time.Minute)
@@ -1154,6 +1168,7 @@ func usageLogSummary(c *gin.Context) gin.H {
 		"avg_duration_ms":       s.AvgDurationMs,
 		"input_tokens":          s.InputTokens,
 		"output_tokens":         s.OutputTokens,
+		"reasoning_tokens":      s.ReasoningTokens,
 		"cache_read_tokens":     s.CacheReadTokens,
 		"cache_creation_tokens": s.CacheCreationTokens,
 		"cache_tokens":          s.CacheReadTokens,

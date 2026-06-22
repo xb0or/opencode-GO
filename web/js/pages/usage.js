@@ -46,6 +46,7 @@ export function useUsage(api, showToast, t) {
       avg_duration_ms: avg,
       input_tokens: rows.reduce((sum, r) => sum + numberOrZero(r.input_tokens), 0),
       output_tokens: rows.reduce((sum, r) => sum + numberOrZero(r.output_tokens), 0),
+      reasoning_tokens: rows.reduce((sum, r) => sum + numberOrZero(r.reasoning_tokens), 0),
       cache_tokens: rows.reduce((sum, r) => sum + numberOrZero(r.cache_read_tokens || r.cache_tokens), 0),
       cache_read_tokens: rows.reduce((sum, r) => sum + numberOrZero(r.cache_read_tokens || r.cache_tokens), 0),
       cache_creation_tokens: rows.reduce((sum, r) => sum + numberOrZero(r.cache_creation_tokens), 0),
@@ -219,6 +220,10 @@ export function useUsage(api, showToast, t) {
     return numberOrZero(row?.cache_creation_tokens);
   }
 
+  function reasoningTokens(row) {
+    return numberOrZero(row?.reasoning_tokens);
+  }
+
   function finalCost(row) {
     return numberOrZero(row?.actual_cost || row?.account_cost || row?.total_cost);
   }
@@ -266,6 +271,7 @@ export function useUsage(api, showToast, t) {
     latencyLine,
     cacheReadTokens,
     cacheCreationTokens,
+    reasoningTokens,
     finalCost,
     billingMode,
     errorDetail,

@@ -1444,6 +1444,9 @@ select:focus {
 .token-breakdown-grid .cache-write b {
   color: var(--yellow);
 }
+.token-breakdown-grid .reasoning-tokens b {
+  color: var(--accent2);
+}
 @media (max-width: 1280px) {
   .usage-kpi-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
