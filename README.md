@@ -4,7 +4,7 @@ A multi-key management gateway for **OpenCode Go** services, written in Go + Gin
 
 It aggregates many OpenCode Go API keys behind a single set of universal endpoints, so any OpenAI- / Anthropic-compatible client (including opencode itself) can consume them with one gateway token.
 
-## 💬 Discussion: 
+## 💬 Discussion
 
 [linux.do](https://linux.do/)
 
@@ -351,3 +351,9 @@ This program is free software: you can redistribute it and/or modify it under th
 This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
 > AGPL-3.0 is a strong copyleft license: anyone who modifies this project and exposes it as a network service (e.g. an API gateway or web app) must make the corresponding source code available to its users. Personal use and self-hosted deployments are unaffected. If you need a different license for commercial use, please contact the author.
+
+## Disclaimer
+
+This project is an independent, community-driven tool and is **not affiliated with, endorsed by, or sponsored by** OpenCode, Anthropic, OpenAI, or any upstream provider. All product names, trademarks, and service marks are the property of their respective owners.
+
+The project is provided for **personal study and technical research** purposes only. Users are responsible for complying with the Terms of Service of any upstream service they connect to. The author assumes no liability for any consequences of using this project, including but not limited to account suspension, data loss, or service interruption.
