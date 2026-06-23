@@ -6,7 +6,7 @@ It aggregates many OpenCode Go API keys behind a single set of universal endpoin
 
 ## Features
 
-- 🔑 **Multi-key pool** with weighted round-robin scheduling, exponential-backoff failure cooldown, and usage counting
+- 🔑 **Multi-key pool** with weighted round-robin scheduling, exponential-backoff failure cooldown, and per-key usage counting
 - 🔄 **Full cross-protocol conversion** — call any model from any endpoint:
   - Use `/v1/chat/completions` to talk to Claude (Messages protocol)
   - Use `/v1/messages` to talk to GPT-5 (Responses protocol)
@@ -20,11 +20,16 @@ It aggregates many OpenCode Go API keys behind a single set of universal endpoin
   - `POST /v1/responses` — OpenAI Responses API
   - `GET  /v1/models` — catalog discovery
 - 🛡️ **Gateway token auth** (`Authorization: Bearer <token>`, also accepts `x-api-key`)
-- ⏱️ **Per-token rate limiting** (sliding window, configurable req/min)
+- ⏱️ **Per-token controls** — sliding-window rate limit (req/min), optional **max total requests** cap, **expiry**, and enable/disable
+- 💰 **Cost & billing** — per-model pricing drives `total_cost`; optional group multipliers (`GROUP_MULTIPLIERS`) produce the billed `actual_cost` / `account_cost`
+- 📊 **Token accounting** — input / output / **reasoning** / **cache (read & creation)** tokens recorded per call and aggregated per token
+- 🔍 **Go quota lookup** — query each key's rolling / weekly / monthly Go plan usage via its auth Cookie + Workspace ID, with auto-detection of the Workspace ID and a persisted snapshot
 - 🖥️ **Web admin panel** (`/admin`) — Vue 3 SPA with dashboard, charts, KEY/Token/Model CRUD, dark/light theme, top bar with dropdown menus
 - 🛠️ **Admin REST API** (`/admin/*`) for programmatic management
-- 🗄️ **Embedded SQLite** (GORM), persisted to a Zeabur volume
+- 🔔 **Update check** — the admin panel reports the running version and flags newer GitHub releases
+- 🗄️ **Embedded SQLite** (GORM, WAL mode), persisted to a Zeabur volume
 - 🐳 Single-binary Docker image, one-click Zeabur deploy
+- ⚙️ `.env` file support — load configuration from a local `.env` before reading environment variables
 
 ## Architecture
 
@@ -110,7 +115,7 @@ edits to display name, protocol/real model, context length, priority, pricing,
 and tags are recorded as customized fields and are not overwritten by later
 automatic syncs.
 
-Go usage limits are value-based: 5-hour `$12`, weekly `$30`, and monthly `$60`. Request counts vary by model cost. If limits are reached, the upstream service may fall back to balance usage when enabled in the OpenCode console.
+Go usage limits are value-based: 5-hour `$12`, weekly `$30`, and monthly `$60`. Request counts vary by model cost. If limits are reached, the upstream service may fall back to balance usage when enabled in the OpenCode console. The admin panel can look up each key's live rolling / weekly / monthly usage via its auth Cookie + Workspace ID (see [Admin panel](#admin-panel) and `GET /admin/keys/:id/quota`).
 
 ## Cross-protocol conversion
 
@@ -209,11 +214,30 @@ export OCSW_TOKEN=sk-...
 
 Access at `http://<gateway>/admin` (default password: `admin`). Features:
 
-- **Dashboard** — total calls, key/token counts, avg latency, calls-by-model chart, calls-by-protocol chart, recent call log
-- **API Keys** — add/remove/toggle keys, edit key value/label/weight/proxy settings, reset cooldown, view fail counts and usage
-- **Tokens** — create/delete/copy `sk-` gateway tokens with optional rate limits
+- **Dashboard** — total / today / last-hour calls, success rate, RPM / TPM / QPS, p50 / p95 / p99 latency, latency distribution buckets, 24-hour timeline, calls-by-model and calls-by-protocol charts, today & total token breakdown (input / output / reasoning / cache read / cache creation), today & total cost (total / actual / account), and a recent-call log
+- **API Keys** — add/remove/toggle keys; edit key value/label/weight/**proxy URL**/**auth Cookie**/**Workspace ID**; reset cooldown; view fail counts and usage; **look up Go quota** (rolling / weekly / monthly) with Workspace auto-detection and a persisted snapshot
+- **Tokens** — create/edit/delete/copy `sk-` gateway tokens with name, description, rate limit (req/min), **max total requests**, **expiry**, and enable/disable; per-token usage shown as total / today / last-hour requests and tokens
 - **Models** — sync the Go model catalog, enable/disable models, edit display name/protocol/context/priority/pricing/tags, and view OpenRouter-enriched metadata
 - **Model Mappings** — manage client model → upstream model rewrite rules, persisted in SQLite and applied immediately
+- **Usage logs** — paginated call history with filters (model, protocol, token, group, status, stream, time range, free-text search), sortable columns, and a filtered summary (calls, success/error, RPM/TPM, tokens, cost, avg latency)
+
+### Admin REST API
+
+All endpoints (except `login`) require `Authorization: Bearer <admin-jwt>`.
+
+| Method & path | Description |
+| --- | --- |
+| `POST /admin/login` | exchange admin password for a 12h JWT |
+| `GET  /admin/health` | KEY pool health (enabled/disabled, cooldowns) |
+| `GET  /admin/version` | running version + latest GitHub release (+ update flag) |
+| `GET  /admin/keys` · `POST /admin/keys` | list / create keys (value, label, weight, proxy, cookie, workspace_id) |
+| `PATCH /admin/keys/:id` · `POST /admin/keys/:id/toggle` · `POST /admin/keys/:id/reset` · `DELETE /admin/keys/:id` | edit / toggle / reset cooldown / delete |
+| `GET  /admin/keys/:id/quota` | look up Go plan quota (rolling/weekly/monthly) via cookie + workspace |
+| `GET  /admin/tokens` · `POST /admin/tokens` · `PATCH /admin/tokens/:id` · `DELETE /admin/tokens/:id` | list / create / edit (rate_limit, max_requests, expires_at, enabled) / delete |
+| `GET  /admin/stats` | dashboard aggregates (calls, tokens, cost, latency, timeline) |
+| `GET  /admin/usage` | paginated, filterable usage logs with summary |
+| `GET  /admin/models` · `POST /admin/models` · `PATCH /admin/models/:id` · `POST /admin/models/:id/toggle` · `DELETE /admin/models/:id` · `POST /admin/models/sync` | model route table CRUD + catalog sync |
+| `GET  /admin/model-mappings` · `POST /admin/model-mappings` · `DELETE /admin/model-mappings/:source` | model rewrite rules CRUD |
 
 ### Admin Panel UI
 
@@ -245,7 +269,19 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 | `MODEL_MAPPINGS`  | empty                        | Optional JSON object mapping requested model → upstream model |
 | `MODEL_MAPPING_FILE` | empty                     | Optional JSON file path for model mappings               |
 | `GROUP_MULTIPLIERS` | empty                      | Optional group billing multipliers, e.g. `{"go":0.8}` or `go=0.8,default=1` |
-| `UPSTREAM_TIMEOUT` | `120`                        | Upstream call timeout (seconds)                          |
+| `UPSTREAM_TIMEOUT` | `0`                          | Upstream call timeout in seconds; `0` = no gateway deadline |
+
+> A local `.env` file in the working directory is loaded first (existing env vars are not overridden), so you can keep these settings out of the shell.
+
+### Billing fields
+
+Each usage log records three cost figures derived from the matched model's pricing:
+
+- `total_cost` — raw cost at list price (input / output / cache tokens × per-model unit price)
+- `actual_cost` — `total_cost × group multiplier` (the amount billed for that key/token group)
+- `account_cost` — same as `actual_cost` by default; reserved for account-level adjustments
+
+`GROUP_MULTIPLIERS` accepts either a JSON object (`{"go":0.8,"default":1}`) or a comma list (`go=0.8,default=1`). Missing, zero, or negative values fall back to `1.0`.
 
 ## Project structure
 
@@ -302,4 +338,12 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+This project is licensed under the [GNU Affero General Public License v3.0](https://www.gnu.org/licenses/agpl-3.0.html) (AGPL-3.0). See the [LICENSE](./LICENSE) file for the full text.
+
+Copyright (c) 2026 xb0or
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+> AGPL-3.0 is a strong copyleft license: anyone who modifies this project and exposes it as a network service (e.g. an API gateway or web app) must make the corresponding source code available to its users. Personal use and self-hosted deployments are unaffected. If you need a different license for commercial use, please contact the author.
