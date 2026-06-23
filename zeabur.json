@@ -5,7 +5,7 @@
     "dockerfile": "Dockerfile"
   },
   "start": {
-    "command": "/app/opencode-sw"
+    "command": "/app/opencode-go"
   },
   "healthCheck": {
     "type": "http",

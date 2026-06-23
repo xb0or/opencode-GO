@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/opencode-sw/gateway/pool"
-	"github.com/opencode-sw/gateway/store"
+	"github.com/xb0or/opencode-GO/pool"
+	"github.com/xb0or/opencode-GO/store"
 )
 
 // extractToken pulls the bearer token from Authorization header (preferred) or

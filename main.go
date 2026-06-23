@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/opencode-sw/gateway/admin"
-	"github.com/opencode-sw/gateway/api"
-	"github.com/opencode-sw/gateway/config"
-	"github.com/opencode-sw/gateway/modelsync"
-	"github.com/opencode-sw/gateway/pool"
-	"github.com/opencode-sw/gateway/store"
-	"github.com/opencode-sw/gateway/web"
+	"github.com/xb0or/opencode-GO/admin"
+	"github.com/xb0or/opencode-GO/api"
+	"github.com/xb0or/opencode-GO/config"
+	"github.com/xb0or/opencode-GO/modelsync"
+	"github.com/xb0or/opencode-GO/pool"
+	"github.com/xb0or/opencode-GO/store"
+	"github.com/xb0or/opencode-GO/web"
 )
 
 func main() {
@@ -70,7 +70,7 @@ func main() {
 	})
 
 	addr := ":" + cfg.Port
-	log.Printf("opencode-sw listening on %s", addr)
+	log.Printf("opencode-go listening on %s", addr)
 	log.Printf("  go  base url : %s", cfg.GoBaseURL)
 	log.Printf("  models       : %d registered", len(config.AllModels()))
 	log.Printf("  mappings     : %d configured", len(config.AllModelMappings()))

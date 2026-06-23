@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/opencode-sw/gateway/config"
+	"github.com/xb0or/opencode-GO/config"
 )
 
 // ──────────────────────── Request conversion tests ──────────────────

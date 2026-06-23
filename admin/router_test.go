@@ -10,9 +10,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/opencode-sw/gateway/config"
-	"github.com/opencode-sw/gateway/pool"
-	"github.com/opencode-sw/gateway/store"
+	"github.com/xb0or/opencode-GO/config"
+	"github.com/xb0or/opencode-GO/pool"
+	"github.com/xb0or/opencode-GO/store"
 )
 
 func TestMountWithPickerBindsPickerForHealth(t *testing.T) {

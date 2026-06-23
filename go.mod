@@ -1,4 +1,4 @@
-module github.com/opencode-sw/gateway
+module github.com/xb0or/opencode-GO
 
 go 1.25.0
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/opencode-sw/gateway/config"
+	"github.com/xb0or/opencode-GO/config"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"

@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>OpenCode-SW Admin</title>
+    <title>OpenCode-GO Admin</title>
     <link
       rel="icon"
       type="image/svg+xml"
@@ -11,7 +11,7 @@
     />
     <base href="/admin/" />
     <style>[v-cloak]{display:none!important}</style>
-    <link rel="stylesheet" href="css/admin.css?v=20260622a" />
+    <link rel="stylesheet" href="css/admin.css?v=20260624a" />
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   </head>
@@ -21,7 +21,7 @@
       <div v-if="!token" class="login-wrap">
         <div class="login-box">
           <div class="login-logo" v-html="icons.logo"></div>
-          <h1>OpenCode-SW</h1>
+          <h1>OpenCode-GO</h1>
           <p>{{t('login.subtitle')}}</p>
           <form @submit.prevent="login">
             <input
@@ -48,8 +48,29 @@
         <div class="topbar">
           <div
             class="logo"
-            v-html="icons.logo+'<span> OpenCode-SW</span>'"
+            v-html="icons.logo+'<span> OpenCode-GO</span>'"
           ></div>
+          <span class="version-pill" :title="appVersion ? appVersion : ''">v{{appVersion || '—'}}</span>
+          <!-- Check Update -->
+          <button
+            class="top-btn update-btn"
+            :class="{active: updateAvailable}"
+            @click="checkUpdate"
+            :title="t('about.checkUpdate')"
+          >
+            <span v-html="icons.refresh" class="update-btn-icon"></span>
+            <span v-if="updateAvailable" class="update-dot" :title="t('about.updateAvailable', {version: latestVersion})"></span>
+          </button>
+          <!-- GitHub -->
+          <a
+            class="top-btn github-btn"
+            :href="githubUrl"
+            target="_blank"
+            rel="noopener"
+            :title="t('about.github')"
+          >
+            <span v-html="icons.github"></span>
+          </a>
           <!-- Language Dropdown -->
           <div class="dropdown-wrap">
             <button class="locale-btn" @click="dropLang=!dropLang">
@@ -1362,6 +1383,6 @@
       <div v-if="toast.show" :class="'toast '+toast.type">{{toast.msg}}</div>
     </div>
 
-    <script type="module" src="js/app.js?v=20260623a"></script>
+    <script type="module" src="js/app.js?v=20260624a"></script>
   </body>
 </html>

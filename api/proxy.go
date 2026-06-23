@@ -17,11 +17,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/opencode-sw/gateway/config"
-	"github.com/opencode-sw/gateway/pool"
-	"github.com/opencode-sw/gateway/protocol"
-	"github.com/opencode-sw/gateway/store"
-	"github.com/opencode-sw/gateway/upstream"
+	"github.com/xb0or/opencode-GO/config"
+	"github.com/xb0or/opencode-GO/pool"
+	"github.com/xb0or/opencode-GO/protocol"
+	"github.com/xb0or/opencode-GO/store"
+	"github.com/xb0or/opencode-GO/upstream"
 	"gorm.io/gorm"
 )
 

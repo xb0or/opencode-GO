@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/opencode-sw/gateway/config"
+	"github.com/xb0or/opencode-GO/config"
 )
 
 // NewClient builds an *http.Client tuned for upstream LLM calls (streaming-

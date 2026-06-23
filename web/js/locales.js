@@ -288,6 +288,14 @@ export const locales = {
       dark: "深色模式",
       light: "浅色模式",
     },
+    about: {
+      version: "版本",
+      checkUpdate: "检查更新",
+      github: "GitHub 项目",
+      upToDate: "已是最新版本",
+      updateAvailable: "发现新版本 {version}，点击 GitHub 查看更新",
+      updateCheckFailed: "检查更新失败",
+    },
     common: {
       cancel: "取消",
       confirm: "确定",
@@ -670,6 +678,14 @@ export const locales = {
     theme: {
       dark: "Dark",
       light: "Light",
+    },
+    about: {
+      version: "Version",
+      checkUpdate: "Check Update",
+      github: "GitHub Repository",
+      upToDate: "Up to date",
+      updateAvailable: "New version {version} available — open GitHub to view",
+      updateCheckFailed: "Update check failed",
     },
     common: {
       cancel: "Cancel",

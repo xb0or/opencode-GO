@@ -1,19 +1,19 @@
 ﻿/**
- * OpenCode-SW Admin 管理面板 - 主入口
+ * OpenCode-GO Admin 管理面板 - 主入口
  *
  * ES Module 入口文件，导入各模块并创建 Vue 3 应用。
  */
 
-import { icons } from "./icons.js?v=20260622a";
-import { locales } from "./locales.js?v=20260622a";
-import { createApi, fmtTime } from "./api.js?v=20260622a";
-import { useDashboard } from "./pages/dashboard.js?v=20260622a";
-import { useKeys } from "./pages/keys.js?v=20260622a";
-import { useTokens } from "./pages/tokens.js?v=20260622a";
-import { useModels } from "./pages/models.js?v=20260622a";
-import { useMappings } from "./pages/mappings.js?v=20260622a";
-import { useOps } from "./pages/ops.js?v=20260622a";
-import { useUsage } from "./pages/usage.js?v=20260622a";
+import { icons } from "./icons.js?v=20260624a";
+import { locales } from "./locales.js?v=20260624a";
+import { createApi, fmtTime } from "./api.js?v=20260624a";
+import { useDashboard } from "./pages/dashboard.js?v=20260624a";
+import { useKeys } from "./pages/keys.js?v=20260624a";
+import { useTokens } from "./pages/tokens.js?v=20260624a";
+import { useModels } from "./pages/models.js?v=20260624a";
+import { useMappings } from "./pages/mappings.js?v=20260624a";
+import { useOps } from "./pages/ops.js?v=20260624a";
+import { useUsage } from "./pages/usage.js?v=20260624a";
 
 const { createApp, reactive, ref, watch } = Vue;
 
@@ -29,6 +29,13 @@ createApp({
     const theme = ref(localStorage.getItem("admin_theme") || "dark");
     const dropLang = ref(false);
     const dropTheme = ref(false);
+
+    // 版本与更新检查
+    const appVersion = ref("");
+    const githubUrl = ref("https://github.com/xb0or/opencode-GO");
+    const latestVersion = ref("");
+    const updateAvailable = ref(false);
+    const updateChecking = ref(false);
 
     const toast = reactive({ show: false, msg: "", type: "success" });
     const confirm = reactive({
@@ -161,6 +168,37 @@ createApp({
       localStorage.removeItem("admin_token");
     }
 
+    // ─── 版本 / 更新检查 ─────────────────────────────
+    async function checkUpdate(manual = true) {
+      if (!token.value || updateChecking.value) return;
+      updateChecking.value = true;
+      try {
+        const d = await api("/version", "GET", null, t);
+        appVersion.value = d.version || "";
+        if (d.github_url) githubUrl.value = d.github_url;
+        if (d.latest && d.latest.tag) {
+          latestVersion.value = d.latest.tag;
+          updateAvailable.value = !!d.latest.update_available;
+          if (manual) {
+            if (updateAvailable.value) {
+              showToast(t("about.updateAvailable", { version: d.latest.tag }), "success");
+            } else {
+              showToast(t("about.upToDate"), "success");
+            }
+          }
+        } else {
+          latestVersion.value = "";
+          updateAvailable.value = false;
+          if (manual) showToast(t("about.upToDate"), "success");
+        }
+        localStorage.setItem("update_checked_at", String(Date.now()));
+      } catch (e) {
+        if (manual) showToast(e.message || t("about.updateCheckFailed"), "error");
+      } finally {
+        updateChecking.value = false;
+      }
+    }
+
     // ─── 确认弹窗 ─────────────────────────────────────
     function showConfirm(type, item, name) {
       confirm.cancelText = t("confirm.cancel");
@@ -217,6 +255,25 @@ createApp({
 
     // ─── 初始化 ───────────────────────────────────────
     if (token.value) dashboard.load();
+    // 登录后自动检查更新（每 24h 最多一次，静默）
+    if (token.value) {
+      const lastCheck = Number(localStorage.getItem("update_checked_at") || 0);
+      if (!lastCheck || Date.now() - lastCheck > 24 * 60 * 60 * 1000) {
+        checkUpdate(false);
+      } else {
+        // 仍拉取一次版本号用于顶栏展示，但不弹 toast
+        api("/version", "GET", null, t)
+          .then((d) => {
+            appVersion.value = d.version || "";
+            if (d.github_url) githubUrl.value = d.github_url;
+            if (d.latest && d.latest.tag) {
+              latestVersion.value = d.latest.tag;
+              updateAvailable.value = !!d.latest.update_available;
+            }
+          })
+          .catch(() => {});
+      }
+    }
 
     function openPage(nextPage) {
       if (nextPage !== "keys") keys.stopQuotaTicker();
@@ -242,6 +299,12 @@ createApp({
       theme,
       dropLang,
       dropTheme,
+      appVersion,
+      githubUrl,
+      latestVersion,
+      updateAvailable,
+      updateChecking,
+      checkUpdate,
       toast,
       confirm,
       icons,

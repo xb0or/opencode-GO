@@ -4,7 +4,7 @@
 *.dll
 *.so
 *.dylib
-opencode-sw
+opencode-go
 
 # Test binary
 *.test
@@ -21,8 +21,12 @@ go.work
 
 # Agent workspace
 .serena/
+.helloagents/
 *.swp
 *.swo
+
+# Local planning notes (kept private, not published)
+PLAN.md
 
 # Data directory (SQLite, local dev)
 data/

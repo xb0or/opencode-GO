@@ -49,7 +49,7 @@ func Load() *Config {
 		cfg = &Config{
 			Port:             envStr("PORT", "9812"),
 			AdminPassword:    envStr("ADMIN_PASSWORD", "admin"),
-			JWTSecret:        envStr("JWT_SECRET", "opencode-sw-default-secret-change-me"),
+			JWTSecret:        envStr("JWT_SECRET", "opencode-go-default-secret-change-me"),
 			DBPath:           envStr("DB_PATH", "./data/opencode-sw.db"),
 			UpstreamTimeout:  envInt("UPSTREAM_TIMEOUT", 0),
 			GoBaseURL:        strings.TrimRight(envStr("GO_BASE_URL", "https://opencode.ai/zen/go"), "/"),

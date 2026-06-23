@@ -1,4 +1,4 @@
-# opencode-sw
+# opencode-go
 
 A multi-key management gateway for **OpenCode Go** services, written in Go + Gin and ready to deploy on **Zeabur**.
 
@@ -33,7 +33,7 @@ Client (any protocol)
   │
   ▼
 ┌─────────────────────────────┐
-│  opencode-sw gateway        │
+│  opencode-go gateway        │
 │  ┌───────────────────────┐  │
 │  │ Auth + Rate Limit     │  │
 │  ├───────────────────────┤  │
@@ -168,9 +168,9 @@ Create `opencode.json` in your project (or `~/.config/opencode/opencode.json`):
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
-    "opencode-sw-chat": {
+    "opencode-go-chat": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "opencode-sw (Chat)",
+      "name": "opencode-go (Chat)",
       "options": {
         "baseURL": "https://<your-zeabur-domain>/v1",
         "apiKey": "{env:OCSW_TOKEN}"
@@ -181,9 +181,9 @@ Create `opencode.json` in your project (or `~/.config/opencode/opencode.json`):
         "deepseek-v4-flash": { "name": "DeepSeek V4 Flash" }
       }
     },
-    "opencode-sw-messages": {
+    "opencode-go-messages": {
       "npm": "@ai-sdk/anthropic",
-      "name": "opencode-sw (Messages)",
+      "name": "opencode-go (Messages)",
       "options": {
         "baseURL": "https://<your-zeabur-domain>",
         "apiKey": "{env:OCSW_TOKEN}",
@@ -195,7 +195,7 @@ Create `opencode.json` in your project (or `~/.config/opencode/opencode.json`):
       }
     }
   },
-  "model": "opencode-sw-chat/glm-5.1"
+  "model": "opencode-go-chat/glm-5.1"
 }
 ```
 
@@ -297,10 +297,9 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 ├── upstream/            # HTTP client for upstream calls
 │   └── client.go
 ├── Dockerfile
-├── zeabur.json
-└── PLAN.md
+└── zeabur.json
 ```
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

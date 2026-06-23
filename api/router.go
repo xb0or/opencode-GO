@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/opencode-sw/gateway/pool"
+	"github.com/xb0or/opencode-GO/pool"
 )
 
 // NewRouter builds the public API router: health + the four universal endpoints.
@@ -46,7 +46,7 @@ func NewRouter(p *pool.Picker) *gin.Engine {
 func health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "ok",
-		"service": "opencode-sw",
+		"service": "opencode-go",
 	})
 }
 

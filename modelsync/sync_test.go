@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/opencode-sw/gateway/config"
-	"github.com/opencode-sw/gateway/store"
+	"github.com/xb0or/opencode-GO/config"
+	"github.com/xb0or/opencode-GO/store"
 )
 
 func TestSyncMergesSourcesAndPreservesCustomizedFields(t *testing.T) {

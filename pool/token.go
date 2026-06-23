@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/opencode-sw/gateway/store"
+	"github.com/xb0or/opencode-GO/store"
 )
 
 // GenerateToken returns a random gateway token with a recognizable prefix.

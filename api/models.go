@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/opencode-sw/gateway/config"
+	"github.com/xb0or/opencode-GO/config"
 )
 
 // listModels handles GET /v1/models. It returns an OpenAI-style list of the
@@ -18,7 +18,7 @@ func listModels(c *gin.Context) {
 			"id":                   m.ID,
 			"object":               "model",
 			"created":              0,
-			"owned_by":             "opencode-sw",
+			"owned_by":             "opencode-go",
 			"name":                 m.Name,
 			"protocol":             string(m.Protocol),
 			"context_length":       m.ContextLen,

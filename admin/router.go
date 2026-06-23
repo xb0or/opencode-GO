@@ -12,10 +12,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/opencode-sw/gateway/config"
-	"github.com/opencode-sw/gateway/modelsync"
-	"github.com/opencode-sw/gateway/pool"
-	"github.com/opencode-sw/gateway/store"
+	"github.com/xb0or/opencode-GO/config"
+	"github.com/xb0or/opencode-GO/modelsync"
+	"github.com/xb0or/opencode-GO/pool"
+	"github.com/xb0or/opencode-GO/store"
+	"github.com/xb0or/opencode-GO/version"
 	"gorm.io/gorm"
 )
 
@@ -59,6 +60,7 @@ func Mount(rg *gin.RouterGroup) {
 	authed.Use(adminAuth())
 	{
 		authed.GET("/health", poolHealth)
+		authed.GET("/version", versionInfo)
 		authed.GET("/keys", listKeys)
 		authed.POST("/keys", createKey)
 		authed.PATCH("/keys/:id", updateKey)
@@ -149,6 +151,32 @@ func poolHealth(c *gin.Context) {
 		"status": "ok",
 		"pools":  health,
 	})
+}
+
+// --- Version ---
+
+// versionInfo reports the running build version and, best-effort, the latest
+// published GitHub release so the admin panel can flag available updates.
+func versionInfo(c *gin.Context) {
+	resp := gin.H{
+		"version":    version.Version,
+		"repo":       version.Repo,
+		"github_url": version.GitHubURL(),
+	}
+	latest, err := version.FetchLatestRelease(c.Request.Context())
+	if err == nil && latest.Tag != "" {
+		resp["latest"] = gin.H{
+			"tag":             latest.Tag,
+			"name":            latest.Name,
+			"html_url":        latest.HTMLURL,
+			"published_at":    latest.PublishedAt,
+			"update_available": version.Compare(version.Version, latest.Tag) < 0,
+		}
+	} else {
+		resp["latest"] = nil
+		resp["update_available"] = false
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // --- Keys ---

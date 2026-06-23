@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/opencode-sw/gateway/store"
+	"github.com/xb0or/opencode-GO/store"
 )
 
 func TestParseOpenCodeWorkspacesRejectsSerovalError(t *testing.T) {
@@ -38,8 +38,8 @@ func TestParseOpenCodeWorkspacesFindsIDsInSerovalText(t *testing.T) {
 }
 
 func TestNormalizeWorkspaceIDAcceptsWorkspaceURL(t *testing.T) {
-	got := normalizeWorkspaceID("https://opencode.ai/workspace/wrk_01KQ1EE29WRRFXGACZ6XB9QVSS/go")
-	if got != "wrk_01KQ1EE29WRRFXGACZ6XB9QVSS" {
+	got := normalizeWorkspaceID("https://opencode.ai/workspace/wrk_01TESTWORKSPACEID00000000/go")
+	if got != "wrk_01TESTWORKSPACEID00000000" {
 		t.Fatalf("workspace ID = %q", got)
 	}
 }

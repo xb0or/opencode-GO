@@ -3,7 +3,7 @@ package api
 import (
 	"testing"
 
-	"github.com/opencode-sw/gateway/store"
+	"github.com/xb0or/opencode-GO/store"
 )
 
 func TestRateLimiter_UnlimitedToken(t *testing.T) {
