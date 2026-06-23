@@ -4,7 +4,9 @@ A multi-key management gateway for **OpenCode Go** services, written in Go + Gin
 
 It aggregates many OpenCode Go API keys behind a single set of universal endpoints, so any OpenAI- / Anthropic-compatible client (including opencode itself) can consume them with one gateway token.
 
-> 💬 Discussion: [linux.do](https://linux.do/)
+## 💬 Discussion: 
+
+[linux.do](https://linux.do/)
 
 ## Features
 
