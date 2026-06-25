@@ -76,9 +76,17 @@ type RespOutputItem struct {
 }
 
 type RespUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens          int `json:"input_tokens"`
+	OutputTokens         int `json:"output_tokens"`
+	TotalTokens          int `json:"total_tokens,omitempty"`
+	InputTokensDetails   *RespTokensDetails `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails  *RespTokensDetails `json:"output_tokens_details,omitempty"`
+}
+
+// RespTokensDetails carries nested cache/reasoning token counts.
+type RespTokensDetails struct {
+	CachedTokens    int `json:"cached_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 // RespStreamEvent is one SSE event for the Responses API streaming format.
@@ -197,11 +205,13 @@ func DecodeResponsesResponse(data []byte) (*IRResponse, error) {
 		ID:    resp.ID,
 		Model: resp.Model,
 	}
-	if resp.Usage != nil {
+if resp.Usage != nil {
 		ir.Usage = &IRUsage{
 			PromptTokens:     resp.Usage.InputTokens,
 			CompletionTokens: resp.Usage.OutputTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
+			CacheReadTokens:  respCacheReadTokens(resp.Usage),
+			ReasoningTokens:  respReasoningTokens(resp.Usage),
 		}
 	}
 	for _, item := range resp.Output {
@@ -248,9 +258,11 @@ func EncodeResponsesResponse(ir *IRResponse) ([]byte, error) {
 	}
 	if ir.Usage != nil {
 		resp.Usage = &RespUsage{
-			InputTokens:  ir.Usage.PromptTokens,
-			OutputTokens: ir.Usage.CompletionTokens,
-			TotalTokens:  ir.Usage.TotalTokens,
+			InputTokens:         ir.Usage.PromptTokens,
+			OutputTokens:        ir.Usage.CompletionTokens,
+			TotalTokens:         ir.Usage.TotalTokens,
+			InputTokensDetails:  respUsageDetailsFromIR(ir.Usage, true),
+			OutputTokensDetails: respUsageDetailsFromIR(ir.Usage, false),
 		}
 	}
 	for _, ch := range ir.Choices {
@@ -324,6 +336,8 @@ func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
 					PromptTokens:     ev.Response.Usage.InputTokens,
 					CompletionTokens: ev.Response.Usage.OutputTokens,
 					TotalTokens:      ev.Response.Usage.TotalTokens,
+					CacheReadTokens:  respCacheReadTokens(ev.Response.Usage),
+					ReasoningTokens:  respReasoningTokens(ev.Response.Usage),
 				}
 			}
 		}
@@ -492,9 +506,11 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 			resp = &RespResponse{ID: ev.Response.ID, Object: "response", Model: ev.Response.Model, Status: "completed"}
 			if ev.Response.Usage != nil {
 				resp.Usage = &RespUsage{
-					InputTokens:  ev.Response.Usage.PromptTokens,
-					OutputTokens: ev.Response.Usage.CompletionTokens,
-					TotalTokens:  ev.Response.Usage.TotalTokens,
+					InputTokens:         ev.Response.Usage.PromptTokens,
+					OutputTokens:        ev.Response.Usage.CompletionTokens,
+					TotalTokens:         ev.Response.Usage.TotalTokens,
+					InputTokensDetails:  respUsageDetailsFromIR(ev.Response.Usage, true),
+					OutputTokensDetails: respUsageDetailsFromIR(ev.Response.Usage, false),
 				}
 			}
 			for _, ch := range ev.Response.Choices {
@@ -782,4 +798,37 @@ func mapFinishReason(status string) string {
 	default:
 		return status
 	}
+}
+
+// respCacheReadTokens extracts cached/hit tokens from Responses usage details.
+func respCacheReadTokens(u *RespUsage) int {
+	if u == nil || u.InputTokensDetails == nil {
+		return 0
+	}
+	return u.InputTokensDetails.CachedTokens
+}
+
+// respReasoningTokens extracts reasoning tokens from Responses usage details.
+func respReasoningTokens(u *RespUsage) int {
+	if u == nil || u.OutputTokensDetails == nil {
+		return 0
+	}
+	return u.OutputTokensDetails.ReasoningTokens
+}
+
+// respUsageDetailsFromIR rebuilds a nested RespTokensDetails from IR usage.
+func respUsageDetailsFromIR(u *IRUsage, promptSide bool) *RespTokensDetails {
+	if u == nil {
+		return nil
+	}
+	if promptSide {
+		if u.CacheReadTokens == 0 {
+			return nil
+		}
+		return &RespTokensDetails{CachedTokens: u.CacheReadTokens}
+	}
+	if u.ReasoningTokens == 0 {
+		return nil
+	}
+	return &RespTokensDetails{ReasoningTokens: u.ReasoningTokens}
 }

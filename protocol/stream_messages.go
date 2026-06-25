@@ -147,7 +147,23 @@ func DecodeMessagesSSE(r io.Reader) (*IRResponse, error) {
 				if resp.Usage == nil {
 					resp.Usage = &IRUsage{}
 				}
-				resp.Usage.CompletionTokens = ev.Response.Usage.CompletionTokens
+				// message_delta carries output_tokens (and optionally cache/reasoning).
+				// Preserve prompt/cache counts from message_start while updating
+				// the completion count from the final delta.
+				out := ev.Response.Usage.CompletionTokens
+				reason := ev.Response.Usage.ReasoningTokens
+				cacheRead := ev.Response.Usage.CacheReadTokens
+				cacheCreate := ev.Response.Usage.CacheCreationTokens
+				resp.Usage.CompletionTokens = out
+				if reason > 0 {
+					resp.Usage.ReasoningTokens = reason
+				}
+				if cacheRead > 0 {
+					resp.Usage.CacheReadTokens = cacheRead
+				}
+				if cacheCreate > 0 {
+					resp.Usage.CacheCreationTokens = cacheCreate
+				}
 			}
 		case "message_stop":
 			if ev.Response != nil && ev.Response.Usage != nil {

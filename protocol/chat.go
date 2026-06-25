@@ -80,9 +80,17 @@ type ChatChoice struct {
 }
 
 type ChatUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                 `json:"prompt_tokens"`
+	CompletionTokens        int                 `json:"completion_tokens"`
+	TotalTokens             int                 `json:"total_tokens"`
+	PromptTokensDetails     *ChatTokensDetails  `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *ChatTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+// ChatTokensDetails carries nested per-token-class counts (cache, reasoning).
+type ChatTokensDetails struct {
+	CachedTokens    int `json:"cached_tokens,omitempty"`
+	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 }
 
 // ChatStreamChunk is one SSE delta for a streaming chat completion.
@@ -200,6 +208,8 @@ func DecodeChatResponse(data []byte) (*IRResponse, error) {
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
+			CacheReadTokens:  chatCacheReadTokens(resp.Usage),
+			ReasoningTokens:  chatReasoningTokens(resp.Usage),
 		}
 	}
 	for _, ch := range resp.Choices {
@@ -226,6 +236,8 @@ func EncodeChatResponse(ir *IRResponse) ([]byte, error) {
 			PromptTokens:     ir.Usage.PromptTokens,
 			CompletionTokens: ir.Usage.CompletionTokens,
 			TotalTokens:      ir.Usage.TotalTokens,
+			PromptTokensDetails: chatUsageDetailsFromIR(ir.Usage, true),
+			CompletionTokensDetails: chatUsageDetailsFromIR(ir.Usage, false),
 		}
 	}
 	for _, ch := range ir.Choices {
@@ -236,6 +248,46 @@ func EncodeChatResponse(ir *IRResponse) ([]byte, error) {
 		resp.Choices = append(resp.Choices, cc)
 	}
 	return json.Marshal(resp)
+}
+
+// chatCacheReadTokens extracts cached/hit tokens from chat usage details.
+func chatCacheReadTokens(u *ChatUsage) int {
+	if u == nil {
+		return 0
+	}
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CachedTokens > 0 {
+		return u.PromptTokensDetails.CachedTokens
+	}
+	return 0
+}
+
+// chatReasoningTokens extracts reasoning tokens from chat usage details.
+func chatReasoningTokens(u *ChatUsage) int {
+	if u == nil {
+		return 0
+	}
+	if u.CompletionTokensDetails != nil && u.CompletionTokensDetails.ReasoningTokens > 0 {
+		return u.CompletionTokensDetails.ReasoningTokens
+	}
+	return 0
+}
+
+// chatUsageDetailsFromIR rebuilds a nested ChatTokensDetails from IR usage
+// accounting. Only fields with non-zero counts are emitted.
+func chatUsageDetailsFromIR(u *IRUsage, promptSide bool) *ChatTokensDetails {
+	if u == nil {
+		return nil
+	}
+	if promptSide {
+		if u.CacheReadTokens == 0 {
+			return nil
+		}
+		return &ChatTokensDetails{CachedTokens: u.CacheReadTokens}
+	}
+	if u.ReasoningTokens == 0 {
+		return nil
+	}
+	return &ChatTokensDetails{ReasoningTokens: u.ReasoningTokens}
 }
 
 // normalizeChatFinishReason maps protocol-specific finish reasons to OpenAI Chat values.
@@ -262,6 +314,8 @@ func DecodeChatStreamChunk(data []byte) (*IRStreamEvent, error) {
 			PromptTokens:     chunk.Usage.PromptTokens,
 			CompletionTokens: chunk.Usage.CompletionTokens,
 			TotalTokens:      chunk.Usage.TotalTokens,
+			CacheReadTokens:  chatCacheReadTokens(chunk.Usage),
+			ReasoningTokens:  chatReasoningTokens(chunk.Usage),
 		}}
 	}
 	for _, ch := range chunk.Choices {
@@ -295,6 +349,8 @@ func EncodeChatStreamChunk(ev *IRStreamEvent) ([]byte, error) {
 				PromptTokens:     ev.Response.Usage.PromptTokens,
 				CompletionTokens: ev.Response.Usage.CompletionTokens,
 				TotalTokens:      ev.Response.Usage.TotalTokens,
+				PromptTokensDetails: chatUsageDetailsFromIR(ev.Response.Usage, true),
+				CompletionTokensDetails: chatUsageDetailsFromIR(ev.Response.Usage, false),
 			}
 		}
 	}

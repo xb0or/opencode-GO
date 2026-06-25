@@ -922,10 +922,16 @@ func usageFromIRUsage(resp *protocol.IRResponse) *usageAccounting {
 	}
 	u := resp.Usage
 	acct := &usageAccounting{
-		InputTokens:   u.PromptTokens,
-		OutputTokens:  u.CompletionTokens,
-		TotalTokens:   u.TotalTokens,
-		TotalExplicit: u.TotalTokens > 0,
+		InputTokens:         u.PromptTokens,
+		OutputTokens:        u.CompletionTokens,
+		TotalTokens:         u.TotalTokens,
+		TotalExplicit:       u.TotalTokens > 0,
+		CacheReadTokens:     u.CacheReadTokens,
+		CacheCreationTokens: u.CacheCreationTokens,
+		ReasoningTokens:     u.ReasoningTokens,
+	}
+	if acct.CacheReadTokens > 0 {
+		acct.CacheTokens = acct.CacheReadTokens
 	}
 	acct.recomputeTotalIfNeeded()
 	if acct.InputTokens == 0 && acct.OutputTokens == 0 && acct.TotalTokens == 0 {

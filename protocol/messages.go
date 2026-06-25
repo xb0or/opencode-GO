@@ -71,8 +71,11 @@ type MsgResponse struct {
 }
 
 type MsgUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens          int `json:"input_tokens"`
+	OutputTokens         int `json:"output_tokens"`
+	CacheReadTokens      int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationTokens  int `json:"cache_creation_input_tokens,omitempty"`
+	ReasoningTokens      int `json:"reasoning_tokens,omitempty"`
 }
 
 // MsgStreamEvent is one SSE event for streaming Anthropic Messages.
@@ -194,9 +197,12 @@ func DecodeMessagesResponse(data []byte) (*IRResponse, error) {
 	}
 	if resp.Usage != nil {
 		ir.Usage = &IRUsage{
-			PromptTokens:     resp.Usage.InputTokens,
-			CompletionTokens: resp.Usage.OutputTokens,
-			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+			PromptTokens:        resp.Usage.InputTokens,
+			CompletionTokens:    resp.Usage.OutputTokens,
+			TotalTokens:         resp.Usage.InputTokens + resp.Usage.OutputTokens,
+			CacheReadTokens:     resp.Usage.CacheReadTokens,
+			CacheCreationTokens: resp.Usage.CacheCreationTokens,
+			ReasoningTokens:     resp.Usage.ReasoningTokens,
 		}
 	}
 	msg := msgContentToIRMessage(resp.Content)
@@ -219,8 +225,11 @@ func EncodeMessagesResponse(ir *IRResponse) ([]byte, error) {
 	}
 	if ir.Usage != nil {
 		resp.Usage = &MsgUsage{
-			InputTokens:  ir.Usage.PromptTokens,
-			OutputTokens: ir.Usage.CompletionTokens,
+			InputTokens:         ir.Usage.PromptTokens,
+			OutputTokens:        ir.Usage.CompletionTokens,
+			CacheReadTokens:     ir.Usage.CacheReadTokens,
+			CacheCreationTokens: ir.Usage.CacheCreationTokens,
+			ReasoningTokens:     ir.Usage.ReasoningTokens,
 		}
 	}
 	if len(ir.Choices) > 0 {
@@ -261,9 +270,11 @@ func DecodeMessagesStreamEvent(data []byte) (*IRStreamEvent, error) {
 			ir.Response = &IRResponse{ID: ev.Message.ID, Model: ev.Message.Model}
 			if ev.Message.Usage != nil {
 				ir.Response.Usage = &IRUsage{
-					PromptTokens:     ev.Message.Usage.InputTokens,
-					CompletionTokens: ev.Message.Usage.OutputTokens,
-					TotalTokens:      ev.Message.Usage.InputTokens + ev.Message.Usage.OutputTokens,
+					PromptTokens:        ev.Message.Usage.InputTokens,
+					CompletionTokens:    ev.Message.Usage.OutputTokens,
+					TotalTokens:         ev.Message.Usage.InputTokens + ev.Message.Usage.OutputTokens,
+					CacheReadTokens:     ev.Message.Usage.CacheReadTokens,
+					CacheCreationTokens: ev.Message.Usage.CacheCreationTokens,
 				}
 			}
 		}
@@ -302,18 +313,23 @@ func DecodeMessagesStreamEvent(data []byte) (*IRStreamEvent, error) {
 		}
 		if ev.Usage != nil {
 			ir.Response = &IRResponse{Usage: &IRUsage{
-				PromptTokens:     ev.Usage.InputTokens,
-				CompletionTokens: ev.Usage.OutputTokens,
-				TotalTokens:      ev.Usage.InputTokens + ev.Usage.OutputTokens,
+				PromptTokens:        ev.Usage.InputTokens,
+				CompletionTokens:   ev.Usage.OutputTokens,
+				CacheReadTokens:     ev.Usage.CacheReadTokens,
+				CacheCreationTokens: ev.Usage.CacheCreationTokens,
+				ReasoningTokens:     ev.Usage.ReasoningTokens,
 			}}
 		}
 	case "message_stop":
 		ir.Choice = &IRChoice{Index: 0, FinishReason: "stop"}
 		if ev.Usage != nil {
 			ir.Response = &IRResponse{Usage: &IRUsage{
-				PromptTokens:     ev.Usage.InputTokens,
-				CompletionTokens: ev.Usage.OutputTokens,
-				TotalTokens:      ev.Usage.InputTokens + ev.Usage.OutputTokens,
+				PromptTokens:        ev.Usage.InputTokens,
+				CompletionTokens:    ev.Usage.OutputTokens,
+				TotalTokens:         ev.Usage.InputTokens + ev.Usage.OutputTokens,
+				CacheReadTokens:     ev.Usage.CacheReadTokens,
+				CacheCreationTokens: ev.Usage.CacheCreationTokens,
+				ReasoningTokens:     ev.Usage.ReasoningTokens,
 			}}
 		}
 	}
@@ -374,7 +390,20 @@ func EncodeMessagesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 		}
 		var usage *MsgUsage
 		if ev.Response != nil && ev.Response.Usage != nil {
-			usage = &MsgUsage{OutputTokens: ev.Response.Usage.CompletionTokens}
+			u := ev.Response.Usage
+			usage = &MsgUsage{OutputTokens: u.CompletionTokens}
+			// Anthropic exposes cache-read/creation counts only on the message_start
+			// event; carrying them here lets streaming conversions that finalize
+			// usage via message_delta still emit cache/reasoning token counts.
+			if u.CacheReadTokens > 0 {
+				usage.CacheReadTokens = u.CacheReadTokens
+			}
+			if u.CacheCreationTokens > 0 {
+				usage.CacheCreationTokens = u.CacheCreationTokens
+			}
+			if u.ReasoningTokens > 0 {
+				usage.ReasoningTokens = u.ReasoningTokens
+			}
 		}
 		return json.Marshal(MsgStreamEvent{Type: "message_delta", Delta: delta, Usage: usage})
 
