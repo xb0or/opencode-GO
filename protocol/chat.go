@@ -315,6 +315,31 @@ func EncodeChatStreamChunk(ev *IRStreamEvent) ([]byte, error) {
 
 // ──────────────────────── helpers ───────────────────────────────────
 
+// StripToolChoiceForReasoning removes the tool_choice field from a Chat
+// Completions request body when the target model is a reasoning/thinking
+// model. Providers like DeepSeek reject non-auto tool_choice values while
+// thinking mode is active ("Thinking mode does not support this tool_choice"),
+// so we normalize to the provider default (auto) to avoid HTTP 400 errors.
+// It returns the (possibly rewritten) body and true when the field was stripped.
+func StripToolChoiceForReasoning(body []byte, model string) ([]byte, bool) {
+	if !chatModelRequiresReasoningContent(model) {
+		return body, false
+	}
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body, false
+	}
+	if _, ok := m["tool_choice"]; !ok {
+		return body, false
+	}
+	delete(m, "tool_choice")
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body, false
+	}
+	return out, true
+}
+
 func chatMsgToIR(m ChatMessage) IRMessage {
 	ir := IRMessage{Role: m.Role, Name: m.Name, ToolCallID: m.ToolCallID}
 	if m.ReasoningContent != nil {
