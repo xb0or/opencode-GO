@@ -19,7 +19,7 @@ import (
 )
 
 // Version is the current build version. Override at build time via ldflags.
-var Version = "v1.0.0"
+var Version = "v1.0.1"
 
 // Repo is the GitHub "owner/name" identifier of the source repository.
 const Repo = "xb0or/opencode-GO"

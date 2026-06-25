@@ -133,6 +133,14 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	if rewritten, ok := enableStreamUsage(upstreamBody, upstreamProto, head.Stream); ok {
 		upstreamBody = rewritten
 	}
+	// Reasoning/thinking models (e.g. DeepSeek) reject non-auto tool_choice
+	// values while thinking mode is active. Strip tool_choice to avoid an
+	// HTTP 400 from the upstream before the request is sent.
+	if upstreamProto == config.ProtocolChat {
+		if stripped, ok := protocol.StripToolChoiceForReasoning(upstreamBody, route.RealModel); ok {
+			upstreamBody = stripped
+		}
+	}
 
 	// Determine the upstream endpoint path.  If the client called /v1/messages
 	// but the model speaks "chat" upstream, we must hit /v1/chat/completions.
@@ -180,7 +188,9 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			if i+1 < len(attempts) {
 				continue
 			}
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", lastErrMsg)
+			// Don't expose the raw network error (which may contain the
+			// upstream host/URL) to the client.
+			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
 			return
 		}
 
@@ -219,7 +229,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	if lastErrMsg == "" {
 		lastErrMsg = "all upstream keys failed"
 	}
-	writeOpenAIError(c, http.StatusBadGateway, "upstream_error", lastErrMsg)
+	writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
 }
 
 // proxySameProtocolResponse streams the upstream response verbatim to the client.
@@ -236,17 +246,18 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 			}
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream error response")
+			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
 			return
 		}
-		copyResponseHeaders(c, resp)
-		c.Writer.WriteHeader(resp.StatusCode)
-		_, _ = c.Writer.Write(body)
 		errMsg := summarizeUpstreamError(resp.StatusCode, body)
 		if shouldMarkUpstreamFailure(resp.StatusCode) {
 			markKeyFailure(p, key, resp.StatusCode, body)
 		}
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, errMsg)
+		// Don't pass the raw upstream error body to the client — it may
+		// expose provider/channel information. Return a generic error
+		// envelope instead; the raw detail is kept in the admin usage log.
+		writeOpenAIError(c, resp.StatusCode, upstreamErrorType(resp.StatusCode), genericUpstreamMessage(resp.StatusCode))
 		return
 	}
 
@@ -307,7 +318,8 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 	p *pool.Picker, key *store.Key, route config.ModelRoute, start time.Time) {
 
 	if resp.StatusCode >= 400 {
-		// Don't convert error responses; pass them through.
+		// Don't convert error responses; return a generic error to hide
+		// upstream provider/channel details from the client.
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			if status, errType, message, ok := classifyProxyContextError(err); ok {
@@ -317,16 +329,14 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 			}
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream error response")
+			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
 			return
 		}
-		copyResponseHeaders(c, resp)
-		c.Writer.WriteHeader(resp.StatusCode)
-		_, _ = c.Writer.Write(body)
 		if shouldMarkUpstreamFailure(resp.StatusCode) {
 			markKeyFailure(p, key, resp.StatusCode, body)
 		}
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, summarizeUpstreamError(resp.StatusCode, body))
+		writeOpenAIError(c, resp.StatusCode, upstreamErrorType(resp.StatusCode), genericUpstreamMessage(resp.StatusCode))
 		return
 	}
 
@@ -627,6 +637,44 @@ func shouldMarkUpstreamFailure(status int) bool {
 // retried with another available key before returning it to the client.
 func shouldRetryWithNextKey(status int) bool {
 	return shouldMarkUpstreamFailure(status)
+}
+
+// upstreamErrorType maps an upstream HTTP status to an OpenAI-style error type
+// that is safe to return to the client.
+func upstreamErrorType(status int) string {
+	switch {
+	case status == http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return "permission_denied"
+	case status == http.StatusRequestTimeout, status == http.StatusGatewayTimeout:
+		return "upstream_timeout"
+	case status >= 500:
+		return "upstream_error"
+	default:
+		return "upstream_error"
+	}
+}
+
+// genericUpstreamMessage returns a client-safe error message that does not
+// expose upstream provider/channel details (e.g. "Error from provider
+// (DeepSeek)"). The raw upstream error is still recorded in the admin usage
+// log via summarizeUpstreamError for debugging.
+func genericUpstreamMessage(status int) string {
+	switch {
+	case status == http.StatusTooManyRequests:
+		return "upstream rate limit reached, please retry later"
+	case status == http.StatusUnauthorized:
+		return "upstream authentication failed"
+	case status == http.StatusForbidden:
+		return "upstream access denied"
+	case status == http.StatusRequestTimeout, status == http.StatusGatewayTimeout:
+		return "upstream request timed out"
+	case status >= 500:
+		return "upstream service error"
+	default:
+		return "upstream request failed"
+	}
 }
 
 const statusClientClosedRequest = 499

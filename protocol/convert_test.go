@@ -1205,3 +1205,39 @@ func TestDecodeStreamBufferAcceptsValidChatStream(t *testing.T) {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
 }
+
+func TestStripToolChoiceForReasoning(t *testing.T) {
+	// Reasoning model with required tool_choice: should strip it to avoid
+	// "Thinking mode does not support this tool_choice" from the upstream.
+	body := []byte(`{"model":"deepseek-v4-flash","messages":[],"tools":[{"type":"function","function":{"name":"read"}}],"tool_choice":"required"}`)
+	out, ok := StripToolChoiceForReasoning(body, "deepseek-v4-flash")
+	if !ok {
+		t.Fatalf("expected tool_choice to be stripped for reasoning model")
+	}
+	var req map[string]any
+	if err := json.Unmarshal(out, &req); err != nil {
+		t.Fatalf("rewritten body is not valid JSON: %v", err)
+	}
+	if _, exists := req["tool_choice"]; exists {
+		t.Fatalf("tool_choice should have been removed: %s", string(out))
+	}
+	// Other fields must survive.
+	if req["model"] != "deepseek-v4-flash" {
+		t.Fatalf("model field was lost: %s", string(out))
+	}
+	if _, ok := req["tools"]; !ok {
+		t.Fatalf("tools field was lost: %s", string(out))
+	}
+
+	// Non-reasoning model: tool_choice should be preserved.
+	plainBody := []byte(`{"model":"glm-51","messages":[],"tool_choice":"required"}`)
+	if _, ok := StripToolChoiceForReasoning(plainBody, "glm-51"); ok {
+		t.Fatalf("tool_choice should NOT be stripped for non-reasoning models")
+	}
+
+	// Reasoning model without tool_choice: no-op (ok=false).
+	noChoice := []byte(`{"model":"deepseek-v4-flash","messages":[]}`)
+	if _, ok := StripToolChoiceForReasoning(noChoice, "deepseek-v4-flash"); ok {
+		t.Fatalf("no-op expected when tool_choice is absent")
+	}
+}

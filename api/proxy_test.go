@@ -1026,8 +1026,13 @@ func TestProxyLogsFinalUpstreamErrorBody(t *testing.T) {
 	if w.Code != http.StatusPaymentRequired {
 		t.Fatalf("status = %d, want 402; body=%s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "quota exceeded") {
-		t.Fatalf("upstream error body was not passed through: %s", w.Body.String())
+	// The raw upstream error body must NOT be exposed to the client — it may
+	// contain provider/channel information. A generic error is returned instead.
+	if strings.Contains(w.Body.String(), "quota exceeded") {
+		t.Fatalf("upstream error body leaked to client: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "upstream request failed") {
+		t.Fatalf("client did not receive a generic error message: %s", w.Body.String())
 	}
 
 	var logRow store.UsageLog
@@ -1037,8 +1042,126 @@ func TestProxyLogsFinalUpstreamErrorBody(t *testing.T) {
 	if logRow.StatusCode != http.StatusPaymentRequired {
 		t.Fatalf("log status = %d, want 402", logRow.StatusCode)
 	}
+	// The raw upstream error is kept in the admin usage log for debugging.
 	if !strings.Contains(logRow.Error, "quota exceeded") {
 		t.Fatalf("log error missing upstream body summary: %q", logRow.Error)
+	}
+}
+
+func TestProxyStripsToolChoiceForReasoningModel(t *testing.T) {
+	if err := store.InitForTest("file:api_strip_tool_choice?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	var sentBody []byte
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sentBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	// Responses API inbound → Chat upstream for a DeepSeek reasoning model.
+	// The client sends tool_choice=required; the gateway must strip it before
+	// reaching the upstream to avoid the "Thinking mode does not support this
+	// tool_choice" 400.
+	config.RegisterModel(config.ModelRoute{
+		ID:        "deepseek-v4-flash",
+		Name:      "DeepSeek V4 Flash",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "deepseek-v4-flash",
+		Group:     "go",
+	})
+	tok, err := pool.CreateToken("strip-tool-choice-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{Value: "upstream-key", Group: "go", Label: "only", Enabled: true, Weight: 1}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		bytes.NewBufferString(`{"model":"deepseek-v4-flash","input":"hi","tools":[{"type":"function","name":"read","parameters":{}}],"tool_choice":"required"}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(sentBody, &sent); err != nil {
+		t.Fatalf("upstream body is not JSON: %v\n%s", err, string(sentBody))
+	}
+	if _, exists := sent["tool_choice"]; exists {
+		t.Fatalf("tool_choice leaked to upstream for reasoning model: %s", string(sentBody))
+	}
+}
+
+func TestProxyNetworkErrorHidesUpstreamURL(t *testing.T) {
+	if err := store.InitForTest("file:api_network_error?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	// Point the gateway at a closed local port so the upstream dial fails.
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = "http://127.0.0.1:1"
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "network-error-model",
+		Name:      "Network Error Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "real-network-error-model",
+		Group:     "go",
+	})
+	tok, err := pool.CreateToken("network-error-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{Value: "upstream-key", Group: "go", Label: "only", Enabled: true, Weight: 1}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"network-error-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	// The client error must not reveal the upstream host/port or raw dial error.
+	if strings.Contains(body, "127.0.0.1") || strings.Contains(strings.ToLower(body), "dial") {
+		t.Fatalf("upstream host/dial error leaked to client: %s", body)
+	}
+	if !strings.Contains(body, "upstream") {
+		t.Fatalf("client did not receive a generic error message: %s", body)
+	}
+
+	var logRow store.UsageLog
+	if err := store.DB().First(&logRow).Error; err != nil {
+		t.Fatalf("load usage log: %v", err)
+	}
+	// The raw network error is kept in the admin log for debugging.
+	if !strings.Contains(logRow.Error, "failed to reach upstream") {
+		t.Fatalf("log error missing network failure detail: %q", logRow.Error)
 	}
 }
 
