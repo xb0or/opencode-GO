@@ -77,18 +77,18 @@ func DecodeResponsesSSE(r io.Reader) (*IRResponse, error) {
 			msg.Content = appendTextContent(msg.Content, ev.ContentDelta)
 		case "response.reasoning_text.delta", "response.reasoning.delta", "response.reasoning_content.delta":
 			msg.Content = appendThinkingContentBlock(msg.Content, ev.ContentDelta)
-		case "response.function_call_arguments.delta":
-			if len(toolCalls) == 0 {
-				toolCalls = append(toolCalls, IRToolCall{})
-			}
-			idx := 0
-			if ev.ToolCallDelta != nil {
-				idx = ev.ToolCallDelta.Index
-			}
-			for len(toolCalls) <= idx {
-				toolCalls = append(toolCalls, IRToolCall{})
-			}
-			toolCalls[idx].Arguments += ev.ContentDelta
+case "response.function_call_arguments.delta":
+				idx := 0
+				if ev.ToolCallDelta != nil {
+					idx = ev.ToolCallDelta.Index
+				}
+				for len(toolCalls) <= idx {
+					toolCalls = append(toolCalls, IRToolCall{Index: idx})
+				}
+				if toolCalls[idx].Index == 0 && idx != 0 {
+					toolCalls[idx].Index = idx
+				}
+				toolCalls[idx].Arguments += ev.ContentDelta
 		case "response.output_item.done":
 			if ev.Choice != nil && ev.Choice.Message != nil {
 				if text, ok := thinkingTextAndPresence(*ev.Choice.Message); ok {
@@ -96,14 +96,20 @@ func DecodeResponsesSSE(r io.Reader) (*IRResponse, error) {
 				}
 				if len(ev.Choice.Message.ToolCalls) > 0 {
 					tc := ev.Choice.Message.ToolCalls[0]
-					if len(toolCalls) == 0 {
-						toolCalls = append(toolCalls, tc)
-					} else {
-						toolCalls[0].ID = tc.ID
-						toolCalls[0].Name = tc.Name
-						if toolCalls[0].Arguments == "" {
-							toolCalls[0].Arguments = tc.Arguments
-						}
+					idx := ev.Choice.Index
+					if idx < 0 {
+						idx = 0
+					}
+					for len(toolCalls) <= idx {
+						toolCalls = append(toolCalls, IRToolCall{})
+					}
+					// Fill id/name from the finalized item; arguments are usually
+					// already assembled from the delta stream, but fall back if not.
+					toolCalls[idx].ID = tc.ID
+					toolCalls[idx].Name = tc.Name
+					toolCalls[idx].Index = idx
+					if toolCalls[idx].Arguments == "" {
+						toolCalls[idx].Arguments = tc.Arguments
 					}
 				}
 			}

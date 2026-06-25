@@ -329,7 +329,12 @@ func emitChatStream(dst io.Writer, resp *IRResponse) error {
 // emitMessagesStream writes a buffered IRResponse as an Anthropic Messages SSE stream.
 func emitMessagesStream(dst io.Writer, resp *IRResponse) error {
 	enc := NewMessagesStreamEncoder(dst)
-	msg := resp.Choices[0].Message
+	var msg *IRMessage
+	if len(resp.Choices) == 0 || resp.Choices[0].Message == nil {
+		msg = &IRMessage{Role: "assistant"}
+	} else {
+		msg = resp.Choices[0].Message
+	}
 
 	// message_start
 	startEv := &IRStreamEvent{

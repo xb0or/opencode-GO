@@ -1241,3 +1241,149 @@ func TestStripToolChoiceForReasoning(t *testing.T) {
 		t.Fatalf("no-op expected when tool_choice is absent")
 	}
 }
+
+// Cross-protocol response conversion must preserve cache-read, cache-creation
+// and reasoning token counts carried in upstream usage, not just
+// prompt/completion/total.
+func TestConvertResponsePreservesCacheAndReasoningTokens(t *testing.T) {
+	chatBody := []byte(`{"id":"1","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":5}}}`)
+
+	// Chat → Messages
+	msgOut, err := ConvertResponse(config.ProtocolChat, config.ProtocolMessages, chatBody)
+	if err != nil {
+		t.Fatalf("chat→messages: %v", err)
+	}
+	var msgResp MsgResponse
+	if err := json.Unmarshal(msgOut, &msgResp); err != nil {
+		t.Fatalf("messages JSON: %v", err)
+	}
+	if msgResp.Usage == nil {
+		t.Fatal("messages response missing usage")
+	}
+	if msgResp.Usage.CacheReadTokens != 40 {
+		t.Fatalf("messages cache_read = %d, want 40", msgResp.Usage.CacheReadTokens)
+	}
+	if msgResp.Usage.ReasoningTokens != 5 {
+		t.Fatalf("messages reasoning = %d, want 5", msgResp.Usage.ReasoningTokens)
+	}
+
+	// Chat → Responses
+	respOut, err := ConvertResponse(config.ProtocolChat, config.ProtocolResponses, chatBody)
+	if err != nil {
+		t.Fatalf("chat→responses: %v", err)
+	}
+	var respResp RespResponse
+	if err := json.Unmarshal(respOut, &respResp); err != nil {
+		t.Fatalf("responses JSON: %v", err)
+	}
+	if respResp.Usage == nil || respResp.Usage.InputTokensDetails == nil {
+		t.Fatalf("responses usage missing input_tokens_details: %#v", respResp.Usage)
+	}
+	if respResp.Usage.InputTokensDetails.CachedTokens != 40 {
+		t.Fatalf("responses cached_tokens = %d, want 40", respResp.Usage.InputTokensDetails.CachedTokens)
+	}
+	if respResp.Usage.OutputTokensDetails == nil || respResp.Usage.OutputTokensDetails.ReasoningTokens != 5 {
+		t.Fatalf("responses reasoning_tokens missing: %#v", respResp.Usage.OutputTokensDetails)
+	}
+}
+
+// Messages → Chat must also carry cache/reasoning tokens through IR.
+func TestConvertMessagesResponsePreservesCacheTokens(t *testing.T) {
+	msgBody := []byte(`{"id":"1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"m","stop_reason":"end_turn","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":40,"cache_creation_input_tokens":8,"reasoning_tokens":5}}`)
+	chatOut, err := ConvertResponse(config.ProtocolMessages, config.ProtocolChat, msgBody)
+	if err != nil {
+		t.Fatalf("messages→chat: %v", err)
+	}
+	var chatResp ChatResponse
+	if err := json.Unmarshal(chatOut, &chatResp); err != nil {
+		t.Fatalf("chat JSON: %v", err)
+	}
+	if chatResp.Usage == nil {
+		t.Fatal("chat response missing usage")
+	}
+	if chatResp.Usage.PromptTokensDetails == nil || chatResp.Usage.PromptTokensDetails.CachedTokens != 40 {
+		t.Fatalf("chat cached_tokens missing: %#v", chatResp.Usage.PromptTokensDetails)
+	}
+	if chatResp.Usage.CompletionTokensDetails == nil || chatResp.Usage.CompletionTokensDetails.ReasoningTokens != 5 {
+		t.Fatalf("chat reasoning_tokens missing: %#v", chatResp.Usage.CompletionTokensDetails)
+	}
+}
+
+// Streaming chat → responses must propagate cache/reasoning token counts into
+// the emitted response.completed event's usage block.
+func TestStreamConverterChatUsageDetailsPreservedToResponses(t *testing.T) {
+	src := strings.NewReader("data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"prompt_tokens_details\":{\"cached_tokens\":40},\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n" +
+		"data: [DONE]\n\n")
+	var dst bytes.Buffer
+	resp, err := StreamConverterWithUsage(&dst, src, config.ProtocolChat, config.ProtocolResponses)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if resp == nil || resp.Usage == nil {
+		t.Fatal("usage lost across stream conversion")
+	}
+	if resp.Usage.CacheReadTokens != 40 {
+		t.Fatalf("IR cache read = %d, want 40", resp.Usage.CacheReadTokens)
+	}
+	if resp.Usage.ReasoningTokens != 5 {
+		t.Fatalf("IR reasoning = %d, want 5", resp.Usage.ReasoningTokens)
+	}
+	if !strings.Contains(dst.String(), "cached_tokens") {
+		t.Fatalf("responses stream missing cached_tokens:\n%s", dst.String())
+	}
+}
+
+// DecodeResponsesSSE must keep every parallel function_call item's id/name
+// instead of overwriting index 0. See the multi-tool index bug fix.
+func TestDecodeResponsesSSEPreservesMultipleToolCalls(t *testing.T) {
+	src := strings.NewReader(
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"m"}}` + "\n\n" +
+			`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_0","name":"a","arguments":""}}` + "\n\n" +
+			`data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{}"}` + "\n\n" +
+			`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_0","name":"a","arguments":"{}"}}` + "\n\n" +
+			`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"b","arguments":""}}` + "\n\n" +
+			`data: {"type":"response.function_call_arguments.delta","output_index":1,"delta":"{}"}` + "\n\n" +
+			`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"b","arguments":"{}"}}` + "\n\n" +
+			`data: {"type":"response.completed","response":{"id":"resp_1","model":"m","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}` + "\n\n" +
+			"data: [DONE]\n\n")
+	resp, err := DecodeResponsesSSE(src)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(resp.Choices) != 1 || resp.Choices[0].Message == nil {
+		t.Fatalf("no message: %#v", resp)
+	}
+	tcs := resp.Choices[0].Message.ToolCalls
+	if len(tcs) != 2 {
+		t.Fatalf("tool calls = %d, want 2: %#v", len(tcs), tcs)
+	}
+	if tcs[0].ID != "call_0" || tcs[0].Name != "a" {
+		t.Fatalf("tool[0] = %#v, want call_0/a", tcs[0])
+	}
+	if tcs[1].ID != "call_1" || tcs[1].Name != "b" {
+		t.Fatalf("tool[1] = %#v, want call_1/b", tcs[1])
+	}
+}
+
+// emitMessagesStream must not panic when a choice carries no message
+// (e.g. the upstream returned a tool-only payload that was already drained).
+func TestEmitMessagesStreamDoesNotPanicOnNilMessage(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("emitMessagesStream panicked on nil Message: %v", r)
+		}
+	}()
+	resp := &IRResponse{ID: "resp_1", Model: "m", Choices: []IRChoice{{Index: 0}}}
+	var out strings.Builder
+	if err := emitMessagesStream(&out, resp); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !strings.Contains(out.String(), "message_stop") {
+		t.Fatalf("messages stream missing message_stop: %s", out.String())
+	}
+	// An empty message must not emit a tool_use content block.
+	if strings.Contains(out.String(), "tool_use") {
+		t.Fatalf("empty message emitted tool_use: %s", out.String())
+	}
+}

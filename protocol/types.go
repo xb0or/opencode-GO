@@ -104,9 +104,12 @@ type IRChoice struct {
 
 // IRUsage carries token usage information.
 type IRUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens          int `json:"prompt_tokens"`
+	CompletionTokens      int `json:"completion_tokens"`
+	TotalTokens           int `json:"total_tokens,omitempty"`
+	CacheReadTokens       int `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens   int `json:"cache_creation_tokens,omitempty"`
+	ReasoningTokens       int `json:"reasoning_tokens,omitempty"`
 }
 
 // ──────────────────────────── IR Stream Event ───────────────────────
