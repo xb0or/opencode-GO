@@ -569,7 +569,7 @@ func msgContentToIRMessage(content []MsgContent) IRMessage {
 }
 
 func irMsgToMsgContent(m IRMessage) []MsgContent {
-	if text := visibleText(m); text != "" && len(m.Content) == 0 {
+	if text := visibleText(m); text != "" && len(m.Content) == 0 && len(m.ToolCalls) == 0 {
 		return []MsgContent{{Type: "text", Text: text}}
 	}
 	var out []MsgContent
@@ -584,6 +584,17 @@ func irMsgToMsgContent(m IRMessage) []MsgContent {
 		case "thinking":
 			out = append(out, MsgContent{Type: "thinking", Thinking: c.Text})
 		}
+	}
+	// Convert IR ToolCalls to Anthropic tool_use content blocks.
+	// Cross-protocol responses (e.g. Chat → Messages) store tool calls
+	// in the IRMessage.ToolCalls field separately from Content.
+	for _, tc := range m.ToolCalls {
+		out = append(out, MsgContent{
+			Type:  "tool_use",
+			ID:    tc.ID,
+			Name:  tc.Name,
+			Input: json.RawMessage(tc.Arguments),
+		})
 	}
 	return out
 }
