@@ -35,6 +35,7 @@ func MountWithPicker(rg *gin.RouterGroup, p *pool.Picker) {
 //	GET  /admin/health                                                pool health
 //	GET  /admin/keys                                                  -> []Key
 //	POST /admin/keys                       {value,label}            -> Key
+//	POST /admin/keys/import-github          import via GitHub login
 //	PATCH /admin/keys/:id                  update key settings
 //	POST /admin/keys/:id/toggle                                      toggle
 //	POST /admin/keys/:id/reset                                        reset cooldown
@@ -63,6 +64,7 @@ func Mount(rg *gin.RouterGroup) {
 		authed.GET("/version", versionInfo)
 		authed.GET("/keys", listKeys)
 		authed.POST("/keys", createKey)
+		authed.POST("/keys/import-github", importGithubKeys)
 		authed.PATCH("/keys/:id", updateKey)
 		authed.POST("/keys/:id/toggle", toggleKey)
 		authed.POST("/keys/:id/reset", resetKeyCooldown)
@@ -166,10 +168,10 @@ func versionInfo(c *gin.Context) {
 	latest, err := version.FetchLatestRelease(c.Request.Context())
 	if err == nil && latest.Tag != "" {
 		resp["latest"] = gin.H{
-			"tag":             latest.Tag,
-			"name":            latest.Name,
-			"html_url":        latest.HTMLURL,
-			"published_at":    latest.PublishedAt,
+			"tag":              latest.Tag,
+			"name":             latest.Name,
+			"html_url":         latest.HTMLURL,
+			"published_at":     latest.PublishedAt,
 			"update_available": version.Compare(version.Version, latest.Tag) < 0,
 		}
 	} else {

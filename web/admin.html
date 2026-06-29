@@ -705,6 +705,9 @@
                   <p>{{t('keys.subtitle')}}</p>
                 </div>
                 <div class="hero-actions">
+                  <button class="btn btn-ghost" @click="openGithubImportModal">
+                    {{t('keys.githubImport')}}
+                  </button>
                   <button class="btn btn-primary" @click="openKeyModal">
                     {{t('keys.addKey')}}
                   </button>
@@ -1288,6 +1291,58 @@
       >
         <div class="modal">
           <h2>{{editingKeyId?t('keys.updateKey'):t('keys.addKey')}}</h2>
+          <div v-if="!editingKeyId" class="github-import-box">
+            <h3>{{t('keys.githubImportTitle')}}</h3>
+            <p class="hint-text">{{t('keys.githubImportHint')}}</p>
+            <div class="form-row">
+              <div class="form-group">
+                <label>{{t('keys.githubLogin')}}</label>
+                <input
+                  v-model="githubImport.username"
+                  autocomplete="username"
+                  :placeholder="t('keys.githubLoginPlaceholder')"
+                />
+              </div>
+              <div class="form-group">
+                <label>{{t('keys.githubPassword')}}</label>
+                <input
+                  v-model="githubImport.password"
+                  type="password"
+                  autocomplete="current-password"
+                  :placeholder="t('keys.githubPasswordPlaceholder')"
+                />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label>{{t('keys.githubOtp')}}</label>
+                <input
+                  v-model="githubImport.otp"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  :placeholder="t('keys.githubOtpPlaceholder')"
+                />
+              </div>
+              <div class="form-group">
+                <label>{{t('keys.githubTotpSecret')}}</label>
+                <input
+                  v-model="githubImport.totp_secret"
+                  type="password"
+                  autocomplete="off"
+                  :placeholder="t('keys.githubTotpSecretPlaceholder')"
+                />
+              </div>
+            </div>
+            <button
+              class="btn btn-primary"
+              style="width:100%"
+              @click="importGithubKey"
+              :disabled="githubImportLoading"
+            >
+              {{githubImportLoading?t('keys.githubImporting'):t('keys.githubImportAction')}}
+            </button>
+            <div style="border-top:1px solid var(--border);margin:14px 0 8px"></div>
+          </div>
           <div class="form-row">
             <div class="form-group">
               <label>{{t('keys.keyValue')}}</label>

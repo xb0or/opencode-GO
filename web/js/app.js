@@ -8,7 +8,7 @@ import { icons } from "./icons.js?v=20260624a";
 import { locales } from "./locales.js?v=20260624a";
 import { createApi, fmtTime } from "./api.js?v=20260624a";
 import { useDashboard } from "./pages/dashboard.js?v=20260624a";
-import { useKeys } from "./pages/keys.js?v=20260624a";
+import { useKeys } from "./pages/keys.js?v=20260629a";
 import { useTokens } from "./pages/tokens.js?v=20260624a";
 import { useModels } from "./pages/models.js?v=20260624a";
 import { useMappings } from "./pages/mappings.js?v=20260624a";
@@ -388,15 +388,19 @@ createApp({
       // 密钥管理
       keys: keys.keys,
       newKey: keys.newKey,
+      githubImport: keys.githubImport,
+      githubImportLoading: keys.githubImportLoading,
       editingKeyId: keys.editingKeyId,
       showKeyModal: keys.showKeyModal,
       quotaLoading: keys.quotaLoading,
       quotaData: keys.quotaData,
       openKeyModal: keys.openKeyModal,
+      openGithubImportModal: keys.openGithubImportModal,
       openKeySettings: keys.openKeySettings,
       closeKeyModal: keys.closeKeyModal,
       loadKeys: keys.load,
       addKey: keys.add,
+      importGithubKey: keys.importGithubKey,
       toggleKey: keys.toggle,
       resetCooldown: keys.resetCooldown,
       fetchQuota: keys.fetchQuota,

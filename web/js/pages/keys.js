@@ -10,11 +10,14 @@ export function useKeys(api, showToast, t, showConfirm) {
   const keys = ref([]);
   const showKeyModal = ref(false);
   const editingKeyId = ref(null);
+  const githubImportLoading = ref(false);
   const quotaLoading = ref({});
   const quotaData = ref({});
   const quotaResetAt = ref({});
   const quotaTick = ref(Date.now());
   let quotaTimer = null;
+  let quotaRefreshTimer = null;
+  const quotaRefreshIntervalMs = 5 * 60 * 1000;
 
   const newKey = reactive({
     value: "",
@@ -24,9 +27,16 @@ export function useKeys(api, showToast, t, showConfirm) {
     cookie: "",
     workspace_id: "",
   });
+  const githubImport = reactive({
+    username: "",
+    password: "",
+    otp: "",
+    totp_secret: "",
+  });
 
   function openKeyModal() {
     editingKeyId.value = null;
+    resetGithubImport();
     newKey.value = "";
     newKey.label = "";
     newKey.weight = 1;
@@ -34,6 +44,10 @@ export function useKeys(api, showToast, t, showConfirm) {
     newKey.cookie = "";
     newKey.workspace_id = "";
     showKeyModal.value = true;
+  }
+
+  function openGithubImportModal() {
+    openKeyModal();
   }
 
   function openKeySettings(key) {
@@ -50,6 +64,15 @@ export function useKeys(api, showToast, t, showConfirm) {
   function closeKeyModal() {
     showKeyModal.value = false;
     editingKeyId.value = null;
+    resetGithubImport();
+  }
+
+  function resetGithubImport() {
+    githubImport.username = "";
+    githubImport.password = "";
+    githubImport.otp = "";
+    githubImport.totp_secret = "";
+    githubImportLoading.value = false;
   }
 
   function normalizeCookieInput(raw) {
@@ -95,7 +118,13 @@ export function useKeys(api, showToast, t, showConfirm) {
       }
       quotaData.value = nextQuota;
       quotaResetAt.value = nextResetAt;
-      if (Object.keys(nextQuota).length) startQuotaTicker();
+      if (Object.keys(nextQuota).length || hasQuotaConfiguredKeys()) startQuotaTicker();
+      if (hasQuotaConfiguredKeys()) {
+        startQuotaAutoRefresh();
+        refreshConfiguredQuotas({ silent: true });
+      } else {
+        stopQuotaAutoRefresh();
+      }
     } catch (e) {
       showToast(e.message, "error");
     }
@@ -128,6 +157,35 @@ export function useKeys(api, showToast, t, showConfirm) {
     }
   }
 
+  async function importGithubKey() {
+    if (!validateRequired(githubImport.username, t("keys.githubLogin"), t, showToast)) return;
+    if (!validateRequired(githubImport.password, t("keys.githubPassword"), t, showToast)) return;
+    githubImportLoading.value = true;
+    try {
+      const d = await api(
+        "/keys/import-github",
+        "POST",
+        {
+          username: githubImport.username,
+          password: githubImport.password,
+          otp: githubImport.otp,
+          totp_secret: githubImport.totp_secret,
+          label: newKey.label,
+          weight: newKey.weight || 1,
+          proxy_url: newKey.proxy_url,
+        },
+        t
+      );
+      showToast(t("keys.githubImportSuccess", { count: d.imported || 0 }));
+      closeKeyModal();
+      load();
+    } catch (e) {
+      showToast(e.message, "error");
+    } finally {
+      githubImportLoading.value = false;
+    }
+  }
+
   async function toggle(id) {
     try {
       await api("/keys/" + id + "/toggle", "POST", null, t);
@@ -147,7 +205,9 @@ export function useKeys(api, showToast, t, showConfirm) {
     }
   }
 
-  async function fetchQuota(id) {
+  async function fetchQuota(id, options = {}) {
+    if (quotaLoading.value[id]) return quotaData.value[id];
+    const silent = Boolean(options.silent);
     quotaLoading.value[id] = true;
     try {
       const d = await api("/keys/" + id + "/quota", "GET", null, t);
@@ -160,15 +220,51 @@ export function useKeys(api, showToast, t, showConfirm) {
         if (d?.checkedAt) key.quota_updated_at = d.checkedAt;
         key.last_quota = d;
       }
-      if (d && d.error) {
+      if (!silent && d && d.error) {
         showToast(d.hint || d.error, "error");
       }
+      return d;
     } catch (e) {
       quotaData.value[id] = { error: e.message, configured: false };
-      showToast(e.message, "error");
+      if (!silent) showToast(e.message, "error");
+      return quotaData.value[id];
     } finally {
       quotaLoading.value[id] = false;
     }
+  }
+
+  function hasQuotaConfiguredKeys() {
+    return keys.value.some((key) => quotaKeyCanRefresh(key));
+  }
+
+  function quotaKeyCanRefresh(key) {
+    return Boolean(String(key?.cookie || "").trim());
+  }
+
+  function quotaRefreshKeyIds() {
+    return keys.value.filter(quotaKeyCanRefresh).map((key) => key.id);
+  }
+
+  async function refreshConfiguredQuotas(options = {}) {
+    const ids = quotaRefreshKeyIds();
+    if (!ids.length) {
+      stopQuotaAutoRefresh();
+      return;
+    }
+    await Promise.all(ids.map((id) => fetchQuota(id, { silent: options.silent !== false })));
+  }
+
+  function startQuotaAutoRefresh() {
+    if (quotaRefreshTimer || !hasQuotaConfiguredKeys()) return;
+    quotaRefreshTimer = setInterval(() => {
+      refreshConfiguredQuotas({ silent: true });
+    }, quotaRefreshIntervalMs);
+  }
+
+  function stopQuotaAutoRefresh() {
+    if (!quotaRefreshTimer) return;
+    clearInterval(quotaRefreshTimer);
+    quotaRefreshTimer = null;
   }
 
   async function useQuotaWorkspaceCandidate(id, candidate) {
@@ -325,9 +421,11 @@ export function useKeys(api, showToast, t, showConfirm) {
   }
 
   function stopQuotaTicker() {
-    if (!quotaTimer) return;
-    clearInterval(quotaTimer);
-    quotaTimer = null;
+    if (quotaTimer) {
+      clearInterval(quotaTimer);
+      quotaTimer = null;
+    }
+    stopQuotaAutoRefresh();
   }
 
   function quotaWorkspaceCandidates(data) {
@@ -347,19 +445,26 @@ export function useKeys(api, showToast, t, showConfirm) {
   return {
     keys,
     newKey,
+    githubImport,
+    githubImportLoading,
     editingKeyId,
     showKeyModal,
     quotaLoading,
     quotaData,
     quotaResetAt,
     openKeyModal,
+    openGithubImportModal,
     openKeySettings,
     closeKeyModal,
     load,
     add,
+    importGithubKey,
     toggle,
     resetCooldown,
     fetchQuota,
+    refreshConfiguredQuotas,
+    startQuotaAutoRefresh,
+    stopQuotaAutoRefresh,
     useQuotaWorkspaceCandidate,
     remove,
     quotaPercent,

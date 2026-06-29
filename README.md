@@ -27,7 +27,7 @@ It aggregates many OpenCode Go API keys behind a single set of universal endpoin
 - ⏱️ **Per-token controls** — sliding-window rate limit (req/min), optional **max total requests** cap, **expiry**, and enable/disable
 - 💰 **Cost & billing** — per-model pricing drives `total_cost`; optional group multipliers (`GROUP_MULTIPLIERS`) produce the billed `actual_cost` / `account_cost`
 - 📊 **Token accounting** — input / output / **reasoning** / **cache (read & creation)** tokens recorded per call and aggregated per token
-- 🔍 **Go quota lookup** — query each key's rolling / weekly / monthly Go plan usage via its auth Cookie + Workspace ID, with auto-detection of the Workspace ID and a persisted snapshot
+- 🔍 **Go key automation** — auto-login GitHub to import Go KEY + auth Cookie + Workspace ID, while Google remains manual; configured keys auto-refresh rolling / weekly / monthly Go quota snapshots
 - 🖥️ **Web admin panel** (`/admin`) — Vue 3 SPA with dashboard, charts, KEY/Token/Model CRUD, dark/light theme, top bar with dropdown menus
 - 🛠️ **Admin REST API** (`/admin/*`) for programmatic management
 - 🔔 **Update check** — the admin panel reports the running version and flags newer GitHub releases
@@ -219,7 +219,7 @@ export OCSW_TOKEN=sk-...
 Access at `http://<gateway>/admin` (default password: `admin`). Features:
 
 - **Dashboard** — total / today / last-hour calls, success rate, RPM / TPM / QPS, p50 / p95 / p99 latency, latency distribution buckets, 24-hour timeline, calls-by-model and calls-by-protocol charts, today & total token breakdown (input / output / reasoning / cache read / cache creation), today & total cost (total / actual / account), and a recent-call log
-- **API Keys** — add/remove/toggle keys; edit key value/label/weight/**proxy URL**/**auth Cookie**/**Workspace ID**; reset cooldown; view fail counts and usage; **look up Go quota** (rolling / weekly / monthly) with Workspace auto-detection and a persisted snapshot
+- **API Keys** — add/remove/toggle keys; GitHub auto-login import for Go KEY/**auth Cookie**/**Workspace ID**; Google/manual entry stays supported; edit key value/label/weight/**proxy URL**; reset cooldown; view fail counts and usage; **auto-refresh or manually query Go quota** (rolling / weekly / monthly) with Workspace auto-detection and a persisted snapshot
 - **Tokens** — create/edit/delete/copy `sk-` gateway tokens with name, description, rate limit (req/min), **max total requests**, **expiry**, and enable/disable; per-token usage shown as total / today / last-hour requests and tokens
 - **Models** — sync the Go model catalog, enable/disable models, edit display name/protocol/context/priority/pricing/tags, and view OpenRouter-enriched metadata
 - **Model Mappings** — manage client model → upstream model rewrite rules, persisted in SQLite and applied immediately
@@ -235,6 +235,7 @@ All endpoints (except `login`) require `Authorization: Bearer <admin-jwt>`.
 | `GET  /admin/health` | KEY pool health (enabled/disabled, cooldowns) |
 | `GET  /admin/version` | running version + latest GitHub release (+ update flag) |
 | `GET  /admin/keys` · `POST /admin/keys` | list / create keys (value, label, weight, proxy, cookie, workspace_id) |
+| `POST /admin/keys/import-github` | auto-login GitHub and import Go KEY + opencode auth cookie + workspace ID |
 | `PATCH /admin/keys/:id` · `POST /admin/keys/:id/toggle` · `POST /admin/keys/:id/reset` · `DELETE /admin/keys/:id` | edit / toggle / reset cooldown / delete |
 | `GET  /admin/keys/:id/quota` | look up Go plan quota (rolling/weekly/monthly) via cookie + workspace |
 | `GET  /admin/tokens` · `POST /admin/tokens` · `PATCH /admin/tokens/:id` · `DELETE /admin/tokens/:id` | list / create / edit (rate_limit, max_requests, expires_at, enabled) / delete |

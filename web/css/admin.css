@@ -1156,6 +1156,19 @@ select:focus {
   font-size: 12px;
 }
 
+.github-import-box {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+  background: rgba(34, 211, 238, 0.06);
+}
+
+.github-import-box h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
 .quota-cell {
   min-width: 230px;
   font-size: 11px;
