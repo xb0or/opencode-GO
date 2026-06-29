@@ -573,22 +573,42 @@ func irMsgToMsgContent(m IRMessage) []MsgContent {
 		return []MsgContent{{Type: "text", Text: text}}
 	}
 	var out []MsgContent
+	hasTextBlock := false
+	emittedToolUseIDs := make(map[string]bool)
 	for _, c := range m.Content {
 		switch c.Type {
 		case "text":
 			out = append(out, MsgContent{Type: "text", Text: c.Text})
+			hasTextBlock = true
 		case "tool_use":
 			out = append(out, MsgContent{Type: "tool_use", ID: c.ID, Name: c.Name, Input: c.Input})
+			if c.ID != "" {
+				emittedToolUseIDs[c.ID] = true
+			}
 		case "tool_result":
 			out = append(out, MsgContent{Type: "tool_result", ToolUseID: c.ToolID, IsError: c.IsError})
 		case "thinking":
 			out = append(out, MsgContent{Type: "thinking", Thinking: c.Text})
 		}
 	}
+	// Emit visible text that is not already represented by a Content text
+	// block. Cross-protocol Chat responses store plain string content in
+	// IRMessage.Text while Content may hold only reasoning blocks, so the
+	// visible assistant text would otherwise be dropped once tool calls are
+	// present. Ordering is preserved (thinking, then text, then tool_use).
+	if text := visibleText(m); text != "" && !hasTextBlock {
+		out = append(out, MsgContent{Type: "text", Text: text})
+	}
 	// Convert IR ToolCalls to Anthropic tool_use content blocks.
-	// Cross-protocol responses (e.g. Chat → Messages) store tool calls
-	// in the IRMessage.ToolCalls field separately from Content.
+	// Cross-protocol responses (e.g. Chat → Messages) store tool calls in
+	// the IRMessage.ToolCalls field separately from Content. Messages → IR
+	// → Messages roundtrips populate both Content tool_use blocks and
+	// ToolCalls (see msgContentToIRMessage), so skip calls already emitted
+	// from Content to avoid duplicating tool_use blocks.
 	for _, tc := range m.ToolCalls {
+		if tc.ID != "" && emittedToolUseIDs[tc.ID] {
+			continue
+		}
 		out = append(out, MsgContent{
 			Type:  "tool_use",
 			ID:    tc.ID,
