@@ -1387,3 +1387,158 @@ func TestEmitMessagesStreamDoesNotPanicOnNilMessage(t *testing.T) {
 		t.Fatalf("empty message emitted tool_use: %s", out.String())
 	}
 }
+
+// ─────────────── cross-protocol tool_use regression tests ───────────────
+
+// wantMsgContent returns the content blocks of the single choice from a
+// Chat → Messages response conversion, failing the test on shape errors.
+func wantMsgContent(t *testing.T, body []byte) []MsgContent {
+	t.Helper()
+	out, err := ConvertResponse(config.ProtocolChat, config.ProtocolMessages, body)
+	if err != nil {
+		t.Fatalf("chat→messages: %v", err)
+	}
+	var resp MsgResponse
+	if err := json.Unmarshal(out, &resp); err != nil {
+		t.Fatalf("chat→messages output not valid Messages JSON: %v\n%s", err, string(out))
+	}
+	if resp.StopReason != "tool_use" {
+		t.Fatalf("stop_reason = %q, want %q (body=%s)", resp.StopReason, "tool_use", string(out))
+	}
+	return resp.Content
+}
+
+// TestConvertResponse_ChatToMessagesToolCallsOnly verifies that a Chat
+// response carrying only tool_calls (and no visible content) produces an
+// Anthropic tool_use block instead of an empty content array.
+func TestConvertResponse_ChatToMessagesToolCallsOnly(t *testing.T) {
+	body := []byte(`{
+		"id": "chatcmpl-1",
+		"object": "chat.completion",
+		"model": "glm-5.2",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"tool_calls": [{
+					"id": "call_1",
+					"type": "function",
+					"function": {"name": "get_weather", "arguments": "{\"city\":\"sf\"}"}
+				}]
+			},
+			"finish_reason": "tool_calls"
+		}],
+		"usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+	}`)
+	content := wantMsgContent(t, body)
+	if len(content) != 1 {
+		t.Fatalf("expected 1 tool_use block, got %d: %#v", len(content), content)
+	}
+	if content[0].Type != "tool_use" {
+		t.Fatalf("block type = %q, want tool_use", content[0].Type)
+	}
+	if content[0].ID != "call_1" || content[0].Name != "get_weather" {
+		t.Fatalf("tool_use id/name = %q/%q, want call_1/get_weather", content[0].ID, content[0].Name)
+	}
+	if string(content[0].Input) != `{"city":"sf"}` {
+		t.Fatalf("tool_use input = %q, want {\"city\":\"sf\"}", string(content[0].Input))
+	}
+}
+
+// TestConvertResponse_ChatToMessagesTextAndToolCalls verifies that a Chat
+// response carrying both visible text content and tool_calls preserves the
+// text as a text block — not dropping it once tool calls are present.
+func TestConvertResponse_ChatToMessagesTextAndToolCalls(t *testing.T) {
+	body := []byte(`{
+		"id": "chatcmpl-2",
+		"object": "chat.completion",
+		"model": "deepseek-v4-pro",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "Let me check the weather for you.",
+				"tool_calls": [{
+					"id": "call_2",
+					"type": "function",
+					"function": {"name": "get_weather", "arguments": "{\"city\":\"sf\"}"}
+				}]
+			},
+			"finish_reason": "tool_calls"
+		}],
+		"usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8}
+	}`)
+	content := wantMsgContent(t, body)
+	if len(content) != 2 {
+		t.Fatalf("expected text + tool_use (2 blocks), got %d: %#v", len(content), content)
+	}
+	if content[0].Type != "text" || content[0].Text != "Let me check the weather for you." {
+		t.Fatalf("first block = %#v, want text block with visible content", content[0])
+	}
+	if content[1].Type != "tool_use" || content[1].ID != "call_2" || content[1].Name != "get_weather" {
+		t.Fatalf("second block = %#v, want tool_use call_2/get_weather", content[1])
+	}
+}
+
+// TestIrMsgToMsgContentRoundtripNoDuplicateToolUse verifies that a Messages
+// assistant response with a tool_use block survives a Messages → IR →
+// Messages roundtrip without being duplicated. msgContentToIRMessage stores
+// tool_use in both Content and ToolCalls, so irMsgToMsgContent must not
+// re-emit a block that was already emitted from Content.
+func TestIrMsgToMsgContentRoundtripNoDuplicateToolUse(t *testing.T) {
+	original := []MsgContent{
+		{Type: "text", Text: "Calling a tool."},
+		{Type: "tool_use", ID: "tu_1", Name: "get_weather", Input: json.RawMessage(`{"city":"sf"}`)},
+	}
+	ir := msgContentToIRMessage(original)
+	if len(ir.ToolCalls) != 1 || ir.ToolCalls[0].ID != "tu_1" {
+		t.Fatalf("IR should carry the tool call, got %#v", ir.ToolCalls)
+	}
+	roundtripped := irMsgToMsgContent(ir)
+	if len(roundtripped) != 2 {
+		t.Fatalf("expected 2 blocks after roundtrip, got %d: %#v", len(roundtripped), roundtripped)
+	}
+	if roundtripped[0].Type != "text" || roundtripped[1].Type != "tool_use" {
+		t.Fatalf("unexpected block ordering: %#v", roundtripped)
+	}
+	// Count tool_use blocks — must be exactly one despite ToolCalls mirroring Content.
+	toolUseCount := 0
+	for _, b := range roundtripped {
+		if b.Type == "tool_use" {
+			toolUseCount++
+		}
+	}
+	if toolUseCount != 1 {
+		t.Fatalf("expected exactly 1 tool_use block after roundtrip, got %d: %#v", toolUseCount, roundtripped)
+	}
+	if roundtripped[1].ID != "tu_1" || roundtripped[1].Name != "get_weather" {
+		t.Fatalf("duplicated/lost tool_use identity: %#v", roundtripped[1])
+	}
+}
+
+// TestIrMsgToMsgContentDedupeSeparatesDistinctToolUseIDs verifies that when
+// Content holds one tool_use block and ToolCalls holds a different one
+// (e.g. mixed-origin IR), both distinct calls are emitted — only the
+// already-emitted one is skipped.
+func TestIrMsgToMsgContentDedupeSeparatesDistinctToolUseIDs(t *testing.T) {
+	m := IRMessage{
+		Role: "assistant",
+		Content: []IRContent{
+			{Type: "tool_use", ID: "tu_a", Name: "fn_a", Input: json.RawMessage(`{}`)},
+		},
+		ToolCalls: []IRToolCall{
+			{ID: "tu_a", Name: "fn_a", Arguments: `{}`}, // duplicate id → skip
+			{ID: "tu_b", Name: "fn_b", Arguments: `{}`}, // distinct → emit
+		},
+	}
+	out := irMsgToMsgContent(m)
+	ids := map[string]bool{}
+	for _, b := range out {
+		if b.Type == "tool_use" {
+			ids[b.ID] = true
+		}
+	}
+	if len(ids) != 2 || !ids["tu_a"] || !ids["tu_b"] {
+		t.Fatalf("expected both distinct tool_use ids preserved, got %#v -> %#v", ids, out)
+	}
+}
