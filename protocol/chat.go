@@ -416,16 +416,13 @@ func chatMsgToIR(m ChatMessage) IRMessage {
 				if contentType == "input_text" || contentType == "output_text" {
 					contentType = "text"
 				}
-				ir.Content = append(ir.Content, IRContent{
-					Type: contentType,
-					Text: bc.Text,
-					Source: func() *IRImageSource {
-						if bc.ImageURL != nil {
-							return &IRImageSource{URL: bc.ImageURL.URL, Type: "url"}
-						}
-						return nil
-					}(),
-				})
+				var content IRContent
+				if bc.ImageURL != nil {
+					content = imageContentFromDataURI(bc.ImageURL.URL)
+				} else {
+					content = IRContent{Type: contentType, Text: bc.Text}
+				}
+				ir.Content = append(ir.Content, content)
 			}
 		}
 	}
@@ -461,7 +458,11 @@ func irMsgToChatWithReasoning(m IRMessage, includeEmptyReasoning bool) ChatMessa
 				parts = append(parts, ChatContent{Type: "text", Text: c.Text})
 			case "image":
 				if c.Source != nil {
-					parts = append(parts, ChatContent{Type: "image_url", ImageURL: &ChatImageURL{URL: c.Source.URL}})
+					url := c.Source.URL
+					if url == "" && c.Source.Type == "base64" {
+						url = imageSourceToDataURI(c.Source)
+					}
+					parts = append(parts, ChatContent{Type: "image_url", ImageURL: &ChatImageURL{URL: url}})
 				}
 			}
 		}

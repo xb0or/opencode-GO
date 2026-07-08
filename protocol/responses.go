@@ -23,8 +23,9 @@ type RespRequest struct {
 type RespInputItem struct {
 	ID               string                 `json:"id,omitempty"`
 	Role             string                 `json:"role,omitempty"`
-	Type             string                 `json:"type,omitempty"`    // message | function_call | function_call_output | reasoning
+	Type             string                 `json:"type,omitempty"`    // message | function_call | function_call_output | reasoning | input_image
 	Content          json.RawMessage        `json:"content,omitempty"` // string | []RespContent
+	ImageURL         string                 `json:"image_url,omitempty"`
 	Summary          []RespReasoningSummary `json:"summary,omitempty"`
 	ReasoningContent *string                `json:"reasoning_content,omitempty"`
 	Name             string                 `json:"name,omitempty"`
@@ -34,8 +35,9 @@ type RespInputItem struct {
 }
 
 type RespContent struct {
-	Type             string  `json:"type"` // input_text | output_text | reasoning | reasoning_text
+	Type             string  `json:"type"` // input_text | output_text | reasoning | reasoning_text | input_image
 	Text             string  `json:"text,omitempty"`
+	ImageURL         string  `json:"image_url,omitempty"`
 	ReasoningContent *string `json:"reasoning_content,omitempty"`
 }
 
@@ -668,6 +670,15 @@ func respItemToIR(item RespInputItem) IRMessage {
 		ir.ToolCalls = appendIRToolCallIfValid(ir.ToolCalls, IRToolCall{ID: item.CallID, Name: item.Name, Arguments: item.Arguments})
 		return ir
 	}
+	// Handle standalone input_image items (e.g. from sub2api Responses format).
+	// Only enter when explicitly typed as input_image, or when ImageURL is
+	// set with no Content — otherwise we risk swallowing text content in a
+	// message that happens to carry an ImageURL alongside other parts.
+	if item.Type == "input_image" || (item.ImageURL != "" && len(item.Content) == 0) {
+		ir.Role = "user"
+		ir.Content = append(ir.Content, imageContentFromDataURI(item.ImageURL))
+		return ir
+	}
 	// Parse content (string or array).
 	var s string
 	if err := json.Unmarshal(item.Content, &s); err == nil {
@@ -687,6 +698,8 @@ func respItemToIR(item RespInputItem) IRMessage {
 					text = *p.ReasoningContent
 				}
 				ir.Content = appendThinkingContentBlock(ir.Content, text)
+			case "input_image", "image_url":
+				ir.Content = append(ir.Content, imageContentFromDataURI(p.ImageURL))
 			default:
 				ir.Content = append(ir.Content, IRContent{Type: "text", Text: p.Text})
 			}
@@ -723,6 +736,8 @@ func irMsgToRespItem(m IRMessage) RespInputItem {
 		for _, c := range m.Content {
 			if c.Type == "text" {
 				parts = append(parts, RespContent{Type: "input_text", Text: c.Text})
+			} else if c.Type == "image" && c.Source != nil {
+				parts = append(parts, RespContent{Type: "input_image", ImageURL: imageSourceToDataURI(c.Source)})
 			}
 		}
 		if len(parts) == 0 {
@@ -751,6 +766,8 @@ func respOutputToIR(item RespOutputItem) IRMessage {
 				text = *c.ReasoningContent
 			}
 			ir.Content = appendThinkingContentBlock(ir.Content, text)
+		case "input_image", "image_url":
+			ir.Content = append(ir.Content, imageContentFromDataURI(c.ImageURL))
 		default:
 			ir.Content = append(ir.Content, IRContent{Type: "text", Text: c.Text})
 		}
@@ -783,6 +800,15 @@ func irMsgToRespOutput(m IRMessage) RespOutputItem {
 			switch c.Type {
 			case "text":
 				item.Content = append(item.Content, RespContent{Type: "output_text", Text: c.Text})
+			case "image":
+				if c.Source != nil {
+					// Note: Responses API currently defines only "input_image"
+					// as the image content type (no "output_image" exists yet).
+					// Since images only appear in user/assistant messages that
+					// get routed through irMsgToRespItem, this case is rarely
+					// hit, but we handle it for round-trip completeness.
+					item.Content = append(item.Content, RespContent{Type: "input_image", ImageURL: imageSourceToDataURI(c.Source)})
+				}
 			}
 		}
 	}
