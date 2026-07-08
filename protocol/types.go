@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 )
@@ -194,6 +195,80 @@ func appendTextContent(content []IRContent, text string) []IRContent {
 		}
 	}
 	return append(content, IRContent{Type: "text", Text: text})
+}
+
+// imageContentFromDataURI parses a data URI into an IRImageSource with
+// the correct base64 fields so downstream protocols (Anthropic Messages)
+// can decode the image rather than seeing an opaque url= string.
+//
+// RFC 2397 allows optional params between media type and base64 marker:
+//
+//	data:image/png;base64,iVBOR...           → {Type: "base64", MediaType: "image/png", ...}
+//	data:image/png;charset=utf8;base64,...   → {Type: "base64", MediaType: "image/png", ...}
+//	https://example.com/img.png             → {Type: "url", URL: "https://..."}
+//	""                                       → empty IRContent (no source)
+func imageContentFromDataURI(rawURL string) IRContent {
+	if rawURL == "" {
+		return IRContent{}
+	}
+	if !strings.HasPrefix(rawURL, "data:") {
+		return IRContent{Type: "image",
+			Source: &IRImageSource{Type: "url", URL: rawURL}}
+	}
+	// Strip "data:" prefix.
+	rest := rawURL[5:]
+	// Find the last ";base64," segment — RFC 2397 allows parameters
+	// between the media type and base64 marker:
+	//   data:image/png;param=value;base64,...
+	base64Marker := ";base64,"
+	idx := strings.LastIndex(rest, base64Marker)
+	if idx < 0 {
+		// No base64 marker found; treat as opaque URL fallback.
+		return IRContent{Type: "image",
+			Source: &IRImageSource{Type: "url", URL: rawURL}}
+	}
+	// Everything before the marker is the media type (including any params).
+	mediaType := rest[:idx]
+	// Validate that the part after the marker is valid base64.
+	encoded := rest[idx+len(base64Marker):]
+	if _, err := base64.StdEncoding.DecodeString(encoded); err != nil {
+		// Invalid base64 — fall back to opaque URL rather than propagating
+		// broken data to the upstream model.
+		return IRContent{Type: "image",
+			Source: &IRImageSource{Type: "url", URL: rawURL}}
+	}
+	return IRContent{
+		Type: "image",
+		Source: &IRImageSource{
+			Type:      "base64",
+			MediaType: mediaType,
+			Data:      encoded,
+		},
+	}
+}
+
+// imageSourceToDataURI re-encodes an IRImageSource back into a data URI string.
+// It handles both base64 sources (→ data:media/type;base64,data) and URL sources
+// (passthrough). When the source is base64 without a media_type the data URI
+// defaults to application/octet-stream rather than guessing image/png.
+func imageSourceToDataURI(src *IRImageSource) string {
+	if src == nil {
+		return ""
+	}
+	switch src.Type {
+	case "base64":
+		if src.Data == "" {
+			return ""
+		}
+		mt := src.MediaType
+		if mt == "" {
+			mt = "application/octet-stream"
+		}
+		return "data:" + mt + ";base64," + src.Data
+	case "url":
+		return src.URL
+	}
+	return ""
 }
 
 func stringPtr(s string) *string {
