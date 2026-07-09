@@ -142,6 +142,10 @@ func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
 		for _, ws := range workspaces {
 			addWorkspaceCandidate(seen, ws.ID, ws.Name)
 		}
+		// Found workspaces from this instance — no need to try
+		// server-fn:1..80. opencode.ai populates all active workspaces
+		// in a single server-fn response.
+		break
 	}
 	out := workspaceCandidateList(seen)
 	if len(out) > 0 {
