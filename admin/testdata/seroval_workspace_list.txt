@@ -1,0 +1,1 @@
+;0xFFFF;((self.$R=self.$R||{})["server-fn:0"]=[],($R=>$R[0]=[{id:"wrk_1",name:"Default Workspace",active:!0},{id:"wrk_2",name:"My Project",active:!1},{id:"wrk_3",name:"Dev Sandbox",active:!1}])($R["server-fn:0"]))
