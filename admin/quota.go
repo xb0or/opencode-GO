@@ -43,7 +43,23 @@ var workspaceIDPattern = regexp.MustCompile(`(?i)"(?:workspace[_-]?id|workspaceI
 var quotedStringPattern = regexp.MustCompile(`"([^"\\]*(?:\\.[^"\\]*)*)"`)
 var serovalErrorPattern = regexp.MustCompile(`new Error\("((?:\\.|[^"\\])*)"\)`)
 var workspaceCandidatePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{5,127}$`)
+// hydratedQuotaPattern matches the legacy SSR-hydrated form where all three
+// buckets appear consecutively in a single mine/useBalance preamble. Kept
+// for backward compatibility with older server-rendered pages.
 var hydratedQuotaPattern = regexp.MustCompile(`mine:!(0|1),useBalance:!(0|1),rollingUsage:(?:\$R\[\d+\]=)?\{status:"([^"]+)",resetInSec:(\d+),usagePercent:(\d+)\},weeklyUsage:(?:\$R\[\d+\]=)?\{status:"([^"]+)",resetInSec:(\d+),usagePercent:(\d+)\},monthlyUsage:(?:\$R\[\d+\]=)?\{status:"([^"]+)",resetInSec:(\d+),usagePercent:(\d+)\}`)
+
+// usageBucketPattern independently matches a single usage bucket embedded
+// anywhere in the page, e.g. rollingUsage:$R[34]={status:"ok",resetInSec:18000,usagePercent:0}
+// or rollingUsage:{status:"ok",resetInSec:18000,usagePercent:0}.
+// Matching each bucket independently is more resilient to server-side reordering
+// or extra fields inserted between buckets (observed after SolidStart upgrades).
+var usageBucketPattern = regexp.MustCompile(`\b([a-zA-Z]+Usage):(?:\$R\[\d+\]=)?\{status:"([^"]+)",resetInSec:(-?\d+),usagePercent:(-?\d+)\}`)
+
+// planPattern extracts the subscription plan name from the hydrated page.
+var planPattern = regexp.MustCompile(`plan:(?:\$R\[\d+\]=)?"([^"]+)"`)
+
+// signInMarkerPattern detects login-page redirects embedded in HTML.
+var signInMarkerPattern = regexp.MustCompile(`(?:/sign-in|/auth/authorize|/login)`)
 
 // normalizeAuthCookie accepts pasted browser cookie/header fragments and returns
 // the minimal Cookie header value required by opencode.ai quota RPC: auth=<token>.
@@ -405,9 +421,15 @@ func firstStringField(m map[string]any, keys ...string) string {
 	return ""
 }
 
-// fetchGoQuota calls the opencode.ai Go subscription RPC endpoint using the
+// fetchGoQuota calls the opencode.ai Go subscription endpoint using the
 // provided session cookie and workspace ID. Returns nil when the key has no
 // cookie configured (silent skip).
+//
+// Strategy: the workspace HTML page is the primary path because it is far
+// more resilient to opencode.ai server-side changes (SolidStart upgrades,
+// seroval protocol tweaks, server-fn hash rotations). The RPC/_server path
+// is kept as a fallback for cases where the page approach fails but the
+// cookie is still valid.
 func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
 	cookie = normalizeAuthCookie(cookie)
 	workspaceID = normalizeWorkspaceID(workspaceID)
@@ -415,6 +437,15 @@ func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
 		return nil, nil
 	}
 
+	// Primary path: GET the workspace page and parse quota from embedded SSR data.
+	if result, err := fetchGoQuotaFromWorkspacePage(cookie, workspaceID); err == nil && result != nil {
+		return result, nil
+	} else if err != nil && isCookieExpiredError(err) {
+		// Cookie expiry is definitive — no point trying RPC.
+		return nil, err
+	}
+
+	// Fallback: RPC /_server endpoint with seroval streaming.
 	var lastErr error
 	for instance := 0; instance <= maxServerFnInstance; instance++ {
 		result, err := fetchGoQuotaWithInstance(cookie, workspaceID, instance)
@@ -424,15 +455,23 @@ func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
 		}
 		return result, nil
 	}
-	if pageResult, pageErr := fetchGoQuotaFromWorkspacePage(cookie, workspaceID); pageErr == nil && pageResult != nil {
-		return pageResult, nil
-	} else if lastErr != nil {
-		return nil, fmt.Errorf("%w; workspace page fallback failed: %v", lastErr, pageErr)
-	}
 	if lastErr != nil {
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("unexpected response (cookie may be invalid or expired)")
+}
+
+// isCookieExpiredError returns true when the error indicates the cookie is
+// definitively invalid/expired, so callers can skip further attempts.
+func isCookieExpiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "cookie may be invalid or expired") ||
+		strings.Contains(msg, "authentication failed") ||
+		strings.Contains(msg, "session expired") ||
+		strings.Contains(msg, "login redirect")
 }
 
 func fetchGoQuotaWithInstance(cookie, workspaceID string, instance int) (*GoQuotaResponse, error) {
@@ -512,10 +551,23 @@ func fetchGoQuotaFromWorkspacePage(cookie, workspaceID string) (*GoQuotaResponse
 	if err != nil {
 		return nil, fmt.Errorf("build workspace page request: %w", err)
 	}
-	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0")
 	req.Header.Set("Cookie", cookie)
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	// Use a client with a CheckRedirect hook so we can detect cookie-expiry
+	// redirects (302 → /auth/authorize or /sign-in) and surface a clear error
+	// instead of silently parsing the login page HTML.
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			loc := req.URL.String()
+			if strings.Contains(loc, "/sign-in") || strings.Contains(loc, "/auth/authorize") || strings.Contains(loc, "/login") {
+				return fmt.Errorf("session expired: redirected to %s (cookie may be invalid or expired)", loc)
+			}
+			return nil
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("workspace page http call: %w", err)
@@ -526,19 +578,83 @@ func fetchGoQuotaFromWorkspacePage(cookie, workspaceID string) (*GoQuotaResponse
 	if err != nil {
 		return nil, fmt.Errorf("read workspace page: %w", err)
 	}
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return nil, fmt.Errorf("authentication failed (HTTP %d): cookie may be invalid or expired", resp.StatusCode)
+	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("workspace page returned HTTP %d", resp.StatusCode)
+	}
+	// Even with a 200 status, the page may be a login redirect target when the
+	// server does not send an explicit 302. Detect login markers in HTML.
+	if signInMarkerPattern.Match(raw) && !bytes.Contains(raw, []byte("rollingUsage")) && !bytes.Contains(raw, []byte("usagePercent")) {
+		return nil, fmt.Errorf("workspace page is a login redirect (cookie may be invalid or expired)")
 	}
 	return parseGoQuotaFromWorkspacePage(raw)
 }
 
 func parseGoQuotaFromWorkspacePage(raw []byte) (*GoQuotaResponse, error) {
-	match := hydratedQuotaPattern.FindSubmatch(raw)
-	if len(match) != 12 {
+	// 1) Try the legacy consecutive match first (fast path for older SSR format).
+	if result, err := parseGoQuotaFromWorkspacePageConsecutive(raw); err == nil {
+		return result, nil
+	}
+
+	// 2) Match each bucket independently. This handles the newer SolidStart SSR
+	//    format where buckets may be separated by $R[N] references or extra
+	//    fields, and may not appear in the fixed rolling→weekly→monthly order.
+	result := &GoQuotaResponse{Raw: json.RawMessage("{}")}
+	matches := usageBucketPattern.FindAllSubmatch(raw, -1)
+	for _, m := range matches {
+		if len(m) < 4 {
+			continue
+		}
+		name := string(m[1])
+		status := string(m[2])
+		resetInSec, err := strconv.ParseInt(string(m[3]), 10, 64)
+		if err != nil {
+			continue
+		}
+		usagePercent, err := strconv.Atoi(string(m[4]))
+		if err != nil {
+			continue
+		}
+		bucket := &GoQuotaBucket{
+			Status:       status,
+			ResetInSec:   resetInSec,
+			UsagePercent: usagePercent,
+		}
+		switch strings.ToLower(name) {
+		case "rollingusage":
+			result.RollingUsage = bucket
+		case "weeklyusage":
+			result.WeeklyUsage = bucket
+		case "monthlyusage":
+			result.MonthlyUsage = bucket
+		}
+	}
+
+	// Extract mine/useBalance flags if present (best-effort, not required).
+	if m := regexp.MustCompile(`mine:(?:\$R\[\d+\]=)?!(0|1)`).FindSubmatch(raw); len(m) == 2 {
+		result.Mine = string(m[1]) == "0"
+	}
+	if m := regexp.MustCompile(`useBalance:(?:\$R\[\d+\]=)?!(0|1)`).FindSubmatch(raw); len(m) == 2 {
+		result.UseBalance = string(m[1]) == "0"
+	}
+
+	if result.RollingUsage == nil && result.WeeklyUsage == nil && result.MonthlyUsage == nil {
 		if looksLikeHTML(raw) {
 			return nil, fmt.Errorf("workspace page does not include Go quota data (cookie may be invalid, expired, or not subscribed)")
 		}
 		return nil, fmt.Errorf("workspace page response does not include Go quota data")
+	}
+	return result, nil
+}
+
+// parseGoQuotaFromWorkspacePageConsecutive uses the legacy hydratedQuotaPattern
+// which expects all three buckets in a single contiguous mine/useBalance block.
+func parseGoQuotaFromWorkspacePageConsecutive(raw []byte) (*GoQuotaResponse, error) {
+	match := hydratedQuotaPattern.FindSubmatch(raw)
+	if len(match) != 12 {
+		return nil, fmt.Errorf("consecutive pattern not found")
 	}
 
 	bucket := func(status, reset, percent []byte) (*GoQuotaBucket, error) {
