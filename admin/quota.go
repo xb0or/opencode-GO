@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -109,13 +110,21 @@ func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
 	var lastErr error
 	seen := map[string]OpenCodeWorkspace{}
 	for instance := 0; instance <= maxServerFnInstance; instance++ {
-		req, err := http.NewRequest(http.MethodPost, "https://opencode.ai/_server", nil)
+		body, err := serovalRequestBody(nil)
+		if err != nil {
+			return nil, fmt.Errorf("build seroval body: %w", err)
+		}
+		req, err := http.NewRequest(http.MethodPost, "https://opencode.ai/_server", bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("build workspaces request: %w", err)
 		}
+		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Server-Id", workspacesServerHash)
 		req.Header.Set("X-Server-Instance", fmt.Sprintf("server-fn:%d", instance))
 		req.Header.Set("Cookie", cookie)
+		req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+		req.Header.Set("Origin", "https://opencode.ai")
+		req.Header.Set("Referer", "https://opencode.ai/")
 
 		client := &http.Client{Timeout: 15 * time.Second}
 		resp, err := client.Do(req)
@@ -133,17 +142,20 @@ func fetchOpenCodeWorkspaces(cookie string) ([]OpenCodeWorkspace, error) {
 			lastErr = fmt.Errorf("workspaces returned HTTP %d", resp.StatusCode)
 			continue
 		}
-		workspaces, err := parseOpenCodeWorkspaces(raw)
+		workspaces, err := parseSerovalWorkspaces(raw)
 		if err != nil {
 			lastErr = err
-			continue
+			// Fallback: try the existing text-based parser
+			var fallback []OpenCodeWorkspace
+			fallback, err = parseOpenCodeWorkspacesFallback(raw)
+			if err != nil {
+				continue
+			}
+			workspaces = fallback
 		}
 		for _, ws := range workspaces {
 			addWorkspaceCandidate(seen, ws.ID, ws.Name)
 		}
-		// Found workspaces from this instance — no need to try
-		// server-fn:1..80. opencode.ai populates all active workspaces
-		// in a single server-fn response.
 		break
 	}
 	out := workspaceCandidateList(seen)
@@ -178,7 +190,7 @@ func resolveWorkspaceForQuota(cookie string) (string, *GoQuotaResponse, error) {
 	return "", nil, fmt.Errorf("workspace list is empty")
 }
 
-func parseOpenCodeWorkspaces(raw []byte) ([]OpenCodeWorkspace, error) {
+func parseOpenCodeWorkspacesFallback(raw []byte) ([]OpenCodeWorkspace, error) {
 	if msg := serovalErrorMessage(raw); msg != "" {
 		return nil, fmt.Errorf("workspaces returned upstream error: %s (cookie may be invalid or expired)", msg)
 	}
@@ -207,6 +219,13 @@ func parseOpenCodeWorkspaces(raw []byte) ([]OpenCodeWorkspace, error) {
 		return nil, fmt.Errorf("decode workspaces response: %w", err)
 	}
 	return nil, fmt.Errorf("workspace list is empty")
+}
+
+// parseOpenCodeWorkspaces is kept for test compatibility. It delegates to the
+// text-based fallback parser (the original approach before seroval streaming).
+// Production code uses parseSerovalWorkspaces directly.
+func parseOpenCodeWorkspaces(raw []byte) ([]OpenCodeWorkspace, error) {
+	return parseOpenCodeWorkspacesFallback(raw)
 }
 
 func serovalErrorMessage(raw []byte) string {
@@ -417,17 +436,21 @@ func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
 }
 
 func fetchGoQuotaWithInstance(cookie, workspaceID string, instance int) (*GoQuotaResponse, error) {
-	// SolidStart update: args must be in URL query as JSON array, not in POST body.
-	// The seroval body format is no longer accepted by the server.
-	args := url.QueryEscape(`["` + workspaceID + `"]`)
-	serverURL := fmt.Sprintf("https://opencode.ai/_server?id=%s&args=%s", quotaServerHash, args)
-	req, err := http.NewRequest(http.MethodPost, serverURL, nil)
+	body, err := serovalRequestBody([]string{workspaceID})
+	if err != nil {
+		return nil, fmt.Errorf("build seroval body: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://opencode.ai/_server", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Server-Id", quotaServerHash)
 	req.Header.Set("X-Server-Instance", fmt.Sprintf("server-fn:%d", instance))
 	req.Header.Set("Cookie", cookie)
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
+	req.Header.Set("Origin", "https://opencode.ai")
+	req.Header.Set("Referer", "https://opencode.ai/")
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
@@ -441,7 +464,7 @@ func fetchGoQuotaWithInstance(cookie, workspaceID string, instance int) (*GoQuot
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	return parseGoQuotaResponse(raw, resp.StatusCode)
+	return parseSerovalQuota(raw)
 }
 
 func parseGoQuotaResponse(raw []byte, statusCode int) (*GoQuotaResponse, error) {
