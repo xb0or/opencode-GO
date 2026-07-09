@@ -697,6 +697,8 @@ select:focus {
   padding: 30px;
   width: 480px;
   max-width: 90vw;
+  max-height: 85vh;
+  overflow-y: auto;
 }
 .modal h2 {
   margin-bottom: 20px;
