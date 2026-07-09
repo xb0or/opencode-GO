@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -387,16 +386,6 @@ func firstStringField(m map[string]any, keys ...string) string {
 	return ""
 }
 
-// serovalString encodes a single string argument as the Seroval format expected
-// by opencode.ai RPC calls.
-func serovalString(s string) json.RawMessage {
-	// {"t":{"t":9,"i":0,"l":1,"f":[{"t":1,"s":"<value>"}],"o":0},"f":31,"m":[]}
-	return json.RawMessage(fmt.Sprintf(
-		`{"t":{"t":9,"i":0,"l":1,"f":[{"t":1,"s":%q}],"o":0},"f":31,"m":[]}`,
-		s,
-	))
-}
-
 // fetchGoQuota calls the opencode.ai Go subscription RPC endpoint using the
 // provided session cookie and workspace ID. Returns nil when the key has no
 // cookie configured (silent skip).
@@ -428,12 +417,14 @@ func fetchGoQuota(cookie, workspaceID string) (*GoQuotaResponse, error) {
 }
 
 func fetchGoQuotaWithInstance(cookie, workspaceID string, instance int) (*GoQuotaResponse, error) {
-	body := serovalString(workspaceID)
-	req, err := http.NewRequest(http.MethodPost, "https://opencode.ai/_server", bytes.NewReader(body))
+	// SolidStart update: args must be in URL query as JSON array, not in POST body.
+	// The seroval body format is no longer accepted by the server.
+	args := url.QueryEscape(`["` + workspaceID + `"]`)
+	serverURL := fmt.Sprintf("https://opencode.ai/_server?id=%s&args=%s", quotaServerHash, args)
+	req, err := http.NewRequest(http.MethodPost, serverURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Server-Id", quotaServerHash)
 	req.Header.Set("X-Server-Instance", fmt.Sprintf("server-fn:%d", instance))
 	req.Header.Set("Cookie", cookie)
