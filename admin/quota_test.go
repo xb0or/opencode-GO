@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,84 @@ func TestParseGoQuotaFromWorkspacePage(t *testing.T) {
 	}
 	if result.MonthlyUsage == nil || result.MonthlyUsage.UsagePercent != 7 {
 		t.Fatalf("unexpected monthly usage: %#v", result.MonthlyUsage)
+	}
+}
+
+func TestParseGoQuotaFromWorkspacePageIndependentBuckets(t *testing.T) {
+	// Buckets separated by unrelated $R references and not in a single
+	// consecutive mine/useBalance block — the format observed after
+	// SolidStart upgrades.
+	raw := []byte(`<html><script>$R[10]=new Date();` +
+		`rollingUsage:$R[34]={status:"ok",resetInSec:3600,usagePercent:0};` +
+		`someOther:$R[99]={foo:"bar"};` +
+		`weeklyUsage:$R[35]={status:"ok",resetInSec:604800,usagePercent:35};` +
+		`monthlyUsage:$R[36]={status:"ok",resetInSec:2592000,usagePercent:12};` +
+		`</script></html>`)
+
+	result, err := parseGoQuotaFromWorkspacePage(raw)
+	if err != nil {
+		t.Fatalf("parse page quota: %v", err)
+	}
+	if result.RollingUsage == nil || result.RollingUsage.UsagePercent != 0 {
+		t.Fatalf("unexpected rolling usage: %#v", result.RollingUsage)
+	}
+	if result.WeeklyUsage == nil || result.WeeklyUsage.UsagePercent != 35 {
+		t.Fatalf("unexpected weekly usage: %#v", result.WeeklyUsage)
+	}
+	if result.MonthlyUsage == nil || result.MonthlyUsage.UsagePercent != 12 {
+		t.Fatalf("unexpected monthly usage: %#v", result.MonthlyUsage)
+	}
+}
+
+func TestParseGoQuotaFromWorkspacePageNoRefPrefix(t *testing.T) {
+	// Buckets without $R[N]= prefix (plain inline objects).
+	raw := []byte(`rollingUsage:{status:"ok",resetInSec:7200,usagePercent:3},` +
+		`weeklyUsage:{status:"ok",resetInSec:400000,usagePercent:20},` +
+		`monthlyUsage:{status:"ok",resetInSec:2000000,usagePercent:8}`)
+
+	result, err := parseGoQuotaFromWorkspacePage(raw)
+	if err != nil {
+		t.Fatalf("parse page quota: %v", err)
+	}
+	if result.RollingUsage == nil || result.RollingUsage.ResetInSec != 7200 {
+		t.Fatalf("unexpected rolling usage: %#v", result.RollingUsage)
+	}
+	if result.WeeklyUsage == nil || result.WeeklyUsage.UsagePercent != 20 {
+		t.Fatalf("unexpected weekly usage: %#v", result.WeeklyUsage)
+	}
+	if result.MonthlyUsage == nil || result.MonthlyUsage.UsagePercent != 8 {
+		t.Fatalf("unexpected monthly usage: %#v", result.MonthlyUsage)
+	}
+}
+
+func TestParseGoQuotaFromWorkspacePageLoginRedirect(t *testing.T) {
+	// HTML page that contains sign-in markers but no quota data.
+	raw := []byte(`<!DOCTYPE html><html><head><title>Sign In</title></head>` +
+		`<body><a href="/sign-in">Login</a></body></html>`)
+
+	_, err := parseGoQuotaFromWorkspacePage(raw)
+	if err == nil {
+		t.Fatal("expected error for login page without quota data")
+	}
+}
+
+func TestIsCookieExpiredError(t *testing.T) {
+	cases := []struct {
+		msg string
+		ok  bool
+	}{
+		{"cookie may be invalid or expired", true},
+		{"authentication failed (HTTP 401)", true},
+		{"session expired: redirected to /sign-in", true},
+		{"workspace page is a login redirect", true},
+		{"unexpected response", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		err := fmt.Errorf("%s", tc.msg)
+		if got := isCookieExpiredError(err); got != tc.ok {
+			t.Fatalf("isCookieExpiredError(%q) = %v, want %v", tc.msg, got, tc.ok)
+		}
 	}
 }
 
