@@ -4,6 +4,18 @@ A multi-key management gateway for **OpenCode Go** services, written in Go + Gin
 
 It aggregates many OpenCode Go API keys behind a single set of universal endpoints, so any OpenAI- / Anthropic-compatible client (including opencode itself) can consume them with one gateway token.
 
+## Sponsor
+
+[![https://www.packyapi.com/register?aff=cliproxyapi](./assets/packycode-en.png)](https://www.packyapi.com/register?aff=cliproxyapi)
+
+Thanks to PackyCode for sponsoring this project!
+
+PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more.
+
+PackyCode provides special discounts for our software users: register using <a href="https://www.packyapi.com/register?aff=cliproxyapi">this link</a> and enter the "cliproxyapi" promo code during recharge to get 10% off.
+
+---
+
 ## 💬 Discussion
 
 [linux.do](https://linux.do/)
