@@ -6,7 +6,7 @@ It aggregates many OpenCode Go API keys behind a single set of universal endpoin
 
 ## Sponsor
 
-[![https://www.packyapi.com/register?aff=cliproxyapi](./assets/packycode-en.png)](https://www.packyapi.com/register?aff=cliproxyapi)
+[![https://www.packyapi.com/register?aff=cliproxyapi](./packycode-en.png)](https://www.packyapi.com/register?aff=cliproxyapi)
 
 Thanks to PackyCode for sponsoring this project!
 
