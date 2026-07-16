@@ -51,15 +51,26 @@ func TestSyncMergesSourcesAndPreservesCustomizedFields(t *testing.T) {
 	}))
 	defer openrouterSrv.Close()
 
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"ollama-test-model"}]}`))
+	}))
+	defer ollamaSrv.Close()
+
 	result, err := Sync(context.Background(), Options{
 		OpenCodeModelsURL:   opencodeSrv.URL,
 		OpenRouterModelsURL: openrouterSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
 		Now:                 func() time.Time { return time.Unix(100, 0) },
 	})
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if result.OpenCodeCount != 2 || result.MatchedCount != 2 || result.CreatedCount != 1 || result.UpdatedCount != 1 {
+	// OpenCode: 2 models (gpt-4o updated, glm-5.2 created)
+	// Ollama: 1 model (ollama-test-model created) — not overlapping with Go
+	// Total created = 1 (glm-5.2) + 1 (ollama-test-model) = 2
+	// Total updated = 1 (gpt-4o)
+	if result.OpenCodeCount != 2 || result.MatchedCount != 2 || result.CreatedCount != 2 || result.UpdatedCount != 1 {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 
@@ -87,6 +98,18 @@ func TestSyncMergesSourcesAndPreservesCustomizedFields(t *testing.T) {
 	if len(created.Tags) == 0 {
 		t.Fatalf("new model should have derived tags: %#v", created)
 	}
+
+	// Verify Ollama model was synced
+	ollamaModel, ok := config.LookupModel("ollama-test-model")
+	if !ok {
+		t.Fatal("ollama model missing from runtime config")
+	}
+	if ollamaModel.Upstream != config.UpstreamOllama || ollamaModel.Group != "ollama" {
+		t.Fatalf("ollama model has wrong upstream/group: %#v", ollamaModel)
+	}
+	if ollamaModel.Protocol != config.ProtocolChat {
+		t.Fatalf("ollama model should use chat protocol: %#v", ollamaModel)
+	}
 }
 
 func TestSyncContinuesWhenOpenRouterFails(t *testing.T) {
@@ -103,8 +126,13 @@ func TestSyncContinuesWhenOpenRouterFails(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer openrouterSrv.Close()
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer ollamaSrv.Close()
 
-	result, err := Sync(context.Background(), Options{OpenCodeModelsURL: opencodeSrv.URL, OpenRouterModelsURL: openrouterSrv.URL})
+	result, err := Sync(context.Background(), Options{OpenCodeModelsURL: opencodeSrv.URL, OpenRouterModelsURL: openrouterSrv.URL, OllamaModelsURL: ollamaSrv.URL})
 	if err != nil {
 		t.Fatalf("sync should tolerate OpenRouter failure: %v", err)
 	}

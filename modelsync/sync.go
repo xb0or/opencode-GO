@@ -16,12 +16,14 @@ import (
 const (
 	defaultOpenCodeModelsURL   = "https://opencode.ai/zen/go/v1/models"
 	defaultOpenRouterModelsURL = "https://openrouter.ai/api/v1/models"
+	defaultOllamaModelsURL     = "https://ollama.com/api/tags"
 )
 
 // Options configures a model catalog synchronization run.
 type Options struct {
 	OpenCodeModelsURL   string
 	OpenRouterModelsURL string
+	OllamaModelsURL     string
 	Client              *http.Client
 	Now                 func() time.Time
 }
@@ -30,6 +32,7 @@ type Options struct {
 type Result struct {
 	OpenCodeCount   int      `json:"opencode_count"`
 	OpenRouterCount int      `json:"openrouter_count"`
+	OllamaCount     int      `json:"ollama_count"`
 	MatchedCount    int      `json:"matched_count"`
 	CreatedCount    int      `json:"created_count"`
 	UpdatedCount    int      `json:"updated_count"`
@@ -50,6 +53,15 @@ type openCodeModel struct {
 
 type openRouterPayload struct {
 	Data []config.OpenRouterModel `json:"data"`
+}
+
+// ollamaTagsPayload mirrors the response from https://ollama.com/api/tags.
+type ollamaTagsPayload struct {
+	Models []ollamaTag `json:"models"`
+}
+
+type ollamaTag struct {
+	Name string `json:"name"` // model name, e.g. "gpt-oss:120b"
 }
 
 // Sync fetches the OpenCode Go model list, enriches it with OpenRouter metadata,
@@ -117,11 +129,139 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
+	// ── Ollama Cloud model sync ──────────────────────────────────
+	// Fetch the complete model list from https://ollama.com/api/tags and
+	// persist any Ollama-only models not already managed as Go upstream.
+	ollamaTotal, ollamaCreated, ollamaUpdated, ollamaWarn := syncOllamaModels(ctx, client, opts.OllamaModelsURL, existingByID, defaultByID, now)
+	result.OllamaCount = ollamaTotal
+	result.CreatedCount += ollamaCreated
+	result.UpdatedCount += ollamaUpdated
+	result.Warnings = append(result.Warnings, ollamaWarn...)
+
 	if err := ReloadRuntimeFromStore(); err != nil {
 		return result, err
 	}
 	result.TotalCount = len(config.AllModels())
 	return result, nil
+}
+
+// syncOllamaModels fetches the Ollama Cloud model catalog from /api/tags and
+// persists any models not already in the DB. Ollama Cloud models are assigned
+// upstream=ollama, group=ollama, protocol=chat. Existing admin-customized rows
+// are preserved; only new models are created.
+func syncOllamaModels(ctx context.Context, client *http.Client, url string, existingByID map[string]store.ModelRouteRow, defaults map[string]config.ModelRoute, now time.Time) (int, int, int, []string) {
+	var warnings []string
+	tags, err := fetchOllamaTags(ctx, client, url)
+	if err != nil {
+		warnings = append(warnings, "ollama: "+err.Error())
+		return 0, 0, 0, warnings
+	}
+
+	created, updated := 0, 0
+	for _, tag := range tags {
+		id := strings.TrimSpace(tag.Name)
+		if id == "" {
+			continue
+		}
+
+		// Skip if this model is already managed as a Go upstream model
+		// (same model name exists in Go defaults or existing Go rows).
+		if def, ok := defaults[id]; ok && def.Upstream == config.UpstreamGo {
+			continue
+		}
+		if row, ok := existingByID[id]; ok && row.Upstream == string(config.UpstreamGo) {
+			continue
+		}
+
+		row, existed := existingByID[id]
+		route := buildOllamaSyncedRoute(id, row, existed, defaults)
+		nextRow := store.NewModelRouteRow(route)
+		nextRow.LastSyncedAt = &now
+		if existed {
+			nextRow.CreatedAt = row.CreatedAt
+			updated++
+		} else {
+			created++
+		}
+		if err := store.SaveModelRoute(&nextRow); err != nil {
+			warnings = append(warnings, fmt.Sprintf("ollama save %s: %v", id, err))
+		}
+	}
+	return len(tags), created, updated, warnings
+}
+
+// buildOllamaSyncedRoute constructs a ModelRoute for an Ollama Cloud model.
+// Ollama Cloud speaks OpenAI-compatible Chat protocol.
+func buildOllamaSyncedRoute(id string, existingRow store.ModelRouteRow, existed bool, defaults map[string]config.ModelRoute) config.ModelRoute {
+	displayName := ollamaDisplayName(id)
+	// Check if we have a default with a nicer name
+	if def, ok := defaults[id]; ok && def.Upstream == config.UpstreamOllama && def.Name != "" {
+		displayName = def.Name
+	}
+
+	fallback := config.ModelRoute{
+		ID:        id,
+		Name:      displayName,
+		Upstream:  config.UpstreamOllama,
+		Protocol:  config.ProtocolChat,
+		RealModel: id,
+		Group:     "ollama",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+
+	if !existed {
+		return fallback
+	}
+
+	route := store.ModelRouteFromRow(existingRow)
+	route.ID = id
+	route.Upstream = config.UpstreamOllama
+	if strings.TrimSpace(route.Group) == "" {
+		route.Group = "ollama"
+	}
+	if route.Status == nil {
+		route.Status = config.ModelStatusPtr(config.ModelStatusEnabled)
+	}
+	if !config.IsModelFieldCustomized(route, "name") {
+		route.Name = fallback.Name
+	}
+	if !config.IsModelFieldCustomized(route, "protocol") {
+		route.Protocol = fallback.Protocol
+	}
+	if !config.IsModelFieldCustomized(route, "real_model") {
+		route.RealModel = fallback.RealModel
+	}
+	if route.Name == "" {
+		route.Name = fallback.Name
+	}
+	if route.Protocol == "" {
+		route.Protocol = fallback.Protocol
+	}
+	if route.RealModel == "" {
+		route.RealModel = fallback.RealModel
+	}
+	return route
+}
+
+// ollamaDisplayName converts a model id like "gpt-oss:120b" to "GPT-OSS 120B".
+func ollamaDisplayName(id string) string {
+	// Replace ":" with space, then title-case each word.
+	parts := strings.FieldsFunc(id, func(r rune) bool { return r == ':' || r == '-' || r == '_' })
+	for i, part := range parts {
+		lower := strings.ToLower(part)
+		switch lower {
+		case "glm", "gpt", "qwen", "vl", "llm":
+			parts[i] = strings.ToUpper(part)
+		default:
+			if len(part) > 0 {
+				parts[i] = strings.ToUpper(part[:1]) + part[1:]
+			}
+		}
+	}
+	if len(parts) == 0 {
+		return id
+	}
+	return strings.Join(parts, " ")
 }
 
 // ReloadRuntimeFromStore replaces the in-memory model route table from SQLite.
@@ -173,6 +313,9 @@ func withDefaults(opts Options) Options {
 	if strings.TrimSpace(opts.OpenRouterModelsURL) == "" {
 		opts.OpenRouterModelsURL = defaultOpenRouterModelsURL
 	}
+	if strings.TrimSpace(opts.OllamaModelsURL) == "" {
+		opts.OllamaModelsURL = defaultOllamaModelsURL
+	}
 	if opts.Client == nil {
 		opts.Client = &http.Client{Timeout: 15 * time.Second}
 	}
@@ -198,6 +341,14 @@ func fetchOpenRouterModels(ctx context.Context, client *http.Client, url string)
 		return nil, fmt.Errorf("fetch OpenRouter models: %w", err)
 	}
 	return payload.Data, nil
+}
+
+func fetchOllamaTags(ctx context.Context, client *http.Client, url string) ([]ollamaTag, error) {
+	var payload ollamaTagsPayload
+	if err := fetchJSON(ctx, client, url, &payload); err != nil {
+		return nil, fmt.Errorf("fetch Ollama tags: %w", err)
+	}
+	return payload.Models, nil
 }
 
 func fetchJSON(ctx context.Context, client *http.Client, url string, dst any) error {

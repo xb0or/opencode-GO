@@ -34,16 +34,16 @@ func main() {
 	if result, err := modelsync.Sync(context.Background(), modelsync.Options{}); err != nil {
 		log.Printf("warn: model catalog sync failed: %v", err)
 	} else {
-		log.Printf("synced model catalog: opencode=%d openrouter=%d matched=%d created=%d updated=%d warnings=%v",
-			result.OpenCodeCount, result.OpenRouterCount, result.MatchedCount, result.CreatedCount, result.UpdatedCount, result.Warnings)
+		log.Printf("synced model catalog: opencode=%d ollama=%d openrouter=%d matched=%d created=%d updated=%d warnings=%v",
+			result.OpenCodeCount, result.OllamaCount, result.OpenRouterCount, result.MatchedCount, result.CreatedCount, result.UpdatedCount, result.Warnings)
 	}
 	modelsync.StartBackground(context.Background(), 6*time.Hour, modelsync.Options{}, func(result modelsync.Result, err error) {
 		if err != nil {
 			log.Printf("warn: background model catalog sync failed: %v", err)
 			return
 		}
-		log.Printf("background model catalog synced: opencode=%d matched=%d created=%d updated=%d warnings=%v",
-			result.OpenCodeCount, result.MatchedCount, result.CreatedCount, result.UpdatedCount, result.Warnings)
+		log.Printf("background model catalog synced: opencode=%d ollama=%d matched=%d created=%d updated=%d warnings=%v",
+			result.OpenCodeCount, result.OllamaCount, result.MatchedCount, result.CreatedCount, result.UpdatedCount, result.Warnings)
 	})
 
 	// Release mode in production.
