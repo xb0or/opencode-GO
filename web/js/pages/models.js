@@ -66,21 +66,34 @@ export function useModels(api, showToast, t, showConfirm) {
     cache_write_price: "",
   });
 
-  /** 当前上游可选的模型列表：内置兜底 + 已同步数据。 */
+  /** 当前上游可选的模型列表：根据 upstream 过滤内置兜底 + 已同步数据。 */
   const availableModels = computed(() => {
-    const byId = new Map([...GO_MODELS, ...OLLAMA_MODELS].map((m) => [m.id, m]));
+    const upstream = newModel.upstream || "go";
+    const seeds = upstream === "ollama" ? OLLAMA_MODELS : GO_MODELS;
+    const byId = new Map(seeds.map((m) => [m.id, m]));
     for (const m of models.value || []) {
+      const mUpstream = m.upstream || "go";
+      if (mUpstream !== upstream) continue;
       if (!byId.has(m.real_model || m.id)) {
         byId.set(m.real_model || m.id, {
           id: m.real_model || m.id,
           name: m.name || m.id,
           protocol: m.protocol || "chat",
-          upstream: m.upstream || "go",
+          upstream: mUpstream,
         });
       }
     }
     return Array.from(byId.values()).sort((a, b) => a.id.localeCompare(b.id));
   });
+
+  /** 切换上游时清空已选模型，避免旧上游残留。 */
+  watch(
+    () => newModel.upstream,
+    (val, oldVal) => {
+      if (editingId.value) return;
+      if (oldVal && val !== oldVal) newModel.real_model = "";
+    }
+  );
 
   /** 当 Go 模型变化时，自动同步模型 ID、名称与协议。 */
   watch(

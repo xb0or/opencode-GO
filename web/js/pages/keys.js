@@ -103,12 +103,12 @@ export function useKeys(api, showToast, t, showConfirm) {
     newKey.workspace_id = normalizeWorkspaceInput(newKey.workspace_id);
   }
 
-  let currentGroup = "go";
+  const currentGroup = ref("go");
 
   async function load(group) {
-    if (group) currentGroup = group;
+    if (group) currentGroup.value = group;
     try {
-      const d = await api("/keys?group=" + encodeURIComponent(currentGroup), "GET", null, t);
+      const d = await api("/keys?group=" + encodeURIComponent(currentGroup.value), "GET", null, t);
       const rows = d.data || [];
       keys.value = rows;
       const nextQuota = {};
@@ -140,13 +140,13 @@ export function useKeys(api, showToast, t, showConfirm) {
     try {
       const payload = {
         value: newKey.value,
-        group: currentGroup,
+        group: currentGroup.value,
         label: newKey.label,
         weight: newKey.weight || 1,
         proxy_url: newKey.proxy_url,
       };
       // Only send cookie/workspace for Go group (Ollama Cloud doesn't need them)
-      if (currentGroup === 'go') {
+      if (currentGroup.value === 'go') {
         payload.cookie = normalizeCookieInput(newKey.cookie);
         payload.workspace_id = normalizeWorkspaceInput(newKey.workspace_id);
       }
