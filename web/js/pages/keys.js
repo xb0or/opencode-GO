@@ -144,9 +144,12 @@ export function useKeys(api, showToast, t, showConfirm) {
         label: newKey.label,
         weight: newKey.weight || 1,
         proxy_url: newKey.proxy_url,
-        cookie: normalizeCookieInput(newKey.cookie),
-        workspace_id: normalizeWorkspaceInput(newKey.workspace_id),
       };
+      // Only send cookie/workspace for Go group (Ollama Cloud doesn't need them)
+      if (currentGroup === 'go') {
+        payload.cookie = normalizeCookieInput(newKey.cookie);
+        payload.workspace_id = normalizeWorkspaceInput(newKey.workspace_id);
+      }
       if (editing) {
         await api("/keys/" + editingKeyId.value, "PATCH", payload, t);
         showToast(t("keys.updateBtn") + " ✓");

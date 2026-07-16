@@ -412,6 +412,7 @@ createApp({
       openKeySettings: keys.openKeySettings,
       closeKeyModal: keys.closeKeyModal,
       loadKeys: keys.load,
+      currentGroup: keys.currentGroup,
       addKey: keys.add,
       importGithubKey: keys.importGithubKey,
       toggleKey: keys.toggle,

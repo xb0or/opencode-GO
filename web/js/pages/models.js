@@ -30,7 +30,10 @@ const GO_MODELS = [
   { id: "qwen3.7-plus", name: "Qwen3.7 Plus", protocol: "messages", upstream: "go" },
   { id: "qwen3.6-plus", name: "Qwen3.6 Plus", protocol: "messages", upstream: "go" },
   { id: "qwen3.5-plus", name: "Qwen3.5 Plus", protocol: "messages", upstream: "go" },
-  // --- Ollama Cloud models ---
+];
+
+/** Ollama Cloud seed models — gateway-facing ids mapped to real upstream model names. */
+const OLLAMA_MODELS = [
   { id: "gpt-oss:120b", name: "GPT-OSS 120B", protocol: "chat", upstream: "ollama" },
   { id: "gpt-oss:20b", name: "GPT-OSS 20B", protocol: "chat", upstream: "ollama" },
   { id: "qwen3.5:397b", name: "Qwen3.5 397B", protocol: "chat", upstream: "ollama" },
@@ -65,13 +68,14 @@ export function useModels(api, showToast, t, showConfirm) {
 
   /** 当前上游可选的模型列表：内置兜底 + 已同步数据。 */
   const availableModels = computed(() => {
-    const byId = new Map(GO_MODELS.map((m) => [m.id, m]));
+    const byId = new Map([...GO_MODELS, ...OLLAMA_MODELS].map((m) => [m.id, m]));
     for (const m of models.value || []) {
       if (!byId.has(m.real_model || m.id)) {
         byId.set(m.real_model || m.id, {
           id: m.real_model || m.id,
           name: m.name || m.id,
           protocol: m.protocol || "chat",
+          upstream: m.upstream || "go",
         });
       }
     }
