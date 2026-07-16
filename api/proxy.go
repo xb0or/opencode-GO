@@ -43,6 +43,16 @@ func proxyResponses(p *pool.Picker) gin.HandlerFunc {
 
 // proxyRequest is the shared handler with full cross-protocol conversion.
 //
+// NOTE(stability): This function is intentionally the ONLY orchestrator in
+// proxy.go. It delegates to:
+//   - decode.go         — request body parsing
+//   - internal/router/  — model resolution & body rewriting
+//   - protocol/         — request/response conversion
+//   - pool/             — key picking & failure tracking
+//   - stream.go         — response streaming (same/cross protocol)
+//   - usage.go          — usage accounting & cost estimation
+// Do NOT add business logic here — it belongs in the layer above.
+//
 // Flow:
 //  1. Read & parse the client body to find the requested model.
 //  2. Resolve the model route.
@@ -63,7 +73,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	}
 	_ = c.Request.Body.Close()
 
-	head := inspectRequestBody(c.Request.URL.Path, body)
+	head := parseRequestBody(c.Request.URL.Path, body)
 	upstreamBody := head.Body
 
 	resolution := router.Resolve(head.Model, inbound)
@@ -120,11 +130,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	}
 
 	// Rewrite the model field in the body to the upstream's real model id.
-	rewritten, ok := router.RewriteModel(upstreamBody, route.RealModel)
+	rewritten, ok := router.RewriteRequestModel(upstreamBody, route.RealModel)
 	if ok {
 		upstreamBody = rewritten
 	}
-	if rewritten, ok := router.EnableStreamUsage(upstreamBody, upstreamProto, head.Stream); ok {
+	if rewritten, ok := router.EnableRequestStreamUsage(upstreamBody, upstreamProto, head.Stream); ok {
 		upstreamBody = rewritten
 	}
 	// Reasoning/thinking models (e.g. DeepSeek) reject non-auto tool_choice

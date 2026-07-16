@@ -17,10 +17,10 @@ type requestHead struct {
 	HasModel bool
 }
 
-// inspectRequestBody parses a JSON request body just enough to find the
+// parseRequestBody parses a JSON request body just enough to find the
 // top-level "model" and "stream" fields. Invalid JSON or missing model is
 // logged and forwarded unchanged. No model mapping or routing happens here.
-func inspectRequestBody(path string, body []byte) requestHead {
+func parseRequestBody(path string, body []byte) requestHead {
 	head := requestHead{Body: body}
 	var m map[string]any
 	if err := json.Unmarshal(body, &m); err != nil {

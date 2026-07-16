@@ -72,11 +72,11 @@ func TestResolveModelMapping(t *testing.T) {
 	}
 }
 
-func TestRewriteModel(t *testing.T) {
+func TestRewriteRequestModel(t *testing.T) {
 	body := []byte(`{"model":"gpt-4","messages":[]}`)
-	out, ok := RewriteModel(body, "gpt-5")
+	out, ok := RewriteRequestModel(body, "gpt-5")
 	if !ok {
-		t.Fatal("RewriteModel should succeed")
+		t.Fatal("RewriteRequestModel should succeed")
 	}
 	var m map[string]any
 	if err := json.Unmarshal(out, &m); err != nil {
@@ -87,13 +87,13 @@ func TestRewriteModel(t *testing.T) {
 	}
 }
 
-func TestEnableStreamUsageChatOnly(t *testing.T) {
+func TestEnableRequestStreamUsageChatOnly(t *testing.T) {
 	body := []byte(`{"model":"m","stream":true}`)
 
 	// Chat protocol should add stream_options
-	out, ok := EnableStreamUsage(body, config.ProtocolChat, true)
+	out, ok := EnableRequestStreamUsage(body, config.ProtocolChat, true)
 	if !ok {
-		t.Fatal("EnableStreamUsage should rewrite chat stream request")
+		t.Fatal("EnableRequestStreamUsage should rewrite chat stream request")
 	}
 	var m map[string]any
 	_ = json.Unmarshal(out, &m)
@@ -103,14 +103,14 @@ func TestEnableStreamUsageChatOnly(t *testing.T) {
 	}
 
 	// Messages should not be rewritten
-	_, ok = EnableStreamUsage(body, config.ProtocolMessages, true)
+	_, ok = EnableRequestStreamUsage(body, config.ProtocolMessages, true)
 	if ok {
-		t.Fatal("EnableStreamUsage should not touch Messages protocol")
+		t.Fatal("EnableRequestStreamUsage should not touch Messages protocol")
 	}
 
 	// Non-stream should not be rewritten
-	_, ok = EnableStreamUsage(body, config.ProtocolChat, false)
+	_, ok = EnableRequestStreamUsage(body, config.ProtocolChat, false)
 	if ok {
-		t.Fatal("EnableStreamUsage should not touch non-stream requests")
+		t.Fatal("EnableRequestStreamUsage should not touch non-stream requests")
 	}
 }

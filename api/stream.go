@@ -13,6 +13,9 @@ import (
 	"github.com/xb0or/opencode-GO/store"
 )
 
+// ---------------------------------------------------------------------------
+// Same-Protocol Response Handling
+// ---------------------------------------------------------------------------
 // proxySameProtocolResponse streams the upstream response verbatim to the client.
 func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 	p *pool.Picker, key *store.Key, route config.ModelRoute, inbound config.Protocol, start time.Time) {
@@ -92,6 +95,9 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Cross-Protocol Response Handling
+// ---------------------------------------------------------------------------
 // proxyCrossProtocolResponse buffers the upstream response, converts it through
 // the IR, and writes the converted response to the client.
 func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
@@ -122,9 +128,7 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 	}
 
 	if stream {
-		// Streaming cross-protocol: buffer the full upstream SSE stream,
-		// then re-emit in the target protocol format.
-		//
+		// ---- SSE Reader (buffer full upstream stream) ----
 		// We must buffer the body before writing the SSE headers, because if
 		// the upstream returned an error page (e.g. a Cloudflare 502 HTML
 		// page served with HTTP 200) we cannot decode it and must surface a
@@ -158,6 +162,7 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 			return
 		}
 
+		// ---- SSE Writer (emit converted stream to client) ----
 		// Commit the SSE headers only after a successful decode.
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")

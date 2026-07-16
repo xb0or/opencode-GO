@@ -243,11 +243,11 @@ func TestUsageFromSSELineMergesReasoningTokens(t *testing.T) {
 	}
 }
 
-func TestEnableStreamUsageForOpenAIProtocols(t *testing.T) {
+func TestEnableRequestStreamUsageForOpenAIProtocols(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[],"stream":true}`)
-	out, ok := router.EnableStreamUsage(body, config.ProtocolChat, true)
+	out, ok := router.EnableRequestStreamUsage(body, config.ProtocolChat, true)
 	if !ok {
-		t.Fatal("EnableStreamUsage should rewrite chat stream request")
+		t.Fatal("EnableRequestStreamUsage should rewrite chat stream request")
 	}
 	var got map[string]any
 	if err := json.Unmarshal(out, &got); err != nil {
@@ -258,12 +258,12 @@ func TestEnableStreamUsageForOpenAIProtocols(t *testing.T) {
 		t.Fatalf("stream_options.include_usage = %#v, want true", opts["include_usage"])
 	}
 
-	out, ok = router.EnableStreamUsage(body, config.ProtocolMessages, true)
+	out, ok = router.EnableRequestStreamUsage(body, config.ProtocolMessages, true)
 	if ok || string(out) != string(body) {
 		t.Fatalf("messages stream request should not be rewritten: ok=%v body=%s", ok, string(out))
 	}
 
-	out, ok = router.EnableStreamUsage([]byte(`{"model":"m","input":"hi","stream":true}`), config.ProtocolResponses, true)
+	out, ok = router.EnableRequestStreamUsage([]byte(`{"model":"m","input":"hi","stream":true}`), config.ProtocolResponses, true)
 	if ok {
 		t.Fatalf("responses stream request should not be rewritten because Responses API usage is emitted by default: body=%s", string(out))
 	}
@@ -1209,10 +1209,10 @@ func TestPreviewBodySanitizesControlChars(t *testing.T) {
 	}
 }
 
-func TestInspectRequestBodyParsesModelAndStream(t *testing.T) {
+func TestParseRequestBodyParsesModelAndStream(t *testing.T) {
 	// With model
 	withModel := []byte(`{"model":"test-model","messages":[],"stream":true}`)
-	head := inspectRequestBody("/v1/chat/completions", withModel)
+	head := parseRequestBody("/v1/chat/completions", withModel)
 	if !head.Parsed || !head.HasModel {
 		t.Fatalf("expected parsed with model: %#v", head)
 	}
@@ -1228,7 +1228,7 @@ func TestInspectRequestBodyParsesModelAndStream(t *testing.T) {
 
 	// Missing model
 	missing := []byte(`{"messages":[]}`)
-	head = inspectRequestBody("/v1/chat/completions", missing)
+	head = parseRequestBody("/v1/chat/completions", missing)
 	if !head.Parsed || head.HasModel {
 		t.Fatalf("expected parsed without model: %#v", head)
 	}
@@ -1238,7 +1238,7 @@ func TestInspectRequestBodyParsesModelAndStream(t *testing.T) {
 
 	// Invalid JSON
 	invalid := []byte(`not json`)
-	head = inspectRequestBody("/v1/chat/completions", invalid)
+	head = parseRequestBody("/v1/chat/completions", invalid)
 	if head.Parsed {
 		t.Fatalf("invalid JSON should not parse: %#v", head)
 	}

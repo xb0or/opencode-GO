@@ -60,10 +60,10 @@ func passthroughRoute(model string, inbound config.Protocol) config.ModelRoute {
 	}
 }
 
-// RewriteModel returns body with the top-level "model" field replaced by the
+// RewriteRequestModel returns body with the top-level "model" field replaced by the
 // upstream real model id. It re-marshals compact JSON; on any failure the
 // original body is returned with ok=false.
-func RewriteModel(body []byte, realModel string) ([]byte, bool) {
+func RewriteRequestModel(body []byte, realModel string) ([]byte, bool) {
 	if realModel == "" {
 		return body, false
 	}
@@ -79,9 +79,9 @@ func RewriteModel(body []byte, realModel string) ([]byte, bool) {
 	return out, true
 }
 
-// EnableStreamUsage asks upstream protocols that support it to include final
+// EnableRequestStreamUsage asks upstream protocols that support it to include final
 // usage accounting in SSE streams so admin usage logs can record token counts.
-func EnableStreamUsage(body []byte, proto config.Protocol, stream bool) ([]byte, bool) {
+func EnableRequestStreamUsage(body []byte, proto config.Protocol, stream bool) ([]byte, bool) {
 	if !stream {
 		return body, false
 	}
