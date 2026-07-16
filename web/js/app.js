@@ -29,6 +29,10 @@ createApp({
     const theme = ref(localStorage.getItem("admin_theme") || "dark");
     const dropLang = ref(false);
     const dropTheme = ref(false);
+    const channelOpen = ref(false);
+    const channels = reactive([
+      { id: 'opencode', page: 'keys', labelKey: 'nav.opencode' },
+    ]);
 
     // 版本与更新检查
     const appVersion = ref("");
@@ -278,6 +282,7 @@ createApp({
     function openPage(nextPage) {
       if (nextPage !== "keys") keys.stopQuotaTicker();
       page.value = nextPage;
+      if (channels.some(ch => ch.page === nextPage)) channelOpen.value = true;
       if (nextPage === "dashboard") dashboard.load();
       else if (nextPage === "ops") ops.load();
       else if (nextPage === "usage") usage.load();
@@ -285,6 +290,9 @@ createApp({
       else if (nextPage === "tokens") tokens.load();
       else if (nextPage === "models") models.load();
       else if (nextPage === "mappings") mappings.load();
+    }
+    function toggleChannel() {
+      channelOpen.value = !channelOpen.value;
     }
 
     // ─── 暴露给模板 ───────────────────────────────────
@@ -299,6 +307,8 @@ createApp({
       theme,
       dropLang,
       dropTheme,
+      channelOpen,
+      channels,
       appVersion,
       githubUrl,
       latestVersion,
@@ -312,6 +322,7 @@ createApp({
       login,
       logout,
       openPage,
+      toggleChannel,
       toggleTheme,
       showConfirm,
       confirmCancel,

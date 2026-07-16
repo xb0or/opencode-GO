@@ -151,9 +151,17 @@
               <a :class="{active:page==='usage'}" @click="openPage('usage')">
                 <span class="icon" v-html="icons.usage"></span><span>{{t('nav.usage')}}</span>
               </a>
-              <a :class="{active:page==='keys'}" @click="openPage('keys')">
-                <span class="icon" v-html="icons.key"></span><span>{{t('nav.keys')}}</span>
-              </a>
+              <div class="nav-group" :class="{open: channelOpen}">
+                <button type="button" class="nav-group-toggle" @click="toggleChannel" :aria-expanded="channelOpen">
+                  <span>{{t('nav.channel')}}</span>
+                  <span class="arrow" v-html="icons.chevron"></span>
+                </button>
+                <div class="sub-nav">
+                  <a v-for="ch in channels" :key="ch.id"
+                     :class="{active:page===ch.page}"
+                     @click="openPage(ch.page)">{{t(ch.labelKey)}}</a>
+                </div>
+              </div>
               <a :class="{active:page==='tokens'}" @click="openPage('tokens')">
                 <span class="icon" v-html="icons.token"></span><span>{{t('nav.tokens')}}</span>
               </a>
