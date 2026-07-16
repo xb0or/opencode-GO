@@ -103,9 +103,12 @@ export function useKeys(api, showToast, t, showConfirm) {
     newKey.workspace_id = normalizeWorkspaceInput(newKey.workspace_id);
   }
 
-  async function load() {
+  let currentGroup = "go";
+
+  async function load(group) {
+    if (group) currentGroup = group;
     try {
-      const d = await api("/keys", "GET", null, t);
+      const d = await api("/keys?group=" + encodeURIComponent(currentGroup), "GET", null, t);
       const rows = d.data || [];
       keys.value = rows;
       const nextQuota = {};
@@ -137,6 +140,7 @@ export function useKeys(api, showToast, t, showConfirm) {
     try {
       const payload = {
         value: newKey.value,
+        group: currentGroup,
         label: newKey.label,
         weight: newKey.weight || 1,
         proxy_url: newKey.proxy_url,
@@ -444,6 +448,7 @@ export function useKeys(api, showToast, t, showConfirm) {
 
   return {
     keys,
+    currentGroup,
     newKey,
     githubImport,
     githubImportLoading,

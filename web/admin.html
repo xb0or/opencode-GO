@@ -857,7 +857,99 @@
               </div>
             </div>
 
-            <!-- Tokens -->
+            <!-- Ollama Keys -->
+            <div v-if="page==='ollama-keys'" class="keys-page">
+              <div class="page-hero">
+                <div>
+                  <div class="eyebrow">{{t('keys.eyebrow')}}</div>
+                  <h1>{{t('nav.ollama')}}</h1>
+                  <p>{{t('keys.subtitle')}}</p>
+                </div>
+                <div class="hero-actions">
+                  <button class="btn btn-primary" @click="openKeyModal">
+                    {{t('keys.addKey')}}
+                  </button>
+                </div>
+              </div>
+              <div class="card">
+                <h2>{{t('keys.registered',{count:keys.length})}}</h2>
+                <div class="table-wrap">
+                  <table>
+                    <tr>
+                      <th>{{t('table.active')}}</th>
+                      <th>{{t('table.key')}}</th>
+                      <th>{{t('table.label')}}</th>
+                      <th>{{t('table.weight')}}</th>
+                      <th>{{t('table.proxy')}}</th>
+                      <th>{{t('table.cooldown')}}</th>
+                      <th>{{t('table.usage')}}</th>
+                      <th>{{t('table.actions')}}</th>
+                    </tr>
+                    <tr v-for="k in keys" :key="k.id">
+                      <td>
+                        <label class="toggle"
+                          ><input
+                            type="checkbox"
+                            :checked="k.enabled"
+                            @change="toggleKey(k.id)" /><span
+                            class="slider"
+                          ></span
+                        ></label>
+                      </td>
+                      <td
+                        style="
+                          font-family: monospace;
+                          font-size: 12px;
+                          max-width: 300px;
+                          overflow: hidden;
+                          text-overflow: ellipsis;
+                        "
+                      >
+                        {{k.value}}
+                      </td>
+                      <td>{{k.label||'—'}}</td>
+                      <td>{{k.weight}}</td>
+                      <td
+                        style="
+                          font-size: 12px;
+                          max-width: 200px;
+                          overflow: hidden;
+                          text-overflow: ellipsis;
+                        "
+                      >
+                        {{k.proxy_url||'—'}}
+                      </td>
+                      <td style="font-size: 12px">
+                        {{k.cooldown_until?fmtTime(k.cooldown_until):'—'}}
+                      </td>
+                      <td>{{k.usage_count}}</td>
+                      <td class="btn-group">
+                        <button
+                          class="btn btn-ghost btn-sm"
+                          @click="resetCooldown(k.id)"
+                        >
+                          {{t('keys.reset')}}
+                        </button>
+                        <button
+                          class="btn btn-ghost btn-sm"
+                          @click="openKeySettings(k)"
+                        >
+                          {{t('keys.settings')}}
+                        </button>
+                        <button
+                          class="btn btn-danger btn-sm"
+                          @click="deleteKey(k.id)"
+                        >
+                          {{t('keys.delete')}}
+                        </button>
+                      </td>
+                    </tr>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+
             <div v-if="page==='tokens'" class="tokens-page">
               <div class="page-hero">
                 <div>

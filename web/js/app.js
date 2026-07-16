@@ -32,6 +32,7 @@ createApp({
     const channelOpen = ref(false);
     const channels = reactive([
       { id: 'opencode', page: 'keys', labelKey: 'nav.opencode' },
+      { id: 'ollama', page: 'ollama-keys', labelKey: 'nav.ollama' },
     ]);
 
     // 版本与更新检查
@@ -280,13 +281,14 @@ createApp({
     }
 
     function openPage(nextPage) {
-      if (nextPage !== "keys") keys.stopQuotaTicker();
+      if (nextPage !== "keys" && nextPage !== "ollama-keys") keys.stopQuotaTicker();
       page.value = nextPage;
       if (channels.some(ch => ch.page === nextPage)) channelOpen.value = true;
       if (nextPage === "dashboard") dashboard.load();
       else if (nextPage === "ops") ops.load();
       else if (nextPage === "usage") usage.load();
-      else if (nextPage === "keys") keys.load();
+      else if (nextPage === "keys") keys.load("go");
+      else if (nextPage === "ollama-keys") keys.load("ollama");
       else if (nextPage === "tokens") tokens.load();
       else if (nextPage === "models") models.load();
       else if (nextPage === "mappings") mappings.load();
