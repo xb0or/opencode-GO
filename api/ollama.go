@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/xb0or/opencode-GO/config"
+	"github.com/xb0or/opencode-GO/internal/router"
 	"github.com/xb0or/opencode-GO/pool"
 	"github.com/xb0or/opencode-GO/protocol"
 	"github.com/xb0or/opencode-GO/upstream"
@@ -43,8 +44,8 @@ import (
 func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 	inbound config.Protocol, upstreamBody []byte, head requestHead, start time.Time) {
 
-	// Rewrite model to the real upstream model id (e.g. ollama-llama3.3 → llama3.3:70b).
-	rewritten, ok := rewriteModel(upstreamBody, route.RealModel)
+	// Rewrite model to the real upstream model id (e.g. gpt-oss:120b).
+	rewritten, ok := router.RewriteRequestModel(upstreamBody, route.RealModel)
 	if ok {
 		upstreamBody = rewritten
 	}
@@ -72,7 +73,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 
 	// Enable stream_options.include_usage for Chat streaming so we get usage
 	// in the final SSE chunk (best-effort — transparent proxy may not parse it).
-	if rewritten, ok := enableStreamUsage(upstreamBody, config.ProtocolChat, stream); ok {
+	if rewritten, ok := router.EnableRequestStreamUsage(upstreamBody, config.ProtocolChat, stream); ok {
 		upstreamBody = rewritten
 	}
 
