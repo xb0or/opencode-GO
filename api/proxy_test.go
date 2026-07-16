@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/xb0or/opencode-GO/config"
+	"github.com/xb0or/opencode-GO/internal/router"
 	"github.com/xb0or/opencode-GO/pool"
 	"github.com/xb0or/opencode-GO/store"
 )
@@ -242,11 +243,11 @@ func TestUsageFromSSELineMergesReasoningTokens(t *testing.T) {
 	}
 }
 
-func TestEnableStreamUsageForOpenAIProtocols(t *testing.T) {
+func TestEnableRequestStreamUsageForOpenAIProtocols(t *testing.T) {
 	body := []byte(`{"model":"m","messages":[],"stream":true}`)
-	out, ok := enableStreamUsage(body, config.ProtocolChat, true)
+	out, ok := router.EnableRequestStreamUsage(body, config.ProtocolChat, true)
 	if !ok {
-		t.Fatal("enableStreamUsage should rewrite chat stream request")
+		t.Fatal("EnableRequestStreamUsage should rewrite chat stream request")
 	}
 	var got map[string]any
 	if err := json.Unmarshal(out, &got); err != nil {
@@ -257,12 +258,12 @@ func TestEnableStreamUsageForOpenAIProtocols(t *testing.T) {
 		t.Fatalf("stream_options.include_usage = %#v, want true", opts["include_usage"])
 	}
 
-	out, ok = enableStreamUsage(body, config.ProtocolMessages, true)
+	out, ok = router.EnableRequestStreamUsage(body, config.ProtocolMessages, true)
 	if ok || string(out) != string(body) {
 		t.Fatalf("messages stream request should not be rewritten: ok=%v body=%s", ok, string(out))
 	}
 
-	out, ok = enableStreamUsage([]byte(`{"model":"m","input":"hi","stream":true}`), config.ProtocolResponses, true)
+	out, ok = router.EnableRequestStreamUsage([]byte(`{"model":"m","input":"hi","stream":true}`), config.ProtocolResponses, true)
 	if ok {
 		t.Fatalf("responses stream request should not be rewritten because Responses API usage is emitted by default: body=%s", string(out))
 	}
@@ -1208,25 +1209,37 @@ func TestPreviewBodySanitizesControlChars(t *testing.T) {
 	}
 }
 
-func TestInspectAndMapRequestBodyKeepsUnmappedAndMissingModelBodies(t *testing.T) {
-	config.RegisterModelMappings(map[string]string{"gpt-5.5": "glm-51"})
-	defer config.RegisterModelMappings(map[string]string{})
-
-	unmapped := []byte(`{"model":"unknown-model","messages":[]}`)
-	head := inspectAndMapRequestBody("/v1/chat/completions", unmapped)
-	if !head.Parsed || !head.HasModel || head.Mapped {
-		t.Fatalf("unexpected unmapped head: %#v", head)
+func TestParseRequestBodyParsesModelAndStream(t *testing.T) {
+	// With model
+	withModel := []byte(`{"model":"test-model","messages":[],"stream":true}`)
+	head := parseRequestBody("/v1/chat/completions", withModel)
+	if !head.Parsed || !head.HasModel {
+		t.Fatalf("expected parsed with model: %#v", head)
 	}
-	if string(head.Body) != string(unmapped) || head.Model != "unknown-model" {
-		t.Fatalf("unmapped body/model changed: head=%#v body=%s", head, string(head.Body))
+	if head.Model != "test-model" {
+		t.Fatalf("expected model test-model, got %q", head.Model)
+	}
+	if !head.Stream {
+		t.Fatalf("expected stream=true")
+	}
+	if string(head.Body) != string(withModel) {
+		t.Fatalf("body should not be modified by pure decode: %s", string(head.Body))
 	}
 
+	// Missing model
 	missing := []byte(`{"messages":[]}`)
-	head = inspectAndMapRequestBody("/v1/chat/completions", missing)
-	if !head.Parsed || head.HasModel || head.Mapped {
-		t.Fatalf("unexpected missing-model head: %#v", head)
+	head = parseRequestBody("/v1/chat/completions", missing)
+	if !head.Parsed || head.HasModel {
+		t.Fatalf("expected parsed without model: %#v", head)
 	}
 	if string(head.Body) != string(missing) {
 		t.Fatalf("missing-model body changed: %s", string(head.Body))
+	}
+
+	// Invalid JSON
+	invalid := []byte(`not json`)
+	head = parseRequestBody("/v1/chat/completions", invalid)
+	if head.Parsed {
+		t.Fatalf("invalid JSON should not parse: %#v", head)
 	}
 }
