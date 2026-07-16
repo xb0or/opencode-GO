@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/xb0or/opencode-GO/config"
+	streampkg "github.com/xb0or/opencode-GO/internal/stream"
 	"github.com/xb0or/opencode-GO/pool"
 	"github.com/xb0or/opencode-GO/protocol"
 	"github.com/xb0or/opencode-GO/store"
@@ -146,26 +147,16 @@ func usageFromIRUsage(resp *protocol.IRResponse) *usageAccounting {
 }
 
 func proxyStreamAndCaptureUsage(dst io.Writer, src io.Reader, proto config.Protocol, start time.Time) (*usageAccounting, int64, error) {
-	scanner := bufio.NewScanner(src)
-	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
 	var usage *usageAccounting
-	var firstResponseMs int64
-	for scanner.Scan() {
-		line := append([]byte(nil), scanner.Bytes()...)
-		if _, err := dst.Write(append(line, '\n')); err != nil {
-			return usage, firstResponseMs, err
-		}
-		if firstResponseMs == 0 && isSSEDataLine(line) {
-			firstResponseMs = time.Since(start).Milliseconds()
-		}
+	pipeResult := streampkg.Pipe(dst, src, start, func(rawLine []byte) error {
+		// Snapshot the line since scanner.Bytes() is reused on next Scan.
+		line := append([]byte(nil), rawLine...)
 		if nextUsage := usageFromSSELine(proto, line); nextUsage != nil {
 			usage = mergeUsageAccounting(usage, nextUsage)
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		return usage, firstResponseMs, err
-	}
-	return usage, firstResponseMs, nil
+		return nil
+	})
+	return usage, pipeResult.FirstByteMs, pipeResult.Err
 }
 
 func isSSEDataLine(line []byte) bool {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/xb0or/opencode-GO/config"
+	"github.com/xb0or/opencode-GO/internal/router"
 	"github.com/xb0or/opencode-GO/pool"
 	"github.com/xb0or/opencode-GO/protocol"
 	"github.com/xb0or/opencode-GO/store"
@@ -62,13 +63,12 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	}
 	_ = c.Request.Body.Close()
 
-	head := inspectAndMapRequestBody(c.Request.URL.Path, body)
+	head := inspectRequestBody(c.Request.URL.Path, body)
 	upstreamBody := head.Body
 
-	route, routed := config.LookupModel(head.Model)
-	if !routed {
-		route = passthroughRoute(head.Model, inbound)
-	}
+	resolution := router.Resolve(head.Model, inbound)
+	route := resolution.Route
+	routed := !resolution.IsPassthrough
 	if routed && !route.IsEnabled() {
 		writeOpenAIError(c, http.StatusForbidden, "model_disabled",
 			"model is disabled by administrator: "+route.ID)
@@ -120,11 +120,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	}
 
 	// Rewrite the model field in the body to the upstream's real model id.
-	rewritten, ok := rewriteModel(upstreamBody, route.RealModel)
+	rewritten, ok := router.RewriteModel(upstreamBody, route.RealModel)
 	if ok {
 		upstreamBody = rewritten
 	}
-	if rewritten, ok := enableStreamUsage(upstreamBody, upstreamProto, head.Stream); ok {
+	if rewritten, ok := router.EnableStreamUsage(upstreamBody, upstreamProto, head.Stream); ok {
 		upstreamBody = rewritten
 	}
 	// Reasoning/thinking models (e.g. DeepSeek) reject non-auto tool_choice
