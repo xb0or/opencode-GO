@@ -1266,7 +1266,7 @@
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label>{{t('models.goModel')}}</label>
+              <label>{{t('models.upstreamModel')}}</label>
               <select v-model="newModel.real_model">
                 <option value="" disabled>
                   — {{t('models.select')}} —
@@ -1400,7 +1400,7 @@
       >
         <div class="modal">
           <h2>{{editingKeyId?t('keys.updateKey'):t('keys.addKey')}}</h2>
-          <div v-if="!editingKeyId" class="github-import-box">
+          <div v-if="!editingKeyId && currentGroup==='go'" class="github-import-box">
             <h3>{{t('keys.githubImportTitle')}}</h3>
             <p class="hint-text">{{t('keys.githubImportHint')}}</p>
             <div class="form-row">
@@ -1457,7 +1457,7 @@
               <label>{{t('keys.keyValue')}}</label>
               <input
                 v-model="newKey.value"
-                :placeholder="editingKeyId?t('keys.keepExisting'):'opencode_xxxx'"
+                :placeholder="editingKeyId?t('keys.keepExisting'):(currentGroup==='ollama'?'ollama_xxxx':'opencode_xxxx')"
               />
             </div>
           </div>
@@ -1485,28 +1485,29 @@
               />
             </div>
           </div>
-          <div style="border-top:1px solid var(--border);margin:8px 0"></div>
-          <h3 style="margin:8px 0;font-size:14px">Go 订阅限额查询（可选）</h3>
-          <div class="form-row">
-            <div class="form-group">
-              <label>Cookie</label>
-              <input
-                v-model="newKey.cookie"
-                @blur="normalizeKeyCookie"
-                placeholder="可粘贴 Cookie: auth=... / auth=... / Fe26..."
-              />
-              <small class="hint-text">自动识别并保存为 auth=&lt;token&gt;，可直接粘贴浏览器 Cookie 请求头。</small>
+          <div v-if="currentGroup==='go'" style="border-top:1px solid var(--border);margin:8px 0">
+            <h3 style="margin:8px 0;font-size:14px">Go 订阅限额查询（可选）</h3>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Cookie</label>
+                <input
+                  v-model="newKey.cookie"
+                  @blur="normalizeKeyCookie"
+                  placeholder="可粘贴 Cookie: auth=... / auth=... / Fe26..."
+                />
+                <small class="hint-text">自动识别并保存为 auth=&lt;token&gt;，可直接粘贴浏览器 Cookie 请求头。</small>
+              </div>
             </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>Workspace ID（可选）</label>
-              <input
-                v-model="newKey.workspace_id"
-                @blur="normalizeKeyWorkspace"
-                placeholder="wrk_... 或 https://opencode.ai/workspace/wrk_.../go"
-              />
-              <small class="hint-text">可直接粘贴工作区页面 URL；留空时使用 Cookie 自动获取。</small>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Workspace ID（可选）</label>
+                <input
+                  v-model="newKey.workspace_id"
+                  @blur="normalizeKeyWorkspace"
+                  placeholder="wrk_... 或 https://opencode.ai/workspace/wrk_.../go"
+                />
+                <small class="hint-text">可直接粘贴工作区页面 URL；留空时使用 Cookie 自动获取。</small>
+              </div>
             </div>
           </div>
           <div class="btn-group">
