@@ -6,44 +6,6 @@
 import { validateRequired } from "../api.js?v=20260619a";
 const { ref, reactive, computed, watch } = Vue;
 
-/**
- * 本地兜底 Go 模型列表；实际可用模型以后台同步后的 /admin/models 为准。
- */
-const GO_MODELS = [
-  { id: "glm-5.2", name: "GLM-5.2", protocol: "chat", upstream: "go" },
-  { id: "glm-5.1", name: "GLM-5.1", protocol: "chat", upstream: "go" },
-  { id: "glm-5", name: "GLM-5", protocol: "chat", upstream: "go" },
-  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", protocol: "chat", upstream: "go" },
-  { id: "kimi-k2.6", name: "Kimi K2.6", protocol: "chat", upstream: "go" },
-  { id: "kimi-k2.5", name: "Kimi K2.5", protocol: "chat", upstream: "go" },
-  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", protocol: "chat", upstream: "go" },
-  { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", protocol: "chat", upstream: "go" },
-  { id: "mimo-v2.5", name: "MiMo-V2.5", protocol: "chat", upstream: "go" },
-  { id: "mimo-v2.5-pro", name: "MiMo-V2.5-Pro", protocol: "chat", upstream: "go" },
-  { id: "mimo-v2-pro", name: "MiMo V2 Pro", protocol: "chat", upstream: "go" },
-  { id: "mimo-v2-omni", name: "MiMo V2 Omni", protocol: "chat", upstream: "go" },
-  { id: "hy3-preview", name: "HY3 Preview", protocol: "chat", upstream: "go" },
-  { id: "minimax-m3", name: "MiniMax M3", protocol: "messages", upstream: "go" },
-  { id: "minimax-m2.7", name: "MiniMax M2.7", protocol: "messages", upstream: "go" },
-  { id: "minimax-m2.5", name: "MiniMax M2.5", protocol: "messages", upstream: "go" },
-  { id: "qwen3.7-max", name: "Qwen3.7 Max", protocol: "messages", upstream: "go" },
-  { id: "qwen3.7-plus", name: "Qwen3.7 Plus", protocol: "messages", upstream: "go" },
-  { id: "qwen3.6-plus", name: "Qwen3.6 Plus", protocol: "messages", upstream: "go" },
-  { id: "qwen3.5-plus", name: "Qwen3.5 Plus", protocol: "messages", upstream: "go" },
-];
-
-/** Ollama Cloud seed models — gateway-facing ids mapped to real upstream model names. */
-const OLLAMA_MODELS = [
-  { id: "gpt-oss:120b", name: "GPT-OSS 120B", protocol: "chat", upstream: "ollama" },
-  { id: "gpt-oss:20b", name: "GPT-OSS 20B", protocol: "chat", upstream: "ollama" },
-  { id: "qwen3.5:397b", name: "Qwen3.5 397B", protocol: "chat", upstream: "ollama" },
-  { id: "gemma4:31b", name: "Gemma4 31B", protocol: "chat", upstream: "ollama" },
-  { id: "mistral-large-3:675b", name: "Mistral Large 3 675B", protocol: "chat", upstream: "ollama" },
-  { id: "nemotron-3-ultra", name: "Nemotron 3 Ultra", protocol: "chat", upstream: "ollama" },
-  { id: "nemotron-3-super", name: "Nemotron 3 Super", protocol: "chat", upstream: "ollama" },
-  { id: "nemotron-3-nano:30b", name: "Nemotron 3 Nano 30B", protocol: "chat", upstream: "ollama" },
-];
-
 export function useModels(api, showToast, t, showConfirm) {
   const models = ref([]);
   const showModal = ref(false);
@@ -66,34 +28,26 @@ export function useModels(api, showToast, t, showConfirm) {
     cache_write_price: "",
   });
 
-  /** 当前上游可选的模型列表：根据 upstream 过滤内置兜底 + 已同步数据。 */
+  /**
+   * 可选的模型列表：完全从 /admin/models (DB 同步后的数据) 获取。
+   * 不再使用硬编码的种子列表——所有模型由 modelsync 从上游 API 动态发现。
+   * 如果 DB 中已有模型，直接使用；如果 DB 为空（首次启动尚未同步），
+   * 列表为空，用户需先点击「同步」按钮。
+   */
   const availableModels = computed(() => {
-    const upstream = newModel.upstream || "go";
-    const seeds = upstream === "ollama" ? OLLAMA_MODELS : GO_MODELS;
-    const byId = new Map(seeds.map((m) => [m.id, m]));
+    const byId = new Map();
     for (const m of models.value || []) {
-      const mUpstream = m.upstream || "go";
-      if (mUpstream !== upstream) continue;
       if (!byId.has(m.real_model || m.id)) {
         byId.set(m.real_model || m.id, {
           id: m.real_model || m.id,
           name: m.name || m.id,
           protocol: m.protocol || "chat",
-          upstream: mUpstream,
+          upstream: m.upstream || "go",
         });
       }
     }
     return Array.from(byId.values()).sort((a, b) => a.id.localeCompare(b.id));
   });
-
-  /** 切换上游时清空已选模型，避免旧上游残留。 */
-  watch(
-    () => newModel.upstream,
-    (val, oldVal) => {
-      if (editingId.value) return;
-      if (oldVal && val !== oldVal) newModel.real_model = "";
-    }
-  );
 
   /** 当 Go 模型变化时，自动同步模型 ID、名称与协议。 */
   watch(
