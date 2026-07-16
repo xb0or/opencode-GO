@@ -10,26 +10,35 @@ const { ref, reactive, computed, watch } = Vue;
  * 本地兜底 Go 模型列表；实际可用模型以后台同步后的 /admin/models 为准。
  */
 const GO_MODELS = [
-  { id: "glm-5.2", name: "GLM-5.2", protocol: "chat" },
-  { id: "glm-5.1", name: "GLM-5.1", protocol: "chat" },
-  { id: "glm-5", name: "GLM-5", protocol: "chat" },
-  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", protocol: "chat" },
-  { id: "kimi-k2.6", name: "Kimi K2.6", protocol: "chat" },
-  { id: "kimi-k2.5", name: "Kimi K2.5", protocol: "chat" },
-  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", protocol: "chat" },
-  { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", protocol: "chat" },
-  { id: "mimo-v2.5", name: "MiMo-V2.5", protocol: "chat" },
-  { id: "mimo-v2.5-pro", name: "MiMo-V2.5-Pro", protocol: "chat" },
-  { id: "mimo-v2-pro", name: "MiMo V2 Pro", protocol: "chat" },
-  { id: "mimo-v2-omni", name: "MiMo V2 Omni", protocol: "chat" },
-  { id: "hy3-preview", name: "HY3 Preview", protocol: "chat" },
-  { id: "minimax-m3", name: "MiniMax M3", protocol: "messages" },
-  { id: "minimax-m2.7", name: "MiniMax M2.7", protocol: "messages" },
-  { id: "minimax-m2.5", name: "MiniMax M2.5", protocol: "messages" },
-  { id: "qwen3.7-max", name: "Qwen3.7 Max", protocol: "messages" },
-  { id: "qwen3.7-plus", name: "Qwen3.7 Plus", protocol: "messages" },
-  { id: "qwen3.6-plus", name: "Qwen3.6 Plus", protocol: "messages" },
-  { id: "qwen3.5-plus", name: "Qwen3.5 Plus", protocol: "messages" },
+  { id: "glm-5.2", name: "GLM-5.2", protocol: "chat", upstream: "go" },
+  { id: "glm-5.1", name: "GLM-5.1", protocol: "chat", upstream: "go" },
+  { id: "glm-5", name: "GLM-5", protocol: "chat", upstream: "go" },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code", protocol: "chat", upstream: "go" },
+  { id: "kimi-k2.6", name: "Kimi K2.6", protocol: "chat", upstream: "go" },
+  { id: "kimi-k2.5", name: "Kimi K2.5", protocol: "chat", upstream: "go" },
+  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro", protocol: "chat", upstream: "go" },
+  { id: "deepseek-v4-flash", name: "DeepSeek V4 Flash", protocol: "chat", upstream: "go" },
+  { id: "mimo-v2.5", name: "MiMo-V2.5", protocol: "chat", upstream: "go" },
+  { id: "mimo-v2.5-pro", name: "MiMo-V2.5-Pro", protocol: "chat", upstream: "go" },
+  { id: "mimo-v2-pro", name: "MiMo V2 Pro", protocol: "chat", upstream: "go" },
+  { id: "mimo-v2-omni", name: "MiMo V2 Omni", protocol: "chat", upstream: "go" },
+  { id: "hy3-preview", name: "HY3 Preview", protocol: "chat", upstream: "go" },
+  { id: "minimax-m3", name: "MiniMax M3", protocol: "messages", upstream: "go" },
+  { id: "minimax-m2.7", name: "MiniMax M2.7", protocol: "messages", upstream: "go" },
+  { id: "minimax-m2.5", name: "MiniMax M2.5", protocol: "messages", upstream: "go" },
+  { id: "qwen3.7-max", name: "Qwen3.7 Max", protocol: "messages", upstream: "go" },
+  { id: "qwen3.7-plus", name: "Qwen3.7 Plus", protocol: "messages", upstream: "go" },
+  { id: "qwen3.6-plus", name: "Qwen3.6 Plus", protocol: "messages", upstream: "go" },
+  { id: "qwen3.5-plus", name: "Qwen3.5 Plus", protocol: "messages", upstream: "go" },
+  // --- Ollama Cloud models ---
+  { id: "gpt-oss:120b", name: "GPT-OSS 120B", protocol: "chat", upstream: "ollama" },
+  { id: "gpt-oss:20b", name: "GPT-OSS 20B", protocol: "chat", upstream: "ollama" },
+  { id: "qwen3.5:397b", name: "Qwen3.5 397B", protocol: "chat", upstream: "ollama" },
+  { id: "gemma4:31b", name: "Gemma4 31B", protocol: "chat", upstream: "ollama" },
+  { id: "mistral-large-3:675b", name: "Mistral Large 3 675B", protocol: "chat", upstream: "ollama" },
+  { id: "nemotron-3-ultra", name: "Nemotron 3 Ultra", protocol: "chat", upstream: "ollama" },
+  { id: "nemotron-3-super", name: "Nemotron 3 Super", protocol: "chat", upstream: "ollama" },
+  { id: "nemotron-3-nano:30b", name: "Nemotron 3 Nano 30B", protocol: "chat", upstream: "ollama" },
 ];
 
 export function useModels(api, showToast, t, showConfirm) {
@@ -79,7 +88,7 @@ export function useModels(api, showToast, t, showConfirm) {
       newModel.id = found.id;
       newModel.name = found.name;
       newModel.protocol = found.protocol;
-      newModel.upstream = "go";
+      newModel.upstream = found.upstream || "go";
     }
   );
 
@@ -184,7 +193,7 @@ export function useModels(api, showToast, t, showConfirm) {
     const payload = {
       id: newModel.id,
       name: newModel.name,
-      upstream: "go",
+      upstream: newModel.upstream || "go",
       protocol: newModel.protocol,
       real_model: newModel.real_model || newModel.id,
       status: Number(newModel.status) === 0 ? 0 : 1,

@@ -96,6 +96,16 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	// Stash group for logging/debugging after the model route is known.
 	c.Set("group", route.Group)
 
+	// Ollama upstream: dispatch to a fully self-contained handler that owns
+	// the entire request lifecycle — model rewrite, cross-protocol conversion
+	// (Messages/Responses → Chat), key picking, transparent reverse proxy,
+	// and usage bookkeeping. Placing this BEFORE the Go-specific logic avoids
+	// double PickAttempts / rewriteModel / ConvertRequest.
+	if route.Upstream == config.UpstreamOllama {
+		proxyOllamaRequest(c, p, route, inbound, upstreamBody, head, start)
+		return
+	}
+
 	// Cross-protocol request conversion.
 	// If the inbound protocol differs from the upstream model's protocol,
 	// convert the request body through the IR.

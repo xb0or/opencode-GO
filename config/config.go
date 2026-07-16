@@ -21,6 +21,10 @@ type Config struct {
 
 	// Go upstream base URL (without trailing slash).
 	GoBaseURL string
+	// Ollama Cloud API base URL (without trailing slash).
+	// Ollama Cloud exposes an OpenAI-compatible /v1/chat/completions endpoint
+	// which the gateway proxies to transparently.
+	OllamaBaseURL string
 
 	// ModelMappings is an optional JSON object that rewrites client-facing
 	// model names before forwarding, for example {"gpt-5.5":"glm-5.1"}.
@@ -53,6 +57,7 @@ func Load() *Config {
 			DBPath:           envStr("DB_PATH", "./data/opencode-sw.db"),
 			UpstreamTimeout:  envInt("UPSTREAM_TIMEOUT", 0),
 			GoBaseURL:        strings.TrimRight(envStr("GO_BASE_URL", "https://opencode.ai/zen/go"), "/"),
+					OllamaBaseURL:    strings.TrimRight(envStr("OLLAMA_BASE_URL", "https://ollama.com"), "/"),
 			ModelMappings:    envStr("MODEL_MAPPINGS", ""),
 			ModelMappingFile: envStr("MODEL_MAPPING_FILE", ""),
 			GroupMultipliers: envStr("GROUP_MULTIPLIERS", ""),

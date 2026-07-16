@@ -72,6 +72,7 @@ func main() {
 	addr := ":" + cfg.Port
 	log.Printf("opencode-go listening on %s", addr)
 	log.Printf("  go  base url : %s", cfg.GoBaseURL)
+	log.Printf("  ollama cloud: %s", cfg.OllamaBaseURL)
 	log.Printf("  models       : %d registered", len(config.AllModels()))
 	log.Printf("  mappings     : %d configured", len(config.AllModelMappings()))
 	if err := root.Run(addr); err != nil {
@@ -120,7 +121,10 @@ func loadModelRoutes() {
 	// Load from DB into config.
 	var routes []config.ModelRoute
 	for _, r := range rows {
-		if r.Upstream != string(config.UpstreamGo) || r.Group != "go" {
+		if r.Upstream != string(config.UpstreamGo) && r.Upstream != string(config.UpstreamOllama) {
+			continue
+		}
+		if r.Group != "go" && r.Group != "ollama" {
 			continue
 		}
 		routes = append(routes, store.ModelRouteFromRow(r))

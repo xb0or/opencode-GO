@@ -961,6 +961,7 @@
                       <th>{{t('table.active')}}</th>
                       <th>{{t('table.id')}}</th>
                       <th>{{t('table.name')}}</th>
+                      <th>{{t('table.upstream')}}</th>
                       <th>{{t('table.protocol')}}</th>
                       <th>{{t('table.context')}}</th>
                       <th>{{t('table.priority')}}</th>
@@ -983,6 +984,7 @@
                       </td>
                       <td><code>{{m.id}}</code></td>
                       <td>{{m.name}}</td>
+                      <td><span :class="'badge '+(m.upstream==='ollama'?'badge-grey':'badge-blue')">{{m.upstream||'go'}}</span></td>
                       <td>{{m.protocol}}</td>
                       <td>{{fmtNumber(m.context_len || m.context_length)}}</td>
                       <td>{{m.priority||0}}</td>
@@ -1125,6 +1127,13 @@
         <div class="modal">
           <h2>{{editingModelId?t('models.editModel'):t('models.addModel')}}</h2>
           <div class="form-row">
+            <div class="form-group">
+              <label>{{t('models.upstream')}}</label>
+              <select v-model="newModel.upstream">
+                <option value="go">Go (opencode.ai)</option>
+                <option value="ollama">Ollama Cloud</option>
+              </select>
+            </div>
             <div class="form-group">
               <label>{{t('models.protocol')}}</label>
               <select v-model="newModel.protocol">

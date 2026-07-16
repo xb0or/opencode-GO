@@ -16,6 +16,7 @@ type Upstream string
 
 const (
 	UpstreamGo Upstream = "go"
+	UpstreamOllama Upstream = "ollama"
 )
 
 // Protocol identifies the wire format a model speaks upstream.
@@ -159,6 +160,8 @@ func BaseURLFor(u Upstream) string {
 	switch u {
 	case UpstreamGo:
 		return c.GoBaseURL
+	case UpstreamOllama:
+		return c.OllamaBaseURL
 	default:
 		return c.GoBaseURL
 	}
@@ -185,6 +188,18 @@ func DefaultModels() []ModelRoute {
 		{ID: "qwen3.7-max", Name: "Qwen3.7 Max", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "qwen3.7-max", Group: "go"},
 		{ID: "qwen3.7-plus", Name: "Qwen3.7 Plus", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "qwen3.7-plus", Group: "go"},
 		{ID: "qwen3.6-plus", Name: "Qwen3.6 Plus", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "qwen3.6-plus", Group: "go"},
+
+		// --- Ollama Cloud models (group: ollama) ---
+		// Ollama Cloud is a hosted service at https://ollama.com offering
+		// an OpenAI-compatible /v1/chat/completions endpoint with Bearer auth.
+		{ID: "gpt-oss:120b", Name: "GPT-OSS 120B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "gpt-oss:120b", Group: "ollama"},
+		{ID: "gpt-oss:20b", Name: "GPT-OSS 20B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "gpt-oss:20b", Group: "ollama"},
+		{ID: "qwen3.5:397b", Name: "Qwen3.5 397B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "qwen3.5:397b", Group: "ollama"},
+		{ID: "gemma4:31b", Name: "Gemma4 31B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "gemma4:31b", Group: "ollama"},
+		{ID: "mistral-large-3:675b", Name: "Mistral Large 3 675B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "mistral-large-3:675b", Group: "ollama"},
+		{ID: "nemotron-3-ultra", Name: "Nemotron 3 Ultra", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "nemotron-3-ultra", Group: "ollama"},
+		{ID: "nemotron-3-super", Name: "Nemotron 3 Super", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "nemotron-3-super", Group: "ollama"},
+		{ID: "nemotron-3-nano:30b", Name: "Nemotron 3 Nano 30B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "nemotron-3-nano:30b", Group: "ollama"},
 	}
 }
 
