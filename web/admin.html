@@ -151,9 +151,17 @@
               <a :class="{active:page==='usage'}" @click="openPage('usage')">
                 <span class="icon" v-html="icons.usage"></span><span>{{t('nav.usage')}}</span>
               </a>
-              <a :class="{active:page==='keys'}" @click="openPage('keys')">
-                <span class="icon" v-html="icons.key"></span><span>{{t('nav.keys')}}</span>
-              </a>
+              <div class="nav-group" :class="{open: channelOpen}">
+                <button type="button" class="nav-group-toggle" @click="toggleChannel" :aria-expanded="channelOpen">
+                  <span>{{t('nav.channel')}}</span>
+                  <span class="arrow" v-html="icons.chevron"></span>
+                </button>
+                <div class="sub-nav">
+                  <a v-for="ch in channels" :key="ch.id"
+                     :class="{active:page===ch.page}"
+                     @click="openPage(ch.page)">{{t(ch.labelKey)}}</a>
+                </div>
+              </div>
               <a :class="{active:page==='tokens'}" @click="openPage('tokens')">
                 <span class="icon" v-html="icons.token"></span><span>{{t('nav.tokens')}}</span>
               </a>
@@ -961,6 +969,7 @@
                       <th>{{t('table.active')}}</th>
                       <th>{{t('table.id')}}</th>
                       <th>{{t('table.name')}}</th>
+                      <th>{{t('table.upstream')}}</th>
                       <th>{{t('table.protocol')}}</th>
                       <th>{{t('table.context')}}</th>
                       <th>{{t('table.priority')}}</th>
@@ -983,6 +992,7 @@
                       </td>
                       <td><code>{{m.id}}</code></td>
                       <td>{{m.name}}</td>
+                      <td><span :class="'badge '+(m.upstream==='ollama'?'badge-grey':'badge-blue')">{{m.upstream||'go'}}</span></td>
                       <td>{{m.protocol}}</td>
                       <td>{{fmtNumber(m.context_len || m.context_length)}}</td>
                       <td>{{m.priority||0}}</td>
@@ -1125,6 +1135,13 @@
         <div class="modal">
           <h2>{{editingModelId?t('models.editModel'):t('models.addModel')}}</h2>
           <div class="form-row">
+            <div class="form-group">
+              <label>{{t('models.upstream')}}</label>
+              <select v-model="newModel.upstream">
+                <option value="go">Go (opencode.ai)</option>
+                <option value="ollama">Ollama Cloud</option>
+              </select>
+            </div>
             <div class="form-group">
               <label>{{t('models.protocol')}}</label>
               <select v-model="newModel.protocol">

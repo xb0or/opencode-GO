@@ -144,7 +144,7 @@ func adminAuth() gin.HandlerFunc {
 // --- Pool Health ---
 
 func poolHealth(c *gin.Context) {
-	groups := []string{"go"}
+	groups := []string{"go", "ollama"}
 	health := map[string]any{}
 	for _, g := range groups {
 		health[g] = picker.Stats(g)
@@ -240,8 +240,8 @@ func createKey(c *gin.Context) {
 	if group == "" {
 		group = "go"
 	}
-	if group != "go" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "only go group is supported"})
+	if group != "go" && group != "ollama" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only go and ollama groups are supported"})
 		return
 	}
 	k := &store.Key{
@@ -449,8 +449,8 @@ func createTokenAdmin(c *gin.Context) {
 	}
 	_ = c.ShouldBindJSON(&body)
 	allowedGroups := strings.TrimSpace(body.AllowedGroups)
-	if allowedGroups != "" && allowedGroups != "go" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "only go group is supported"})
+	if allowedGroups != "" && allowedGroups != "go" && allowedGroups != "ollama" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only go and ollama groups are supported"})
 		return
 	}
 	var opts []pool.TokenOption
@@ -566,12 +566,16 @@ func upsertModel(c *gin.Context) {
 	if body.Upstream == "" {
 		body.Upstream = config.UpstreamGo
 	}
-	if body.Upstream != config.UpstreamGo {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "only go upstream is supported"})
+	if body.Upstream != config.UpstreamGo && body.Upstream != config.UpstreamOllama {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only go and ollama upstreams are supported"})
 		return
 	}
 	if body.Group == "" {
-		body.Group = "go"
+		if body.Upstream == config.UpstreamOllama {
+			body.Group = "ollama"
+		} else {
+			body.Group = "go"
+		}
 	}
 	route := config.ModelRoute{
 		ID:       strings.TrimSpace(body.ID),

@@ -132,10 +132,10 @@ func ReloadRuntimeFromStore() error {
 	}
 	routes := make([]config.ModelRoute, 0, len(rows))
 	for _, row := range rows {
-		if row.Upstream != "" && row.Upstream != string(config.UpstreamGo) {
+		if row.Upstream != string(config.UpstreamGo) && row.Upstream != string(config.UpstreamOllama) {
 			continue
 		}
-		if row.Group != "" && row.Group != "go" {
+		if row.Group != "go" && row.Group != "ollama" {
 			continue
 		}
 		routes = append(routes, store.ModelRouteFromRow(row))

@@ -1,28 +1,23 @@
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"log"
-	"math"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/xb0or/opencode-GO/config"
+	"github.com/xb0or/opencode-GO/internal/router"
 	"github.com/xb0or/opencode-GO/pool"
 	"github.com/xb0or/opencode-GO/protocol"
 	"github.com/xb0or/opencode-GO/store"
 	"github.com/xb0or/opencode-GO/upstream"
-	"gorm.io/gorm"
 )
 
 // proxyChat handles POST /v1/chat/completions (OpenAI Chat Completions).
@@ -48,6 +43,16 @@ func proxyResponses(p *pool.Picker) gin.HandlerFunc {
 
 // proxyRequest is the shared handler with full cross-protocol conversion.
 //
+// NOTE(stability): This function is intentionally the ONLY orchestrator in
+// proxy.go. It delegates to:
+//   - decode.go         — request body parsing
+//   - internal/router/  — model resolution & body rewriting
+//   - protocol/         — request/response conversion
+//   - pool/             — key picking & failure tracking
+//   - stream.go         — response streaming (same/cross protocol)
+//   - usage.go          — usage accounting & cost estimation
+// Do NOT add business logic here — it belongs in the layer above.
+//
 // Flow:
 //  1. Read & parse the client body to find the requested model.
 //  2. Resolve the model route.
@@ -68,13 +73,12 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	}
 	_ = c.Request.Body.Close()
 
-	head := inspectAndMapRequestBody(c.Request.URL.Path, body)
+	head := parseRequestBody(c.Request.URL.Path, body)
 	upstreamBody := head.Body
 
-	route, routed := config.LookupModel(head.Model)
-	if !routed {
-		route = passthroughRoute(head.Model, inbound)
-	}
+	resolution := router.Resolve(head.Model, inbound)
+	route := resolution.Route
+	routed := !resolution.IsPassthrough
 	if routed && !route.IsEnabled() {
 		writeOpenAIError(c, http.StatusForbidden, "model_disabled",
 			"model is disabled by administrator: "+route.ID)
@@ -95,6 +99,16 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 
 	// Stash group for logging/debugging after the model route is known.
 	c.Set("group", route.Group)
+
+	// Ollama upstream: dispatch to a fully self-contained handler that owns
+	// the entire request lifecycle — model rewrite, cross-protocol conversion
+	// (Messages/Responses → Chat), key picking, transparent reverse proxy,
+	// and usage bookkeeping. Placing this BEFORE the Go-specific logic avoids
+	// double PickAttempts / rewriteModel / ConvertRequest.
+	if route.Upstream == config.UpstreamOllama {
+		proxyOllamaRequest(c, p, route, inbound, upstreamBody, head, start)
+		return
+	}
 
 	// Cross-protocol request conversion.
 	// If the inbound protocol differs from the upstream model's protocol,
@@ -126,11 +140,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	}
 
 	// Rewrite the model field in the body to the upstream's real model id.
-	rewritten, ok := rewriteModel(upstreamBody, route.RealModel)
+	rewritten, ok := router.RewriteRequestModel(upstreamBody, route.RealModel)
 	if ok {
 		upstreamBody = rewritten
 	}
-	if rewritten, ok := enableStreamUsage(upstreamBody, upstreamProto, head.Stream); ok {
+	if rewritten, ok := router.EnableRequestStreamUsage(upstreamBody, upstreamProto, head.Stream); ok {
 		upstreamBody = rewritten
 	}
 	// Reasoning/thinking models (e.g. DeepSeek) reject non-auto tool_choice
@@ -232,234 +246,6 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
 }
 
-// proxySameProtocolResponse streams the upstream response verbatim to the client.
-func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
-	p *pool.Picker, key *store.Key, route config.ModelRoute, inbound config.Protocol, start time.Time) {
-
-	if resp.StatusCode >= 400 {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			if status, errType, message, ok := classifyProxyContextError(err); ok {
-				markAndLog(c, p, key, route, inbound, status, start, stream, nil, message)
-				writeOpenAIError(c, status, errType, message)
-				return
-			}
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
-			return
-		}
-		errMsg := summarizeUpstreamError(resp.StatusCode, body)
-		if shouldMarkUpstreamFailure(resp.StatusCode) {
-			markKeyFailure(p, key, resp.StatusCode, body)
-		}
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, errMsg)
-		// Don't pass the raw upstream error body to the client — it may
-		// expose provider/channel information. Return a generic error
-		// envelope instead; the raw detail is kept in the admin usage log.
-		writeOpenAIError(c, resp.StatusCode, upstreamErrorType(resp.StatusCode), genericUpstreamMessage(resp.StatusCode))
-		return
-	}
-
-	if !stream {
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			if status, errType, message, ok := classifyProxyContextError(err); ok {
-				markAndLog(c, p, key, route, inbound, status, start, false, nil, message)
-				writeOpenAIError(c, status, errType, message)
-				return
-			}
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream response")
-			return
-		}
-		copyResponseHeaders(c, resp)
-		c.Writer.WriteHeader(resp.StatusCode)
-		_, writeErr := c.Writer.Write(body)
-		usage := usageFromResponse(inbound, body)
-		errMsg := copyErrString(writeErr)
-		if errMsg == "" && resp.StatusCode >= http.StatusBadRequest {
-			errMsg = summarizeUpstreamError(resp.StatusCode, body)
-		}
-		if resp.StatusCode < 400 && writeErr == nil {
-			p.MarkSuccess(key.ID)
-			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, "")
-		} else if shouldMarkUpstreamFailure(resp.StatusCode) {
-			markKeyFailure(p, key, resp.StatusCode, body)
-			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, errMsg)
-		} else {
-			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, errMsg)
-		}
-		return
-	}
-
-	copyResponseHeaders(c, resp)
-	c.Writer.WriteHeader(resp.StatusCode)
-	usage, firstResponseMs, copyErr := proxyStreamAndCaptureUsage(c.Writer, resp.Body, inbound, start)
-
-	if resp.StatusCode < 400 && copyErr == nil {
-		p.MarkSuccess(key.ID)
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, "", firstResponseMs)
-	} else if status, _, message, ok := classifyProxyContextError(copyErr); ok {
-		markAndLog(c, p, key, route, inbound, status, start, stream, usage, message, firstResponseMs)
-	} else if shouldMarkUpstreamFailure(resp.StatusCode) {
-		markKeyFailure(p, key, resp.StatusCode, nil)
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, copyErrString(copyErr), firstResponseMs)
-	} else {
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, usage, copyErrString(copyErr), firstResponseMs)
-	}
-}
-
-// proxyCrossProtocolResponse buffers the upstream response, converts it through
-// the IR, and writes the converted response to the client.
-func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
-	inbound, upstreamProto config.Protocol,
-	p *pool.Picker, key *store.Key, route config.ModelRoute, start time.Time) {
-
-	if resp.StatusCode >= 400 {
-		// Don't convert error responses; return a generic error to hide
-		// upstream provider/channel details from the client.
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			if status, errType, message, ok := classifyProxyContextError(err); ok {
-				markAndLog(c, p, key, route, inbound, status, start, stream, nil, message)
-				writeOpenAIError(c, status, errType, message)
-				return
-			}
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
-			return
-		}
-		if shouldMarkUpstreamFailure(resp.StatusCode) {
-			markKeyFailure(p, key, resp.StatusCode, body)
-		}
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, summarizeUpstreamError(resp.StatusCode, body))
-		writeOpenAIError(c, resp.StatusCode, upstreamErrorType(resp.StatusCode), genericUpstreamMessage(resp.StatusCode))
-		return
-	}
-
-	if stream {
-		// Streaming cross-protocol: buffer the full upstream SSE stream,
-		// then re-emit in the target protocol format.
-		//
-		// We must buffer the body before writing the SSE headers, because if
-		// the upstream returned an error page (e.g. a Cloudflare 502 HTML
-		// page served with HTTP 200) we cannot decode it and must surface a
-		// meaningful error instead of a confusing "invalid character" message
-		// after having already committed a 200 status to the client.
-		upstreamBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			if status, errType, message, ok := classifyProxyContextError(err); ok {
-				markAndLog(c, p, key, route, inbound, status, start, true, nil, message)
-				writeOpenAIError(c, status, errType, message)
-				return
-			}
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream response")
-			return
-		}
-
-		// Decode the upstream stream first so we can report a clean error to
-		// the client (without having already committed a 200 status) when the
-		// upstream payload is not a valid SSE/JSON stream — e.g. an HTML
-		// gateway error page served with HTTP 200.
-		streamResp, convErr := protocol.DecodeStreamBuffer(upstreamProto, upstreamBody)
-		if convErr != nil {
-			markKeyFailure(p, key, http.StatusBadGateway, upstreamBody)
-			errMsg := fmt.Sprintf("upstream %s stream response could not be decoded: %v; body: %s",
-				upstreamProto, convErr, previewBody(upstreamBody))
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, errMsg)
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error",
-				"upstream returned a non-streaming response that could not be decoded")
-			return
-		}
-
-		// Commit the SSE headers only after a successful decode.
-		c.Writer.Header().Set("Content-Type", "text/event-stream")
-		c.Writer.Header().Set("Cache-Control", "no-cache")
-		c.Writer.Header().Set("Connection", "keep-alive")
-		c.Writer.WriteHeader(http.StatusOK)
-		usage := usageFromSSEBuffer(upstreamProto, upstreamBody)
-		if usage == nil {
-			usage = usageFromIRUsage(streamResp)
-		}
-		if emitErr := protocol.EmitStreamResponse(c.Writer, inbound, streamResp); emitErr != nil {
-			// Headers/body already partially written; just log.
-			markAndLog(c, p, key, route, inbound, http.StatusOK, start, true, usage, "stream emit error: "+emitErr.Error())
-			return
-		}
-		p.MarkSuccess(key.ID)
-		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true, usage, "")
-	} else {
-		// Non-streaming: buffer, convert, write.
-		upstreamBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			if status, errType, message, ok := classifyProxyContextError(err); ok {
-				markAndLog(c, p, key, route, inbound, status, start, false, nil, message)
-				writeOpenAIError(c, status, errType, message)
-				return
-			}
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream response")
-			return
-		}
-
-		converted, err := protocol.ConvertResponse(upstreamProto, inbound, upstreamBody)
-		if err != nil {
-			// Upstream returned a body that is not valid JSON for its protocol
-			// (commonly an HTML error page from an upstream proxy/CDN). Report
-			// the real cause instead of the opaque JSON parse error.
-			markKeyFailure(p, key, http.StatusBadGateway, upstreamBody)
-			errMsg := fmt.Sprintf("upstream %s response could not be decoded: %v; body: %s",
-				upstreamProto, err, previewBody(upstreamBody))
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, errMsg)
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error",
-				"upstream returned a non-JSON response that could not be decoded")
-			return
-		}
-
-		// Set appropriate content type for the target protocol.
-		switch inbound {
-		case config.ProtocolMessages:
-			c.Writer.Header().Set("Content-Type", "application/json")
-		default:
-			c.Writer.Header().Set("Content-Type", "application/json")
-		}
-		c.Writer.WriteHeader(resp.StatusCode)
-		c.Writer.Write(converted)
-
-		p.MarkSuccess(key.ID)
-		usage := usageFromResponse(upstreamProto, upstreamBody)
-		if usage == nil {
-			usage = usageFromResponse(inbound, converted)
-		}
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, "")
-	}
-}
-
-// previewBody returns a compact, redacted, length-limited preview of an
-// upstream response body for inclusion in error logs. It collapses whitespace
-// and strips control characters so HTML error pages are readable.
-func previewBody(body []byte) string {
-	const maxPreview = 512
-	s := strings.ToValidUTF8(string(body), "�")
-	s = strings.Map(func(r rune) rune {
-		if r < 0x20 && r != '\n' && r != '\t' {
-			return ' '
-		}
-		return r
-	}, s)
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > maxPreview {
-		s = s[:maxPreview] + "…"
-	}
-	return s
-}
-
 // upstreamPathFor returns the canonical upstream path for a protocol.
 func upstreamPathFor(proto config.Protocol) string {
 	switch proto {
@@ -470,118 +256,6 @@ func upstreamPathFor(proto config.Protocol) string {
 	default:
 		return "/v1/chat/completions"
 	}
-}
-
-type requestHead struct {
-	Body     []byte
-	Model    string
-	Stream   bool
-	Parsed   bool
-	HasModel bool
-	Mapped   bool
-}
-
-// inspectAndMapRequestBody parses a JSON request body just enough to find
-// top-level "model" and "stream". If a configured model mapping matches, it
-// rewrites the JSON body and returns the mapped model. Invalid JSON or missing
-// model is logged and forwarded unchanged.
-func inspectAndMapRequestBody(path string, body []byte) requestHead {
-	head := requestHead{Body: body}
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		log.Printf("warn: model mapping skipped for %s: request body is not valid JSON: %v", path, err)
-		return head
-	}
-	head.Parsed = true
-
-	if stream, ok := m["stream"].(bool); ok {
-		head.Stream = stream
-	}
-
-	model, ok := m["model"].(string)
-	if !ok || strings.TrimSpace(model) == "" {
-		log.Printf("warn: model mapping skipped for %s: request JSON has no string model field", path)
-		return head
-	}
-	head.Model = model
-	head.HasModel = true
-
-	mapped, ok := config.LookupModelMapping(model)
-	if !ok {
-		return head
-	}
-	m["model"] = mapped
-	out, err := json.Marshal(m)
-	if err != nil {
-		log.Printf("warn: model mapping %q -> %q skipped for %s: remarshal failed: %v", model, mapped, path, err)
-		return head
-	}
-	head.Body = out
-	head.Model = mapped
-	head.Mapped = true
-	log.Printf("model mapping applied for %s: %q -> %q", path, model, mapped)
-	return head
-}
-
-func passthroughRoute(model string, inbound config.Protocol) config.ModelRoute {
-	id := strings.TrimSpace(model)
-	if id == "" {
-		id = "passthrough"
-	}
-	return config.ModelRoute{
-		ID:        id,
-		Name:      id,
-		Upstream:  config.UpstreamGo,
-		Protocol:  inbound,
-		RealModel: model,
-		Group:     "go",
-	}
-}
-
-// rewriteModel returns body with the top-level "model" field replaced. It
-// re-marshals compact JSON; on any failure the original body is returned with
-// ok=false so the caller keeps the original (model name may be a prefix match
-// upstream, but that is acceptable degradation).
-func rewriteModel(body []byte, realModel string) ([]byte, bool) {
-	if realModel == "" {
-		return body, false
-	}
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		return body, false
-	}
-	m["model"] = realModel
-	out, err := json.Marshal(m)
-	if err != nil {
-		return body, false
-	}
-	return out, true
-}
-
-// enableStreamUsage asks upstream protocols that support it to include final
-// usage accounting in SSE streams so admin usage logs can record token counts.
-func enableStreamUsage(body []byte, proto config.Protocol, stream bool) ([]byte, bool) {
-	if !stream {
-		return body, false
-	}
-	if proto != config.ProtocolChat {
-		return body, false
-	}
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		return body, false
-	}
-	opts := objectField(m, "stream_options")
-	if opts == nil {
-		opts = map[string]any{}
-	}
-	opts["include_usage"] = true
-	m["stream_options"] = opts
-	out, err := json.Marshal(m)
-	if err != nil {
-		return body, false
-	}
-	return out, true
 }
 
 // setContentLength pins the outbound request length after any body rewrite.
@@ -622,63 +296,6 @@ func injectUpstreamAuth(h http.Header, keyValue string) {
 	h.Set("X-Api-Key", keyValue)
 }
 
-// shouldMarkUpstreamFailure reports whether a response status should count as a
-// key failure and trigger cooldown bookkeeping.
-func shouldMarkUpstreamFailure(status int) bool {
-	switch status {
-	case http.StatusPaymentRequired, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
-		return true
-	default:
-		return status >= 500
-	}
-}
-
-// shouldRetryWithNextKey reports whether a failed upstream response should be
-// retried with another available key before returning it to the client.
-func shouldRetryWithNextKey(status int) bool {
-	return shouldMarkUpstreamFailure(status)
-}
-
-// upstreamErrorType maps an upstream HTTP status to an OpenAI-style error type
-// that is safe to return to the client.
-func upstreamErrorType(status int) string {
-	switch {
-	case status == http.StatusTooManyRequests:
-		return "rate_limit_error"
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return "permission_denied"
-	case status == http.StatusRequestTimeout, status == http.StatusGatewayTimeout:
-		return "upstream_timeout"
-	case status >= 500:
-		return "upstream_error"
-	default:
-		return "upstream_error"
-	}
-}
-
-// genericUpstreamMessage returns a client-safe error message that does not
-// expose upstream provider/channel details (e.g. "Error from provider
-// (DeepSeek)"). The raw upstream error is still recorded in the admin usage
-// log via summarizeUpstreamError for debugging.
-func genericUpstreamMessage(status int) string {
-	switch {
-	case status == http.StatusTooManyRequests:
-		return "upstream rate limit reached, please retry later"
-	case status == http.StatusUnauthorized:
-		return "upstream authentication failed"
-	case status == http.StatusForbidden:
-		return "upstream access denied"
-	case status == http.StatusRequestTimeout, status == http.StatusGatewayTimeout:
-		return "upstream request timed out"
-	case status >= 500:
-		return "upstream service error"
-	default:
-		return "upstream request failed"
-	}
-}
-
-const statusClientClosedRequest = 499
-
 func upstreamRequestContext(parent context.Context, stream bool) (context.Context, context.CancelFunc) {
 	if stream {
 		return parent, func() {}
@@ -688,19 +305,6 @@ func upstreamRequestContext(parent context.Context, stream bool) (context.Contex
 		return parent, func() {}
 	}
 	return context.WithTimeout(parent, timeout)
-}
-
-func classifyProxyContextError(err error) (int, string, string, bool) {
-	if err == nil {
-		return 0, "", "", false
-	}
-	if errors.Is(err, context.Canceled) {
-		return statusClientClosedRequest, "client_closed_request", "client canceled request", true
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return http.StatusGatewayTimeout, "upstream_timeout", "upstream request timed out", true
-	}
-	return 0, "", "", false
 }
 
 func markKeyFailure(p *pool.Picker, key *store.Key, status int, body []byte) {
@@ -729,571 +333,4 @@ func copyResponseHeaders(c *gin.Context, resp *http.Response) {
 			c.Writer.Header().Add(k, v)
 		}
 	}
-}
-
-func copyErrString(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
-const maxUsageErrorLen = 2048
-
-var sensitiveErrorPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+\-/=]+`),
-	regexp.MustCompile(`(?i)((?:api[_-]?key|token|secret|credential)["'\s:=]+)([^"'\s,}]+)`),
-}
-
-// summarizeUpstreamError extracts a compact, redacted error message from an
-// upstream error response body for admin usage logs.
-func summarizeUpstreamError(status int, body []byte) string {
-	msg := extractUpstreamErrorMessage(body)
-	if msg == "" {
-		msg = strings.TrimSpace(strings.ToValidUTF8(string(body), "�"))
-	}
-	msg = strings.Join(strings.Fields(msg), " ")
-	if msg == "" {
-		msg = http.StatusText(status)
-	}
-	return trimUsageError(fmt.Sprintf("upstream returned HTTP %d: %s", status, redactUsageError(msg)))
-}
-
-func extractUpstreamErrorMessage(body []byte) string {
-	var payload any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return ""
-	}
-	if msg := findErrorMessage(payload); msg != "" {
-		return msg
-	}
-	compact, err := json.Marshal(payload)
-	if err != nil {
-		return ""
-	}
-	return string(compact)
-}
-
-func findErrorMessage(v any) string {
-	switch x := v.(type) {
-	case map[string]any:
-		for _, key := range []string{"error", "message", "detail", "error_description", "code", "type"} {
-			if val, ok := x[key]; ok {
-				if msg := findErrorMessage(val); msg != "" {
-					return msg
-				}
-			}
-		}
-	case []any:
-		var parts []string
-		for _, item := range x {
-			if msg := findErrorMessage(item); msg != "" {
-				parts = append(parts, msg)
-			}
-		}
-		return strings.Join(parts, "; ")
-	case string:
-		return strings.TrimSpace(x)
-	case float64, bool, nil:
-		return fmt.Sprint(x)
-	}
-	return ""
-}
-
-func redactUsageError(s string) string {
-	for _, pattern := range sensitiveErrorPatterns {
-		s = pattern.ReplaceAllString(s, "${1}[redacted]")
-	}
-	return s
-}
-
-func trimUsageError(s string) string {
-	if len(s) <= maxUsageErrorLen {
-		return s
-	}
-	return s[:maxUsageErrorLen-1] + "…"
-}
-
-// markAndLog writes a usage log row. It never blocks the response path on DB errors.
-func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.ModelRoute,
-	proto config.Protocol, status int, start time.Time, stream bool, usage *usageAccounting, errMsg string, firstResponseMs ...int64) {
-	var tokenID uint
-	var tokenName string
-	if tokAny, exists := c.Get("token"); exists {
-		if tok, ok := tokAny.(*store.Token); ok {
-			tokenID = tok.ID
-			tokenName = tok.Name
-			// Increment request counter for the token if it has a cap
-			if tok.MaxRequests > 0 {
-				store.DB().Model(&store.Token{}).Where("id = ?", tok.ID).
-					UpdateColumn("requests_used", gorm.Expr("requests_used + 1"))
-			}
-		}
-	}
-	if usage == nil {
-		usage = &usageAccounting{}
-	}
-	baseCost := estimateUsageCost(route, usage)
-	groupMultiplier := config.GroupMultiplier(route.Group)
-	finalCost := baseCost * groupMultiplier
-	if groupMultiplier <= 0 || math.IsNaN(finalCost) || math.IsInf(finalCost, 0) {
-		groupMultiplier = 1
-		finalCost = baseCost
-	}
-	frt := int64(0)
-	if len(firstResponseMs) > 0 && firstResponseMs[0] > 0 {
-		frt = firstResponseMs[0]
-	}
-	pricing := usagePricing(route)
-	entry := store.UsageLog{
-		RequestID:           usageRequestID(c, key, start),
-		TokenID:             tokenID,
-		TokenName:           tokenName,
-		KeyID:               key.ID,
-		Model:               route.ID,
-		Group:               route.Group,
-		Protocol:            string(proto),
-		IPAddress:           c.ClientIP(),
-		StatusCode:          status,
-		DurationMs:          time.Since(start).Milliseconds(),
-		FirstResponseMs:     frt,
-		Stream:              stream,
-		InputTokens:         usage.InputTokens,
-		OutputTokens:        usage.OutputTokens,
-		ReasoningTokens:     usage.ReasoningTokens,
-		CacheTokens:         usage.CacheTokens,
-		CacheReadTokens:     usage.CacheReadTokens,
-		CacheCreationTokens: usage.CacheCreationTokens,
-		TotalTokens:         usage.TotalTokens,
-		TotalCost:           baseCost,
-		ActualCost:          finalCost,
-		AccountCost:         finalCost,
-		InputUnitPrice:      pricing.Prompt,
-		OutputUnitPrice:     pricing.Completion,
-		CacheReadUnitPrice:  pricing.CacheRead,
-		CacheWriteUnitPrice: pricing.CacheCreation,
-		GroupMultiplier:     groupMultiplier,
-		BillingMode:         "token",
-		Error:               errMsg,
-	}
-	_ = store.DB().Create(&entry).Error
-}
-
-func usageRequestID(c *gin.Context, key *store.Key, start time.Time) string {
-	for _, header := range []string{"X-Request-Id", "X-Request-ID", "Request-Id", "Request-ID"} {
-		if v := strings.TrimSpace(c.Writer.Header().Get(header)); v != "" {
-			return v
-		}
-		if v := strings.TrimSpace(c.GetHeader(header)); v != "" {
-			return v
-		}
-	}
-	keyID := uint(0)
-	if key != nil {
-		keyID = key.ID
-	}
-	return fmt.Sprintf("req_%d_%d", start.UnixNano(), keyID)
-}
-
-type usageAccounting struct {
-	InputTokens          int
-	OutputTokens         int
-	ReasoningTokens      int
-	CacheTokens          int
-	CacheReadTokens      int
-	CacheCreationTokens  int
-	TotalTokens          int
-	CacheIncludedInInput bool
-	TotalExplicit        bool
-}
-
-func usageFromResponse(proto config.Protocol, body []byte) *usageAccounting {
-	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil
-	}
-	u, _ := raw["usage"].(map[string]any)
-	return usageFromRawMap(u, proto)
-}
-
-func usageFromIRUsage(resp *protocol.IRResponse) *usageAccounting {
-	if resp == nil || resp.Usage == nil {
-		return nil
-	}
-	u := resp.Usage
-	acct := &usageAccounting{
-		InputTokens:         u.PromptTokens,
-		OutputTokens:        u.CompletionTokens,
-		TotalTokens:         u.TotalTokens,
-		TotalExplicit:       u.TotalTokens > 0,
-		CacheReadTokens:     u.CacheReadTokens,
-		CacheCreationTokens: u.CacheCreationTokens,
-		ReasoningTokens:     u.ReasoningTokens,
-	}
-	if acct.CacheReadTokens > 0 {
-		acct.CacheTokens = acct.CacheReadTokens
-	}
-	acct.recomputeTotalIfNeeded()
-	if acct.InputTokens == 0 && acct.OutputTokens == 0 && acct.TotalTokens == 0 {
-		return nil
-	}
-	return acct
-}
-
-func proxyStreamAndCaptureUsage(dst io.Writer, src io.Reader, proto config.Protocol, start time.Time) (*usageAccounting, int64, error) {
-	scanner := bufio.NewScanner(src)
-	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
-	var usage *usageAccounting
-	var firstResponseMs int64
-	for scanner.Scan() {
-		line := append([]byte(nil), scanner.Bytes()...)
-		if _, err := dst.Write(append(line, '\n')); err != nil {
-			return usage, firstResponseMs, err
-		}
-		if firstResponseMs == 0 && isSSEDataLine(line) {
-			firstResponseMs = time.Since(start).Milliseconds()
-		}
-		if nextUsage := usageFromSSELine(proto, line); nextUsage != nil {
-			usage = mergeUsageAccounting(usage, nextUsage)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return usage, firstResponseMs, err
-	}
-	return usage, firstResponseMs, nil
-}
-
-func isSSEDataLine(line []byte) bool {
-	if !bytes.HasPrefix(line, []byte("data: ")) {
-		return false
-	}
-	payload := bytes.TrimSpace(line[6:])
-	return len(payload) > 0 && !bytes.Equal(payload, []byte("[DONE]"))
-}
-
-func mergeUsageAccounting(base, next *usageAccounting) *usageAccounting {
-	if base == nil {
-		return next
-	}
-	if next == nil {
-		return base
-	}
-	if next.InputTokens > 0 {
-		base.InputTokens = next.InputTokens
-	}
-	if next.OutputTokens > 0 {
-		base.OutputTokens = next.OutputTokens
-	}
-	if next.ReasoningTokens > 0 {
-		base.ReasoningTokens = next.ReasoningTokens
-	}
-	if next.CacheTokens > 0 {
-		base.CacheTokens = next.CacheTokens
-	}
-	if next.CacheReadTokens > 0 {
-		base.CacheReadTokens = next.CacheReadTokens
-	}
-	if next.CacheCreationTokens > 0 {
-		base.CacheCreationTokens = next.CacheCreationTokens
-	}
-	base.CacheIncludedInInput = base.CacheIncludedInInput || next.CacheIncludedInInput
-	if next.TotalExplicit {
-		base.TotalTokens = next.TotalTokens
-		base.TotalExplicit = true
-	} else {
-		base.recomputeTotalIfNeeded()
-	}
-	return base
-}
-
-func (u *usageAccounting) recomputeTotalIfNeeded() {
-	if u == nil || u.TotalExplicit {
-		return
-	}
-	u.TotalTokens = u.InputTokens + u.OutputTokens + u.CacheReadTokens
-}
-
-func usageFromSSEBuffer(proto config.Protocol, body []byte) *usageAccounting {
-	scanner := bufio.NewScanner(bytes.NewReader(body))
-	scanner.Buffer(make([]byte, 256*1024), 4*1024*1024)
-	var usage *usageAccounting
-	for scanner.Scan() {
-		if next := usageFromSSELine(proto, scanner.Bytes()); next != nil {
-			usage = mergeUsageAccounting(usage, next)
-		}
-	}
-	return usage
-}
-
-func usageFromSSELine(proto config.Protocol, line []byte) *usageAccounting {
-	if !bytes.HasPrefix(line, []byte("data: ")) {
-		return nil
-	}
-	payload := bytes.TrimSpace(line[6:])
-	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
-		return nil
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(payload, &raw); err != nil {
-		return nil
-	}
-	switch proto {
-	case config.ProtocolChat:
-		return usageFromRawMap(objectField(raw, "usage"), proto)
-	case config.ProtocolMessages:
-		if usage := usageFromRawMap(objectField(raw, "usage"), proto); usage != nil {
-			return usage
-		}
-		if msg := objectField(raw, "message"); msg != nil {
-			return usageFromRawMap(objectField(msg, "usage"), proto)
-		}
-	case config.ProtocolResponses:
-		if response := objectField(raw, "response"); response != nil {
-			if usage := usageFromRawMap(objectField(response, "usage"), proto); usage != nil {
-				return usage
-			}
-		}
-		return usageFromRawMap(objectField(raw, "usage"), proto)
-	}
-	return nil
-}
-
-func usageFromRawMap(u map[string]any, _ config.Protocol) *usageAccounting {
-	if len(u) == 0 {
-		return nil
-	}
-	acct := &usageAccounting{}
-	rawInputTokens := firstNumberField(u, "prompt_tokens", "input_tokens")
-	acct.OutputTokens = firstNumberField(u, "completion_tokens", "output_tokens")
-	acct.ReasoningTokens = reasoningTokens(u)
-	acct.CacheReadTokens, acct.CacheIncludedInInput = cacheReadTokens(u)
-	var cacheCreationIncluded bool
-	acct.CacheCreationTokens, cacheCreationIncluded = cacheCreationTokens(u)
-	acct.InputTokens = rawInputTokens
-	if acct.CacheIncludedInInput && acct.CacheReadTokens > 0 {
-		acct.InputTokens = maxInt(0, acct.InputTokens-acct.CacheReadTokens)
-	}
-	if !cacheCreationIncluded && acct.CacheCreationTokens > 0 {
-		acct.InputTokens += acct.CacheCreationTokens
-	}
-	// CacheTokens is intentionally the cache-read/hit amount only. Cache
-	// creation/write tokens are tracked separately but billed as regular input,
-	// so they must not be mixed into cache-hit counters.
-	acct.CacheTokens = acct.CacheReadTokens
-	acct.TotalTokens = numberField(u, "total_tokens")
-	acct.TotalExplicit = acct.TotalTokens > 0
-	acct.recomputeTotalIfNeeded()
-	return acct
-}
-
-func cacheReadTokens(u map[string]any) (int, bool) {
-	direct, directKey := firstNumberFieldWithKey(u,
-		"cache_read_input_tokens",
-		"input_cache_read_tokens",
-		"cache_read_tokens",
-		"prompt_cache_hit_tokens",
-		"prompt_cache_read_tokens",
-		"cached_tokens",
-	)
-	directIncluded := directKey == "prompt_cache_hit_tokens" ||
-		directKey == "prompt_cache_read_tokens" ||
-		directKey == "cached_tokens"
-	nested := 0
-	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
-		if details := objectField(u, key); details != nil {
-			nested = maxInt(nested, firstNumberField(details,
-				"cached_tokens",
-				"cache_read_tokens",
-				"cache_read_input_tokens",
-				"input_cache_read_tokens",
-				"read_tokens",
-			))
-		}
-	}
-	if nested > 0 {
-		return maxInt(direct, nested), true
-	}
-	return direct, directIncluded
-}
-
-func cacheCreationTokens(u map[string]any) (int, bool) {
-	total, directKey := firstNumberFieldWithKey(u,
-		"cache_creation_input_tokens",
-		"cache_write_input_tokens",
-		"input_cache_write_tokens",
-		"cache_creation_tokens",
-		"prompt_cache_miss_tokens",
-		"prompt_cache_write_tokens",
-	)
-	directIncluded := directKey == "prompt_cache_miss_tokens" ||
-		directKey == "prompt_cache_write_tokens"
-	detailTotal := 0
-	if details := objectField(u, "cache_creation"); details != nil {
-		for _, v := range details {
-			detailTotal += numberValue(v)
-		}
-	}
-	if details := objectField(u, "cache_creation_input_tokens_details"); details != nil {
-		for _, v := range details {
-			detailTotal += numberValue(v)
-		}
-	}
-	total = maxInt(total, detailTotal)
-	nested := 0
-	for _, key := range []string{"prompt_tokens_details", "input_tokens_details"} {
-		if details := objectField(u, key); details != nil {
-			nested = maxInt(nested, firstNumberField(details,
-				"cache_creation_tokens",
-				"cache_creation_input_tokens",
-				"cache_write_tokens",
-				"cache_write_input_tokens",
-				"input_cache_write_tokens",
-				"created_tokens",
-			))
-		}
-	}
-	if nested > 0 {
-		return maxInt(total, nested), true
-	}
-	return total, directIncluded
-}
-
-// reasoningTokens extracts the reasoning/thinking token count reported by
-// upstream. OpenAI-style providers expose it as
-// `completion_tokens_details.reasoning_tokens`; some providers emit it at the
-// top level. It is already included in completion_tokens by the upstream, so
-// it is tracked separately for visibility and not added to totals.
-func reasoningTokens(u map[string]any) int {
-	direct := firstNumberField(u,
-		"reasoning_tokens",
-		"reasoning",
-		"thinking_tokens",
-		"reasoning_output_tokens",
-	)
-	if direct > 0 {
-		return direct
-	}
-	for _, key := range []string{"completion_tokens_details", "output_tokens_details"} {
-		if details := objectField(u, key); details != nil {
-			if n := firstNumberField(details,
-				"reasoning_tokens",
-				"reasoning",
-				"thinking_tokens",
-				"reasoning_output_tokens",
-			); n > 0 {
-				return n
-			}
-		}
-	}
-	return 0
-}
-
-func numberField(m map[string]any, key string) int {
-	return numberValue(m[key])
-}
-
-func firstNumberField(m map[string]any, keys ...string) int {
-	n, _ := firstNumberFieldWithKey(m, keys...)
-	return n
-}
-
-func firstNumberFieldWithKey(m map[string]any, keys ...string) (int, string) {
-	for _, key := range keys {
-		if n := numberField(m, key); n > 0 {
-			return n, key
-		}
-	}
-	return 0, ""
-}
-
-func objectField(m map[string]any, key string) map[string]any {
-	if v, ok := m[key].(map[string]any); ok {
-		return v
-	}
-	return nil
-}
-
-func numberValue(v any) int {
-	switch value := v.(type) {
-	case float64:
-		return int(value)
-	case int:
-		return value
-	case int64:
-		return int(value)
-	case json.Number:
-		n, _ := value.Int64()
-		return int(n)
-	case string:
-		n, _ := strconv.ParseFloat(strings.TrimSpace(value), 64)
-		return int(n)
-	default:
-		return 0
-	}
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func estimateUsageCost(route config.ModelRoute, usage *usageAccounting) float64 {
-	if usage == nil || route.Pricing == nil {
-		return 0
-	}
-	pricing := usagePricing(route)
-	inputTokens := usage.InputTokens
-	cost := float64(inputTokens)*pricing.Prompt +
-		float64(usage.OutputTokens)*pricing.Completion +
-		float64(usage.CacheReadTokens)*pricing.CacheRead
-	if cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
-		return 0
-	}
-	return cost
-}
-
-type pricingSnapshot struct {
-	Prompt        float64
-	Completion    float64
-	CacheRead     float64
-	CacheCreation float64
-}
-
-func usagePricing(route config.ModelRoute) pricingSnapshot {
-	if route.Pricing == nil {
-		return pricingSnapshot{}
-	}
-	return pricingSnapshot{
-		Prompt:        priceField(route.Pricing, "prompt"),
-		Completion:    priceField(route.Pricing, "completion"),
-		CacheRead:     priceField(route.Pricing, "input_cache_read", "cache_read", "prompt_cache_read"),
-		CacheCreation: priceField(route.Pricing, "input_cache_write", "cache_write", "prompt_cache_write", "input_cache_creation"),
-	}
-}
-
-func priceField(pricing map[string]string, keys ...string) float64 {
-	for _, key := range keys {
-		raw := strings.TrimSpace(pricing[key])
-		if raw == "" {
-			continue
-		}
-		v, err := strconv.ParseFloat(raw, 64)
-		if err != nil || v < 0 {
-			continue
-		}
-		return v
-	}
-	return 0
-}
-
-// writeOpenAIError emits an OpenAI-style error envelope.
-func writeOpenAIError(c *gin.Context, status int, errType, message string) {
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
-	})
 }
