@@ -61,6 +61,45 @@ var planPattern = regexp.MustCompile(`plan:(?:\$R\[\d+\]=)?"([^"]+)"`)
 // signInMarkerPattern detects login-page redirects embedded in HTML.
 var signInMarkerPattern = regexp.MustCompile(`(?:/sign-in|/auth/authorize|/login)`)
 
+// mineFlagPattern and useBalanceFlagPattern extract the mine/useBalance boolean
+// flags from the hydrated SSR page. Declared at package level to avoid
+// recompiling the regex on every quota parse call.
+var mineFlagPattern = regexp.MustCompile(`mine:(?:\$R\[\d+\]=)?!(0|1)`)
+var useBalanceFlagPattern = regexp.MustCompile(`useBalance:(?:\$R\[\d+\]=)?!(0|1)`)
+
+// quotaHTTPTransport is a shared transport with a tuned connection pool so
+// repeated quota checks reuse TCP connections instead of dialing every time.
+var quotaHTTPTransport = &http.Transport{
+	MaxIdleConns:        20,
+	MaxIdleConnsPerHost: 10,
+	IdleConnTimeout:     90 * time.Second,
+}
+
+// quotaCheckRedirect detects cookie-expiry redirects (302 → /sign-in or
+// /auth/authorize or /login) and surfaces a clear error instead of silently
+// parsing the login page HTML.
+func quotaCheckRedirect(req *http.Request, via []*http.Request) error {
+	loc := req.URL.String()
+	if strings.Contains(loc, "/sign-in") || strings.Contains(loc, "/auth/authorize") || strings.Contains(loc, "/login") {
+		return fmt.Errorf("session expired: redirected to %s (cookie may be invalid or expired)", loc)
+	}
+	return nil
+}
+
+// quotaWorkspaceClient is the reusable client for workspace-page quota fetches.
+// It enforces the custom redirect policy that detects expired cookies.
+var quotaWorkspaceClient = &http.Client{
+	Timeout:       20 * time.Second,
+	Transport:     quotaHTTPTransport,
+	CheckRedirect: quotaCheckRedirect,
+}
+
+// quotaRPCClient is the reusable client for the /_server RPC quota fallback path.
+var quotaRPCClient = &http.Client{
+	Timeout:   15 * time.Second,
+	Transport: quotaHTTPTransport,
+}
+
 // normalizeAuthCookie accepts pasted browser cookie/header fragments and returns
 // the minimal Cookie header value required by opencode.ai quota RPC: auth=<token>.
 func normalizeAuthCookie(raw string) string {
@@ -491,8 +530,7 @@ func fetchGoQuotaWithInstance(cookie, workspaceID string, instance int) (*GoQuot
 	req.Header.Set("Origin", "https://opencode.ai")
 	req.Header.Set("Referer", "https://opencode.ai/")
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := quotaRPCClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http call: %w", err)
 	}
@@ -555,20 +593,9 @@ func fetchGoQuotaFromWorkspacePage(cookie, workspaceID string) (*GoQuotaResponse
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0")
 	req.Header.Set("Cookie", cookie)
 
-	// Use a client with a CheckRedirect hook so we can detect cookie-expiry
-	// redirects (302 → /auth/authorize or /sign-in) and surface a clear error
-	// instead of silently parsing the login page HTML.
-	client := &http.Client{
-		Timeout: 20 * time.Second,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			loc := req.URL.String()
-			if strings.Contains(loc, "/sign-in") || strings.Contains(loc, "/auth/authorize") || strings.Contains(loc, "/login") {
-				return fmt.Errorf("session expired: redirected to %s (cookie may be invalid or expired)", loc)
-			}
-			return nil
-		},
-	}
-	resp, err := client.Do(req)
+	// Use the shared workspace client which enforces the cookie-expiry
+	// redirect policy via quotaWorkspaceClient.CheckRedirect.
+	resp, err := quotaWorkspaceClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("workspace page http call: %w", err)
 	}
@@ -633,10 +660,10 @@ func parseGoQuotaFromWorkspacePage(raw []byte) (*GoQuotaResponse, error) {
 	}
 
 	// Extract mine/useBalance flags if present (best-effort, not required).
-	if m := regexp.MustCompile(`mine:(?:\$R\[\d+\]=)?!(0|1)`).FindSubmatch(raw); len(m) == 2 {
+	if m := mineFlagPattern.FindSubmatch(raw); len(m) == 2 {
 		result.Mine = string(m[1]) == "0"
 	}
-	if m := regexp.MustCompile(`useBalance:(?:\$R\[\d+\]=)?!(0|1)`).FindSubmatch(raw); len(m) == 2 {
+	if m := useBalanceFlagPattern.FindSubmatch(raw); len(m) == 2 {
 		result.UseBalance = string(m[1]) == "0"
 	}
 
