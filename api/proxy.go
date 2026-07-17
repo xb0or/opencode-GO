@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -370,79 +369,15 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 				}
 			}
 
-		// Success — pre-validate the response before committing to the client.
-		// This allows failover to the next upstream if the response body is
-		// invalid (e.g. Cloudflare HTML instead of JSON, or connection drops
-		// before the first SSE event). Once the first valid data is sent to
-		// the client, we cannot switch upstreams.
-		if crossProtocol(route, inbound, head) {
-			// Cross-protocol: buffer the full response, convert it.
-			// If conversion fails, try the next upstream.
-			body, readErr := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if readErr != nil {
-				markKeyFailure(p, key, http.StatusBadGateway, nil)
-				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
-				if i+1 < len(attempts) {
-					continue
-				}
-				return attemptResult{
-					Status:    http.StatusBadGateway,
-					Err:       readErr,
-					Retryable: ui+1 < len(upstreamsToTry),
-				}
-			}
-			proxyCrossProtocolResponse(c, resp, head.Stream, inbound, route.Protocol, p, key, route, start, body)
-			return attemptResult{Handled: true}
-		}
-
-		if !head.Stream {
-			// Non-streaming: read the full body. If the read fails, the
-			// response is invalid — try the next upstream.
-			body, readErr := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if readErr != nil {
-				markKeyFailure(p, key, http.StatusBadGateway, nil)
-				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, readErr.Error())
-				if i+1 < len(attempts) {
-					continue
-				}
-				return attemptResult{
-					Status:    http.StatusBadGateway,
-					Err:       readErr,
-					Retryable: ui+1 < len(upstreamsToTry),
-				}
-			}
-			// Body read succeeded — write to client.
-			copyResponseHeaders(c, resp)
-			c.Writer.WriteHeader(resp.StatusCode)
-			_, writeErr := c.Writer.Write(body)
-			usage := usageFromResponse(inbound, body)
-			errMsg := copyErrString(writeErr)
-			if errMsg == "" && resp.StatusCode >= http.StatusBadRequest {
-				errMsg = summarizeUpstreamError(resp.StatusCode, body)
-			}
-			if resp.StatusCode < 400 && writeErr == nil {
-				p.MarkSuccess(key.ID)
-				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, "")
-			} else if shouldMarkUpstreamFailure(resp.StatusCode) {
-				markKeyFailure(p, key, resp.StatusCode, body)
-				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, errMsg)
-			} else {
-				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, errMsg)
-			}
-			return attemptResult{Handled: true}
-		}
-
-		// Streaming: pre-read the first SSE event before committing headers.
-		// If the connection drops before the first event, try the next
-		// upstream. Once the first event is received, commit to the client.
-		reader := bufio.NewReader(resp.Body)
-		firstLine, readErr := reader.ReadString('\n')
+		// Success — pre-read the response body and delegate to the response
+		// handler. The handler returns a responseResult that tells us whether
+		// the response was committed (ResponseStarted) or whether we should
+		// try the next upstream (Retryable).
+		responseBody, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
 		if readErr != nil {
-			_ = resp.Body.Close()
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, readErr.Error())
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
 			if i+1 < len(attempts) {
 				continue
 			}
@@ -452,23 +387,26 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 				Retryable: ui+1 < len(upstreamsToTry),
 			}
 		}
-		// First event received — commit to client and stream the rest.
-		copyResponseHeaders(c, resp)
-		c.Writer.WriteHeader(resp.StatusCode)
-		_, _ = c.Writer.Write([]byte(firstLine))
-		usage, firstResponseMs, copyErr := proxyStreamAndCaptureUsage(c.Writer, reader, inbound, start)
-		if resp.StatusCode < 400 && copyErr == nil {
-			p.MarkSuccess(key.ID)
-			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "", firstResponseMs)
-		} else if status, _, message, ok := classifyProxyContextError(copyErr); ok {
-			markAndLog(c, p, key, route, inbound, status, start, true, usage, message, firstResponseMs)
-		} else if shouldMarkUpstreamFailure(resp.StatusCode) {
-			markKeyFailure(p, key, resp.StatusCode, nil)
-			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, copyErrString(copyErr), firstResponseMs)
+
+		var rr responseResult
+		if crossProtocol(route, inbound, head) {
+			rr = proxyCrossProtocolResponse(c, resp, head.Stream, inbound, route.Protocol, p, key, route, start, responseBody)
 		} else {
-			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, copyErrString(copyErr), firstResponseMs)
+			rr = proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start, responseBody)
 		}
-		return attemptResult{Handled: true}
+
+		if rr.ResponseStarted {
+			return attemptResult{Handled: true}
+		}
+		// Response not started — can try next key or upstream.
+		if i+1 < len(attempts) {
+			continue
+		}
+		return attemptResult{
+			Status:    http.StatusBadGateway,
+			Err:       rr.Err,
+			Retryable: ui+1 < len(upstreamsToTry),
+		}
 	}
 
 	// All keys for this upstream failed.

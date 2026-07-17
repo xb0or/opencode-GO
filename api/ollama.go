@@ -173,10 +173,34 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 				}
 			}
 
-			// Success — proxyCrossProtocolResponse writes to the client.
-			proxyCrossProtocolResponse(c, resp, stream, inbound, config.ProtocolChat, p, key, route, start, upstreamBody)
-			return attemptResult{Handled: true}
-		}
+			// Success — read the response body, then convert.
+			responseBody, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				markKeyFailure(p, key, http.StatusBadGateway, nil)
+				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, readErr.Error())
+				if i+1 < len(attempts) {
+					continue
+				}
+				return attemptResult{
+					Status:    http.StatusBadGateway,
+					Err:       readErr,
+					Retryable: true,
+				}
+			}
+			rr := proxyCrossProtocolResponse(c, resp, stream, inbound, config.ProtocolChat, p, key, route, start, responseBody)
+			if rr.ResponseStarted {
+				return attemptResult{Handled: true}
+			}
+			if i+1 < len(attempts) {
+				continue
+			}
+			return attemptResult{
+				Status:    http.StatusBadGateway,
+				Err:       rr.Err,
+				Retryable: true,
+			}
+			}
 
 		// --------------- Same-protocol (Chat → Chat) ---------------
 		resp, doErr := upstreamClient.Do(req)
@@ -233,9 +257,33 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			}
 		}
 
-		// Success — proxySameProtocolResponse writes to the client.
-		proxySameProtocolResponse(c, resp, stream, p, key, route, inbound, start)
-		return attemptResult{Handled: true}
+		// Success — pre-read response body and delegate to handler.
+		responseBody, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			markKeyFailure(p, key, http.StatusBadGateway, nil)
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, readErr.Error())
+			if i+1 < len(attempts) {
+				continue
+			}
+			return attemptResult{
+				Status:    http.StatusBadGateway,
+				Err:       readErr,
+				Retryable: true,
+			}
+		}
+		rr := proxySameProtocolResponse(c, resp, stream, p, key, route, inbound, start, responseBody)
+		if rr.ResponseStarted {
+			return attemptResult{Handled: true}
+		}
+		if i+1 < len(attempts) {
+			continue
+		}
+		return attemptResult{
+			Status:    http.StatusBadGateway,
+			Err:       rr.Err,
+			Retryable: true,
+		}
 	}
 
 	return attemptResult{
