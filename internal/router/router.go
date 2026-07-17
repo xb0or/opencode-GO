@@ -12,8 +12,9 @@ import (
 // upstream route. It is the single object the handler layer needs to know
 // about — it never touches Provider details directly.
 type Resolution struct {
-	Route      config.ModelRoute
+	Route         config.ModelRoute
 	IsPassthrough bool // true when the model was not in the registry
+	NotFound      bool // true when the model is unknown and passthrough is disabled
 }
 
 // Resolve maps a client-facing model id to its upstream route.
@@ -21,7 +22,10 @@ type Resolution struct {
 // The resolution pipeline:
 //  1. Apply model alias/mapping (config.LookupModelMapping) if configured.
 //  2. Look up the (possibly remapped) model in the registry.
-//  3. If not found, return a passthrough route defaulting to the Go upstream.
+//  3. If not found, check passthrough mode:
+//     - "go" (legacy): return a passthrough route to the Go upstream.
+//     - "disabled" (default/strict): return NotFound=true so the handler
+//       returns 404 to the client.
 //
 // The caller never needs to know which Provider serves the model — that
 // information lives inside config.ModelRoute and is consumed later by the
@@ -39,8 +43,13 @@ func Resolve(model string, inbound config.Protocol) Resolution {
 		return Resolution{Route: route}
 	}
 
-	// Step 3: passthrough fallback
-	return Resolution{Route: passthroughRoute(model, inbound), IsPassthrough: true}
+	// Step 3: passthrough or 404
+	mode := config.Get().PassthroughMode
+	if mode == "go" {
+		return Resolution{Route: passthroughRoute(model, inbound), IsPassthrough: true}
+	}
+	// Strict mode (default): model not found.
+	return Resolution{NotFound: true}
 }
 
 // passthroughRoute builds a default route for models not in the registry.

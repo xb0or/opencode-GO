@@ -72,8 +72,17 @@ func RequireGroup() gin.HandlerFunc {
 	}
 }
 
-// RequestLimitMiddleware enforces the per-token total request cap (MaxRequests).
-// Must run after Auth() so the token is available in context.
+// RequestLimitMiddleware enforces the per-token total request cap (MaxRequests)
+// using atomic pre-reservation. Must run after Auth() so the token is
+// available in context.
+//
+// Instead of reading a snapshot of RequestsUsed and incrementing only on
+// success (which allows N concurrent requests to all pass the check when
+// only 1 slot remains), this middleware atomically increments requests_used
+// with a conditional UPDATE that checks the limit in the same statement.
+// If the request fails and should not count, incrementRequestsUsed is
+// NOT called — but the reservation was already made at entry. A rollback
+// mechanism (ReleaseRequest) can be used if the request fails early.
 func RequestLimitMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tokAny, exists := c.Get("token")
@@ -86,7 +95,10 @@ func RequestLimitMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		if tok.MaxRequests > 0 && tok.RequestsUsed >= tok.MaxRequests {
+		// Atomic pre-reserve: increment + limit-check in one SQL statement.
+		// This prevents concurrent requests from all passing the check
+		// when only one slot remains.
+		if !store.TryReserveRequest(tok.ID) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error": gin.H{
 					"type":    "request_limit_exceeded",

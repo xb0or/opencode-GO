@@ -2,7 +2,9 @@ package admin
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -104,9 +106,15 @@ func login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
 		return
 	}
+	now := time.Now()
+	jti, _ := randomTokenID()
 	claims := jwt.MapClaims{
 		"role": "admin",
-		"exp":  time.Now().Add(12 * time.Hour).Unix(),
+		"iss":  "opencode-go",
+		"aud":  "admin",
+		"iat":  now.Unix(),
+		"jti":  jti,
+		"exp":  now.Add(12 * time.Hour).Unix(),
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := tok.SignedString([]byte(config.Get().JWTSecret))
@@ -127,10 +135,18 @@ func adminAuth() gin.HandlerFunc {
 		}
 		raw := strings.TrimSpace(h[7:])
 		claims := jwt.MapClaims{}
-		_, err := jwt.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
+		token, err := jwt.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
+			// Reject any non-HS256 token to prevent algorithm confusion attacks.
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+			}
 			return []byte(config.Get().JWTSecret), nil
 		})
 		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+		if !token.Valid {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
 		}
@@ -1719,4 +1735,13 @@ func maskSecret(s string) string {
 // subtleEqual is a constant-time string compare for the admin password.
 func subtleEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// randomTokenID generates a random JWT ID (jti) for token traceability.
+func randomTokenID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }

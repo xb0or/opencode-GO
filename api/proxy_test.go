@@ -499,6 +499,12 @@ func TestProxyAppliesModelMappingAndContentLength(t *testing.T) {
 	}
 	gin.SetMode(gin.TestMode)
 
+	// This test relies on passthrough (unregistered model forwarded to Go).
+	cfg := config.Get()
+	oldMode := cfg.PassthroughMode
+	cfg.PassthroughMode = "go"
+	defer func() { cfg.PassthroughMode = oldMode }()
+
 	var upstreamBody []byte
 	var upstreamContentLength int64
 	var upstreamAuth, upstreamCustom string
@@ -516,7 +522,6 @@ func TestProxyAppliesModelMappingAndContentLength(t *testing.T) {
 	}))
 	defer upstreamSrv.Close()
 
-	cfg := config.Get()
 	oldBaseURL := cfg.GoBaseURL
 	cfg.GoBaseURL = upstreamSrv.URL
 	defer func() { cfg.GoBaseURL = oldBaseURL }()
@@ -573,6 +578,12 @@ func TestProxyInvalidJSONIsForwardedUnchanged(t *testing.T) {
 	}
 	gin.SetMode(gin.TestMode)
 
+	// This test relies on passthrough (unregistered model forwarded to Go).
+	cfg := config.Get()
+	oldMode := cfg.PassthroughMode
+	cfg.PassthroughMode = "go"
+	defer func() { cfg.PassthroughMode = oldMode }()
+
 	var upstreamBody []byte
 	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
@@ -585,7 +596,6 @@ func TestProxyInvalidJSONIsForwardedUnchanged(t *testing.T) {
 	}))
 	defer upstreamSrv.Close()
 
-	cfg := config.Get()
 	oldBaseURL := cfg.GoBaseURL
 	cfg.GoBaseURL = upstreamSrv.URL
 	defer func() { cfg.GoBaseURL = oldBaseURL }()
@@ -691,6 +701,12 @@ func TestProxyMappedStreamResponseIsPassedThrough(t *testing.T) {
 	}
 	gin.SetMode(gin.TestMode)
 
+	// This test relies on passthrough (unregistered model forwarded to Go).
+	cfg := config.Get()
+	oldMode := cfg.PassthroughMode
+	cfg.PassthroughMode = "go"
+	defer func() { cfg.PassthroughMode = oldMode }()
+
 	var upstreamBody []byte
 	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var err error
@@ -704,7 +720,6 @@ func TestProxyMappedStreamResponseIsPassedThrough(t *testing.T) {
 	}))
 	defer upstreamSrv.Close()
 
-	cfg := config.Get()
 	oldBaseURL := cfg.GoBaseURL
 	cfg.GoBaseURL = upstreamSrv.URL
 	defer func() { cfg.GoBaseURL = oldBaseURL }()

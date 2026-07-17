@@ -112,6 +112,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	originalBody := head.Body
 
 	resolution := router.Resolve(head.Model, inbound)
+	if resolution.NotFound {
+		writeOpenAIError(c, http.StatusNotFound, "model_not_found",
+			"model not found: "+head.Model)
+		return
+	}
 	route := resolution.Route
 	routed := !resolution.IsPassthrough
 	if routed && !route.IsEnabled() {
@@ -187,7 +192,6 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 				return
 			}
 			if result.Handled {
-				incrementRequestsUsed(c)
 				return
 			}
 			lastResult = result
@@ -203,7 +207,6 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			return
 		}
 		if result.Handled {
-			incrementRequestsUsed(c)
 			return
 		}
 		lastResult = result
@@ -376,31 +379,38 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			}
 		}
 
-		// Success — pre-read the response body and delegate to the response
-		// handler. The handler returns a responseResult that tells us whether
-		// the response was committed (ResponseStarted) or whether we should
-		// try the next upstream (Retryable).
-		responseBody, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		cancel()
-		if readErr != nil {
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
-			if i+1 < len(attempts) {
-				continue
-			}
-			return attemptResult{
-				Status:    http.StatusBadGateway,
-				Err:       readErr,
-				Retryable: ui+1 < len(upstreamsToTry),
-			}
-		}
-
+		// Success — delegate to the response handler. For same-protocol SSE,
+		// the handler streams directly from resp.Body without buffering.
+		// For cross-protocol or non-streaming, the handler reads resp.Body.
+		// IMPORTANT: do NOT cancel() before the response handler reads
+		// resp.Body — cancelling the context will abort an in-flight body
+		// read. The handler closes resp.Body when done; cancel() is called
+		// after the handler returns.
 		var rr responseResult
 		if crossProtocol(route, inbound, head, currentUpstream) {
+			// Cross-protocol: must buffer full response for conversion.
+			responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxNonStreamBodyRead))
+			_ = resp.Body.Close()
+			cancel()
+			if readErr != nil {
+				markKeyFailure(p, key, http.StatusBadGateway, nil)
+				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
+				if i+1 < len(attempts) {
+					continue
+				}
+				return attemptResult{
+					Status:    http.StatusBadGateway,
+					Err:       readErr,
+					Retryable: ui+1 < len(upstreamsToTry),
+				}
+			}
 			rr = proxyCrossProtocolResponse(c, resp, head.Stream, inbound, upstreamProto, p, key, route, start, responseBody)
 		} else {
-			rr = proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start, responseBody)
+			// Same-protocol: pass resp with body still open for live streaming.
+			// proxySameProtocolResponse will close resp.Body and we cancel
+			// the context after it returns.
+			rr = proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start, nil)
+			cancel()
 		}
 
 		if rr.ResponseStarted {

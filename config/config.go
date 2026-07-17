@@ -37,6 +37,11 @@ type Config struct {
 	//   - JSON object: {"go":0.8,"default":1}
 	//   - comma list:  go=0.8,default=1
 	GroupMultipliers string
+
+	// PassthroughMode controls how unknown (unregistered) models are handled:
+	//   "go"       — forward to Go upstream (legacy behavior, NOT recommended)
+	//   "disabled" — return 404 for unknown models (DEFAULT, strict mode)
+	PassthroughMode string
 }
 
 var (
@@ -57,13 +62,36 @@ func Load() *Config {
 			DBPath:           envStr("DB_PATH", "./data/opencode-sw.db"),
 			UpstreamTimeout:  envInt("UPSTREAM_TIMEOUT", 0),
 			GoBaseURL:        strings.TrimRight(envStr("GO_BASE_URL", "https://opencode.ai/zen/go"), "/"),
-					OllamaBaseURL:    strings.TrimRight(envStr("OLLAMA_BASE_URL", "https://ollama.com"), "/"),
+			OllamaBaseURL:    strings.TrimRight(envStr("OLLAMA_BASE_URL", "https://ollama.com"), "/"),
 			ModelMappings:    envStr("MODEL_MAPPINGS", ""),
 			ModelMappingFile: envStr("MODEL_MAPPING_FILE", ""),
 			GroupMultipliers: envStr("GROUP_MULTIPLIERS", ""),
+			PassthroughMode:  envStr("PASSTHROUGH_MODE", "disabled"),
 		}
 	})
 	return cfg
+}
+
+// ValidateSecurity checks for insecure default configuration and returns an
+// error if the deployment is not production-safe. This should be called at
+// startup; the process should refuse to start if any check fails.
+//
+// Checks:
+//   - ADMIN_PASSWORD must not be the default "admin"
+//   - JWT_SECRET must not be the built-in default
+//   - JWT_SECRET must be at least 32 bytes
+func ValidateSecurity() error {
+	c := Get()
+	if c.AdminPassword == "admin" {
+		return fmt.Errorf("insecure configuration: ADMIN_PASSWORD is still the default 'admin' — set ADMIN_PASSWORD to a strong password")
+	}
+	if c.JWTSecret == "opencode-go-default-secret-change-me" {
+		return fmt.Errorf("insecure configuration: JWT_SECRET is still the built-in default — set JWT_SECRET to a random string of at least 32 bytes")
+	}
+	if len(c.JWTSecret) < 32 {
+		return fmt.Errorf("insecure configuration: JWT_SECRET must be at least 32 bytes (current: %d) — use a random string", len(c.JWTSecret))
+	}
+	return nil
 }
 
 // Get returns the already-loaded configuration (panics if Load was not called).

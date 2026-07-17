@@ -11,9 +11,21 @@ func TestResolvePassthroughFallback(t *testing.T) {
 	config.ReplaceModels(nil)
 	defer config.ReplaceModels(nil)
 
+	// Default (strict) mode: unknown model returns NotFound.
+	oldMode := config.Get().PassthroughMode
+	config.Get().PassthroughMode = "disabled"
+	defer func() { config.Get().PassthroughMode = oldMode }()
+
 	res := Resolve("unknown-model", config.ProtocolChat)
+	if !res.NotFound {
+		t.Fatalf("expected NotFound in strict mode, got NotFound=%v", res.NotFound)
+	}
+
+	// Legacy passthrough mode: unknown model forwards to Go.
+	config.Get().PassthroughMode = "go"
+	res = Resolve("unknown-model", config.ProtocolChat)
 	if !res.IsPassthrough {
-		t.Fatalf("expected passthrough, got routed=%v", res.IsPassthrough)
+		t.Fatalf("expected passthrough in legacy mode, got routed=%v", res.IsPassthrough)
 	}
 	if res.Route.ID != "unknown-model" {
 		t.Fatalf("expected ID passthrough, got %q", res.Route.ID)
