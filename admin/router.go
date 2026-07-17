@@ -542,19 +542,19 @@ func syncModels(c *gin.Context) {
 
 func upsertModel(c *gin.Context) {
 	var body struct {
-		ID            string              `json:"id"`
-		Name          *string             `json:"name"`
-		Upstream      config.Upstream     `json:"upstream"`
-		Upstreams     []config.Upstream   `json:"upstreams,omitempty"`
-		UpstreamGroups map[config.Upstream]string `json:"upstream_groups,omitempty"`
-		Protocol      *config.Protocol    `json:"protocol"`
-		RealModel     *string             `json:"real_model"`
-		Group         string              `json:"group"`
-		ContextLen    *int                `json:"context_len"`
-		Status        *int                `json:"status"`
-		Priority      *int                `json:"priority"`
-		Tags          []string            `json:"tags"`
-		Pricing       map[string]string   `json:"pricing"`
+		ID              string                    `json:"id"`
+		Name            *string                   `json:"name"`
+		Upstream        *config.Upstream           `json:"upstream"`
+		Upstreams       *[]config.Upstream         `json:"upstreams,omitempty"`
+		UpstreamGroups  *map[config.Upstream]string `json:"upstream_groups,omitempty"`
+		Protocol        *config.Protocol           `json:"protocol"`
+		RealModel       *string                    `json:"real_model"`
+		Group           string                     `json:"group"`
+		ContextLen      *int                       `json:"context_len"`
+		Status          *int                       `json:"status"`
+		Priority        *int                       `json:"priority"`
+		Tags            []string                   `json:"tags"`
+		Pricing         map[string]string           `json:"pricing"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -565,30 +565,51 @@ func upsertModel(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id and protocol are required"})
 		return
 	}
-	if body.Upstream == "" {
-		body.Upstream = config.UpstreamGo
+	upstream := config.UpstreamGo
+	if body.Upstream != nil {
+		upstream = *body.Upstream
 	}
-	if body.Upstream != config.UpstreamGo && body.Upstream != config.UpstreamOllama {
+	if upstream != config.UpstreamGo && upstream != config.UpstreamOllama {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only go and ollama upstreams are supported"})
 		return
 	}
 	if body.Group == "" {
-		if body.Upstream == config.UpstreamOllama {
+		if upstream == config.UpstreamOllama {
 			body.Group = "ollama"
 		} else {
 			body.Group = "go"
 		}
 	}
 	route := config.ModelRoute{
-		ID:             strings.TrimSpace(body.ID),
-		Upstream:       body.Upstream,
-		Upstreams:      body.Upstreams,
-		UpstreamGroups: body.UpstreamGroups,
-		Protocol:       *body.Protocol,
-		Group:          body.Group,
-		Status:         config.ModelStatusPtr(config.ModelStatusEnabled),
+		ID:       strings.TrimSpace(body.ID),
+		Upstream: upstream,
+		Protocol: *body.Protocol,
+		Group:    body.Group,
+		Status:   config.ModelStatusPtr(config.ModelStatusEnabled),
 	}
 	changed := []string{"protocol"}
+	if body.Upstream != nil {
+		changed = append(changed, "upstream")
+	}
+	if body.Upstreams != nil {
+		normalized, err := config.ValidateAndNormalizeUpstreams(*body.Upstreams, nil)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		route.Upstreams = normalized
+		changed = append(changed, "upstreams")
+	}
+	if body.UpstreamGroups != nil {
+		groups := *body.UpstreamGroups
+		_, err := config.ValidateAndNormalizeUpstreams(route.Upstreams, groups)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		route.UpstreamGroups = groups
+		changed = append(changed, "upstream_groups")
+	}
 	if body.Name != nil {
 		route.Name = strings.TrimSpace(*body.Name)
 		changed = append(changed, "name")
@@ -642,16 +663,17 @@ func updateModel(c *gin.Context) {
 	route := store.ModelRouteFromRow(row)
 
 	var body struct {
-		Name          *string             `json:"name"`
-		Upstreams     []config.Upstream   `json:"upstreams,omitempty"`
-		UpstreamGroups map[config.Upstream]string `json:"upstream_groups,omitempty"`
-		Protocol      *config.Protocol    `json:"protocol"`
-		RealModel     *string             `json:"real_model"`
-		ContextLen    *int                `json:"context_len"`
-		Status        *int                `json:"status"`
-		Priority      *int                `json:"priority"`
-		Tags          []string            `json:"tags"`
-		Pricing       map[string]string   `json:"pricing"`
+		Name            *string                    `json:"name"`
+		Upstream        *config.Upstream           `json:"upstream"`
+		Upstreams       *[]config.Upstream         `json:"upstreams,omitempty"`
+		UpstreamGroups  *map[config.Upstream]string `json:"upstream_groups,omitempty"`
+		Protocol        *config.Protocol           `json:"protocol"`
+		RealModel       *string                    `json:"real_model"`
+		ContextLen      *int                       `json:"context_len"`
+		Status          *int                       `json:"status"`
+		Priority        *int                       `json:"priority"`
+		Tags            []string                   `json:"tags"`
+		Pricing         map[string]string           `json:"pricing"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -662,12 +684,28 @@ func updateModel(c *gin.Context) {
 		route.Name = strings.TrimSpace(*body.Name)
 		changed = append(changed, "name")
 	}
+	if body.Upstream != nil {
+		route.Upstream = *body.Upstream
+		changed = append(changed, "upstream")
+	}
 	if body.Upstreams != nil {
-		route.Upstreams = body.Upstreams
+		normalized, err := config.ValidateAndNormalizeUpstreams(*body.Upstreams, nil)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		route.Upstreams = normalized
 		changed = append(changed, "upstreams")
 	}
 	if body.UpstreamGroups != nil {
-		route.UpstreamGroups = body.UpstreamGroups
+		groups := *body.UpstreamGroups
+		// Validate group keys against the (possibly normalized) upstreams.
+		_, err := config.ValidateAndNormalizeUpstreams(route.Upstreams, groups)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		route.UpstreamGroups = groups
 		changed = append(changed, "upstream_groups")
 	}
 	if body.Protocol != nil {

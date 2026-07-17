@@ -504,3 +504,210 @@ func TestSyncPreservesExplicitlyCustomizedUpstreams(t *testing.T) {
 		t.Fatalf("customized Upstreams overwritten: got %v, want [ollama]", got.Upstreams)
 	}
 }
+
+// TestSyncOllamaFailurePreservesExistingOllamaMembership verifies that when
+// the Ollama catalog fetch fails, existing routes with Ollama in their
+// upstreams do NOT lose the Ollama membership.
+func TestSyncOllamaFailurePreservesExistingOllamaMembership(t *testing.T) {
+	if err := store.InitForTest("file:sync_ollama_fail?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	// Route has both Go and Ollama (set by a previous sync, not customized).
+	existing := config.ModelRoute{
+		ID:        "glm-5.2",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "glm-5.2",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+	row := store.NewModelRouteRow(existing)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("save existing route: %v", err)
+	}
+
+	// Go succeeds, Ollama fails (returns 502).
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"glm-5.2"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("glm-5.2")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	// Ollama membership must be preserved despite the fetch failure.
+	hasOllama := false
+	for _, u := range got.Upstreams {
+		if u == config.UpstreamOllama {
+			hasOllama = true
+			break
+		}
+	}
+	if !hasOllama {
+		t.Fatalf("Ollama membership lost after failed fetch: upstreams=%v", got.Upstreams)
+	}
+	if len(got.Upstreams) != 2 {
+		t.Fatalf("expected 2 upstreams (preserved), got %v", got.Upstreams)
+	}
+}
+
+// TestSyncGoFailurePreservesExistingGoMembership verifies that when
+// the Go catalog fetch fails, existing routes with Go in their
+// upstreams do NOT lose the Go membership.
+func TestSyncGoFailurePreservesExistingGoMembership(t *testing.T) {
+	if err := store.InitForTest("file:sync_go_fail?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	// Route has both Go and Ollama (set by a previous sync, not customized).
+	existing := config.ModelRoute{
+		ID:        "glm-5.2",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "glm-5.2",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+	row := store.NewModelRouteRow(existing)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("save existing route: %v", err)
+	}
+
+	// Go fails, Ollama succeeds.
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"glm-5.2"}]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("glm-5.2")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	// Go membership must be preserved despite the fetch failure.
+	hasGo := false
+	for _, u := range got.Upstreams {
+		if u == config.UpstreamGo {
+			hasGo = true
+			break
+		}
+	}
+	if !hasGo {
+		t.Fatalf("Go membership lost after failed fetch: upstreams=%v", got.Upstreams)
+	}
+	if len(got.Upstreams) != 2 {
+		t.Fatalf("expected 2 upstreams (preserved), got %v", got.Upstreams)
+	}
+}
+
+// TestSyncSuccessfulEmptySourceRemovesMembership verifies that when a
+// provider's catalog fetch succeeds but returns empty, the provider is
+// removed from existing routes' upstreams.
+func TestSyncSuccessfulEmptySourceRemovesMembership(t *testing.T) {
+	if err := store.InitForTest("file:sync_empty_remove?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	// Route has both Go and Ollama (set by a previous sync, not customized).
+	existing := config.ModelRoute{
+		ID:        "glm-5.2",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "glm-5.2",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+	row := store.NewModelRouteRow(existing)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("save existing route: %v", err)
+	}
+
+	// Both succeed, but Ollama no longer serves this model.
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"glm-5.2"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("glm-5.2")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	// Ollama must be removed since its fetch succeeded with empty results.
+	if len(got.Upstreams) != 1 || got.Upstreams[0] != config.UpstreamGo {
+		t.Fatalf("expected only go upstream after authoritative empty result, got %v", got.Upstreams)
+	}
+}

@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -496,4 +497,41 @@ func sortModelRoutes(ms []ModelRoute) {
 		}
 		return ms[i].ID < ms[j].ID
 	})
+}
+
+// ValidUpstreams contains all recognized upstream names.
+var ValidUpstreams = []Upstream{UpstreamGo, UpstreamOllama}
+
+// IsValidUpstream returns true if the given upstream is recognized.
+func IsValidUpstream(u Upstream) bool {
+	return u == UpstreamGo || u == UpstreamOllama
+}
+
+// ValidateAndNormalizeUpstreams validates and deduplicates an upstream list.
+// Returns the deduplicated list (preserving original order) or an error.
+func ValidateAndNormalizeUpstreams(upstreams []Upstream, groups map[Upstream]string) ([]Upstream, error) {
+	seen := make(map[Upstream]bool)
+	out := make([]Upstream, 0, len(upstreams))
+	for _, u := range upstreams {
+		if !IsValidUpstream(u) {
+			return nil, fmt.Errorf("unknown upstream %q (valid: go, ollama)", u)
+		}
+		if seen[u] {
+			continue
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("at least one upstream is required")
+	}
+	for k, v := range groups {
+		if !IsValidUpstream(k) {
+			return nil, fmt.Errorf("unknown upstream group key %q (valid: go, ollama)", k)
+		}
+		if strings.TrimSpace(v) == "" {
+			return nil, fmt.Errorf("upstream group %q has empty value", k)
+		}
+	}
+	return out, nil
 }
