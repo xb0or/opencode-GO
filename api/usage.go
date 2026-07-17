@@ -29,11 +29,6 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 		if tok, ok := tokAny.(*store.Token); ok {
 			tokenID = tok.ID
 			tokenName = tok.Name
-			// Increment request counter for the token if it has a cap
-			if tok.MaxRequests > 0 {
-				store.DB().Model(&store.Token{}).Where("id = ?", tok.ID).
-					UpdateColumn("requests_used", gorm.Expr("requests_used + 1"))
-			}
 		}
 	}
 	if usage == nil {
@@ -83,6 +78,28 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 		Error:               errMsg,
 	}
 	_ = store.DB().Create(&entry).Error
+}
+
+// incrementRequestsUsed increments the request counter for the token
+// associated with this request. It should only be called once per client
+// request, on the final successful upstream attempt — not on intermediate
+// key-level or upstream-level retries.
+//
+// Semantics: This is called when result.Handled is true, which means the
+// response was committed to the client (ResponseStarted == true). Due to the
+// response handlers' early-return on resp.StatusCode >= 400, ResponseStarted
+// is only set for 2xx/3xx responses. Therefore, incrementRequestsUsed is only
+// called for successful responses — failed upstreams that trigger failover
+// do not consume a request count.
+func incrementRequestsUsed(c *gin.Context) {
+	if tokAny, exists := c.Get("token"); exists {
+		if tok, ok := tokAny.(*store.Token); ok {
+			if tok.MaxRequests > 0 {
+				store.DB().Model(&store.Token{}).Where("id = ?", tok.ID).
+					UpdateColumn("requests_used", gorm.Expr("requests_used + 1"))
+			}
+		}
+	}
 }
 
 func usageRequestID(c *gin.Context, key *store.Key, start time.Time) string {

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/xb0or/opencode-GO/config"
+	"github.com/xb0or/opencode-GO/modelsync"
 	"github.com/xb0or/opencode-GO/pool"
 	"github.com/xb0or/opencode-GO/store"
 )
@@ -457,4 +459,211 @@ func signedAdminToken(t *testing.T) string {
 		t.Fatalf("sign token: %v", err)
 	}
 	return signed
+}
+
+// TestAdminCreatedUpstreamConfigSurvivesSync verifies that a model created
+// via POST /admin/models with explicit upstream/upstreams retains those
+// values after a model sync (they are marked as customized).
+func TestAdminCreatedUpstreamConfigSurvivesSync(t *testing.T) {
+	if err := store.InitForTest("file:admin_upstream_sync?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	MountWithPicker(r.Group("/admin"), pool.NewPicker())
+
+	// Create a model with explicit upstream and upstreams.
+	body := bytes.NewBufferString(`{"id":"test-model","protocol":"chat","upstream":"ollama","upstreams":["ollama","go"]}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/models", body)
+	req.Header.Set("Authorization", "Bearer "+signedAdminToken(t))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create model: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// Run a sync that would normally overwrite upstreams.
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"test-model"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := modelsync.Sync(context.Background(), modelsync.Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("test-model")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	if got.Upstream != config.UpstreamOllama {
+		t.Fatalf("Upstream overwritten: got %q, want %q", got.Upstream, config.UpstreamOllama)
+	}
+	if len(got.Upstreams) != 2 || got.Upstreams[0] != config.UpstreamOllama || got.Upstreams[1] != config.UpstreamGo {
+		t.Fatalf("Upstreams overwritten: got %v, want [ollama go]", got.Upstreams)
+	}
+}
+
+// TestAdminCreatedUpstreamGroupsSurviveSync verifies that upstream_groups
+// set via POST /admin/models are preserved after a model sync.
+func TestAdminCreatedUpstreamGroupsSurviveSync(t *testing.T) {
+	if err := store.InitForTest("file:admin_groups_sync?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	MountWithPicker(r.Group("/admin"), pool.NewPicker())
+
+	// Create a model with upstream_groups.
+	body := bytes.NewBufferString(`{"id":"test-model-groups","protocol":"chat","upstream":"go","upstreams":["go","ollama"],"upstream_groups":{"go":"premium-go","ollama":"premium-ollama"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/models", body)
+	req.Header.Set("Authorization", "Bearer "+signedAdminToken(t))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create model: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// Run a sync that would normally clear upstream_groups.
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"test-model-groups"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := modelsync.Sync(context.Background(), modelsync.Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("test-model-groups")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	if got.UpstreamGroups == nil {
+		t.Fatal("UpstreamGroups cleared after sync")
+	}
+	if got.UpstreamGroups[config.UpstreamGo] != "premium-go" {
+		t.Fatalf("UpstreamGroups[go] overwritten: got %q, want %q", got.UpstreamGroups[config.UpstreamGo], "premium-go")
+	}
+	if got.UpstreamGroups[config.UpstreamOllama] != "premium-ollama" {
+		t.Fatalf("UpstreamGroups[ollama] overwritten: got %q, want %q", got.UpstreamGroups[config.UpstreamOllama], "premium-ollama")
+	}
+}
+
+// TestAdminPatchedUpstreamConfigSurvivesSync verifies that upstream/upstreams
+// updated via PATCH /admin/models/:id are preserved after a model sync.
+func TestAdminPatchedUpstreamConfigSurvivesSync(t *testing.T) {
+	if err := store.InitForTest("file:admin_patch_upstream_sync?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	MountWithPicker(r.Group("/admin"), pool.NewPicker())
+
+	// Create a model with default upstream (go).
+	body := bytes.NewBufferString(`{"id":"test-patch-model","protocol":"chat"}`)
+	req := httptest.NewRequest(http.MethodPost, "/admin/models", body)
+	req.Header.Set("Authorization", "Bearer "+signedAdminToken(t))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("create model: status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	// PATCH to change upstream to ollama and set upstreams.
+	body2 := bytes.NewBufferString(`{"upstream":"ollama","upstreams":["ollama","go"]}`)
+	req2 := httptest.NewRequest(http.MethodPatch, "/admin/models/test-patch-model", body2)
+	req2.Header.Set("Authorization", "Bearer "+signedAdminToken(t))
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("patch model: status=%d body=%s", w2.Code, w2.Body.String())
+	}
+
+	// Run a sync that would normally overwrite upstreams.
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"test-patch-model"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := modelsync.Sync(context.Background(), modelsync.Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("test-patch-model")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	if got.Upstream != config.UpstreamOllama {
+		t.Fatalf("Upstream overwritten after patch: got %q, want %q", got.Upstream, config.UpstreamOllama)
+	}
+	if len(got.Upstreams) != 2 || got.Upstreams[0] != config.UpstreamOllama || got.Upstreams[1] != config.UpstreamGo {
+		t.Fatalf("Upstreams overwritten after patch: got %v, want [ollama go]", got.Upstreams)
+	}
 }

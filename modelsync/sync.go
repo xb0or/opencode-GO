@@ -83,6 +83,7 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 	type fetchResult struct {
 		source  string
 		models  []sourceModel
+		success bool
 		warning string
 	}
 
@@ -91,28 +92,28 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 	go func() {
 		models, err := fetchOpenCodeModels(ctx, client, opts.OpenCodeModelsURL)
 		if err != nil {
-			results <- fetchResult{source: "go", warning: "opencode: " + err.Error()}
+			results <- fetchResult{source: "go", success: false, warning: "opencode: " + err.Error()}
 			return
 		}
 		out := make([]sourceModel, 0, len(models))
 		for _, m := range models {
 			out = append(out, sourceModel{ID: m.ID, Name: m.Name, Upstream: config.UpstreamGo})
 		}
-		results <- fetchResult{source: "go", models: out}
+		results <- fetchResult{source: "go", success: true, models: out}
 	}()
 
 	// Ollama upstream
 	go func() {
 		models, err := fetchOllamaModels(ctx, client, opts.OllamaModelsURL)
 		if err != nil {
-			results <- fetchResult{source: "ollama", warning: "ollama: " + err.Error()}
+			results <- fetchResult{source: "ollama", success: false, warning: "ollama: " + err.Error()}
 			return
 		}
 		out := make([]sourceModel, 0, len(models))
 		for _, m := range models {
 			out = append(out, sourceModel{ID: m.Name, Name: m.Name, Upstream: config.UpstreamOllama})
 		}
-		results <- fetchResult{source: "ollama", models: out}
+		results <- fetchResult{source: "ollama", success: true, models: out}
 	}()
 
 	// OpenRouter (for metadata enrichment, non-blocking)
@@ -120,35 +121,38 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 	go func() {
 		orm, err := fetchOpenRouterModels(ctx, client, opts.OpenRouterModelsURL)
 		if err != nil {
-			results <- fetchResult{source: "openrouter", warning: "openrouter: " + err.Error()}
+			results <- fetchResult{source: "openrouter", success: false, warning: "openrouter: " + err.Error()}
 			return
 		}
-		results <- fetchResult{source: "openrouter", models: nil}
+		results <- fetchResult{source: "openrouter", success: true, models: nil}
 		openrouterModels = orm
 	}()
 
 	// Collect results
 	var goModels, ollamaModels []sourceModel
+	var goFetched, ollamaFetched bool
 	result := Result{}
 	for i := 0; i < 3; i++ {
 		r := <-results
 		switch r.source {
 		case "go":
-			if r.warning != "" {
+			if !r.success {
 				result.Warnings = append(result.Warnings, r.warning)
 			} else {
 				goModels = r.models
 				result.OpenCodeCount = len(goModels)
 			}
+			goFetched = r.success
 		case "ollama":
-			if r.warning != "" {
+			if !r.success {
 				result.Warnings = append(result.Warnings, r.warning)
 			} else {
 				ollamaModels = r.models
 				result.OllamaCount = len(ollamaModels)
 			}
+			ollamaFetched = r.success
 		case "openrouter":
-			if r.warning != "" {
+			if !r.success {
 				result.Warnings = append(result.Warnings, r.warning)
 			} else {
 				result.OpenRouterCount = len(openrouterModels)
@@ -179,7 +183,7 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		seen[id] = true
 
 		row, existed := existingByID[id]
-		route := buildMergedRoute(sm, row, existed)
+		route := buildMergedRoute(sm, row, existed, goFetched, ollamaFetched)
 
 		if matched, matchedBy, ok := config.MatchOpenRouterModel(route, openrouterModels); ok {
 			config.ApplyOpenRouterMetadata(&route, matched, matchedBy)
@@ -262,17 +266,16 @@ func appendUniqueUpstream(slice []config.Upstream, u config.Upstream) []config.U
 
 // buildMergedRoute constructs a ModelRoute from a merged sourceModel entry,
 // preserving admin-customized fields from the existing DB row.
-func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed bool) config.ModelRoute {
-	// Determine primary upstream and group
-	primaryUpstream := sm.Upstreams[0]
-	// Prefer Go as primary when available (Go has richer metadata)
-	for _, u := range sm.Upstreams {
-		if u == config.UpstreamGo {
-			primaryUpstream = config.UpstreamGo
-			break
-		}
-	}
+// When a provider's catalog fetch failed (goFetched/ollamaFetched false),
+// the existing upstream membership for that provider is preserved to
+// prevent temporary fetch failures from deleting providers.
+func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed bool, goFetched, ollamaFetched bool) config.ModelRoute {
+	// Determine primary upstream and group from the merged source.
+	primaryUpstream := config.UpstreamGo
 	group := "go"
+	if len(sm.Upstreams) > 0 {
+		primaryUpstream = sm.Upstreams[0]
+	}
 	if primaryUpstream == config.UpstreamOllama {
 		group = "ollama"
 	}
@@ -289,7 +292,7 @@ func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed b
 		Name:      sm.Name,
 		Upstream:  primaryUpstream,
 		Upstreams: sm.Upstreams,
-		Protocol:  inferProtocol(sm.ID),
+		Protocol:  inferProtocol(sm.ID, nil),
 		RealModel: sm.ID,
 		Group:     group,
 		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
@@ -305,10 +308,88 @@ func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed b
 
 	route := store.ModelRouteFromRow(existingRow)
 	route.ID = sm.ID
-	route.Upstream = primaryUpstream
-	route.Upstreams = sm.Upstreams
-	if strings.TrimSpace(route.Group) == "" || route.Group == "ollama" && primaryUpstream == config.UpstreamGo {
-		route.Group = group
+	// Update Upstream/Upstreams from the merged source unless the admin
+	// explicitly customized them. This allows automatic discovery of new
+	// providers (e.g. a model that was Go-only is now also on Ollama) and
+	// removal of providers that no longer serve the model.
+	// When a provider's catalog fetch failed, preserve the existing
+	// membership for that provider — a temporary fetch failure should
+	// not be treated as authoritative model removal.
+	if !config.IsModelFieldCustomized(route, "upstream") {
+		if !upstreamFetchFailed(primaryUpstream, goFetched, ollamaFetched) {
+			route.Upstream = primaryUpstream
+		}
+		// When the primary provider's fetch failed, keep existing upstream.
+	}
+	// When the primary upstream changed and Group is not admin-customized,
+	// update Group to match the new upstream's default group. This prevents
+	// stale Group values (e.g. "go") from persisting after the upstream
+	// switched to "ollama".
+	if !config.IsModelFieldCustomized(route, "group") {
+		if !upstreamFetchFailed(primaryUpstream, goFetched, ollamaFetched) {
+			route.Group = group
+		}
+	}
+	if !config.IsModelFieldCustomized(route, "upstreams") {
+		// Per-provider membership: each provider's presence in the merged
+		// result is authoritative only when its catalog fetch succeeded.
+		// When a fetch failed, preserve the existing membership for that
+		// provider — a temporary fetch failure should not be treated as
+		// authoritative model removal.
+		mergedHasGo := false
+		mergedHasOllama := false
+		for _, u := range sm.Upstreams {
+			if u == config.UpstreamGo {
+				mergedHasGo = true
+			}
+			if u == config.UpstreamOllama {
+				mergedHasOllama = true
+			}
+		}
+		existingHasGo := false
+		existingHasOllama := false
+		for _, u := range route.Upstreams {
+			if u == config.UpstreamGo {
+				existingHasGo = true
+			}
+			if u == config.UpstreamOllama {
+				existingHasOllama = true
+			}
+		}
+
+		// Build the final upstreams list: for each provider, use the merged
+		// result if its fetch succeeded, otherwise preserve the existing state.
+		var finalUpstreams []config.Upstream
+		for _, candidate := range []config.Upstream{config.UpstreamGo, config.UpstreamOllama} {
+			mergedHas := false
+			existingHas := false
+			fetchSucceeded := false
+			switch candidate {
+			case config.UpstreamGo:
+				mergedHas = mergedHasGo
+				existingHas = existingHasGo
+				fetchSucceeded = goFetched
+			case config.UpstreamOllama:
+				mergedHas = mergedHasOllama
+				existingHas = existingHasOllama
+				fetchSucceeded = ollamaFetched
+			}
+			if fetchSucceeded {
+				// Authoritative: include if merged result says so.
+				if mergedHas {
+					finalUpstreams = append(finalUpstreams, candidate)
+				}
+			} else {
+				// Fetch failed: preserve existing membership.
+				if existingHas {
+					finalUpstreams = append(finalUpstreams, candidate)
+				}
+			}
+		}
+		route.Upstreams = finalUpstreams
+	}
+	if !config.IsModelFieldCustomized(route, "upstream_groups") {
+		route.UpstreamGroups = nil
 	}
 	if route.Status == nil {
 		route.Status = config.ModelStatusPtr(config.ModelStatusEnabled)
@@ -345,12 +426,6 @@ func ReloadRuntimeFromStore() error {
 	}
 	routes := make([]config.ModelRoute, 0, len(rows))
 	for _, row := range rows {
-		if row.Upstream != string(config.UpstreamGo) && row.Upstream != string(config.UpstreamOllama) {
-			continue
-		}
-		if row.Group != "go" && row.Group != "ollama" {
-			continue
-		}
 		routes = append(routes, store.ModelRouteFromRow(row))
 	}
 	config.ReplaceModels(routes)
@@ -449,7 +524,10 @@ func fetchJSON(ctx context.Context, client *http.Client, url string, dst any) er
 // inferProtocol guesses the upstream protocol from the model id when no
 // DefaultModels seed is available. minimax-* and qwen* use Messages; all
 // others use Chat.
-func inferProtocol(id string) config.Protocol {
+func inferProtocol(id string, defaults map[string]config.ModelRoute) config.Protocol {
+	if def, ok := defaults[id]; ok && def.Protocol != "" {
+		return def.Protocol
+	}
 	lower := strings.ToLower(id)
 	if strings.HasPrefix(lower, "minimax-") || strings.HasPrefix(lower, "qwen") {
 		return config.ProtocolMessages
@@ -470,4 +548,17 @@ func fallbackTags(route config.ModelRoute) []string {
 		tags = append(tags, "vision")
 	}
 	return config.NormalizeModelTags(tags)
+}
+
+// upstreamFetchFailed returns true when the given upstream's catalog fetch
+// did not succeed, meaning the merged result is incomplete for that provider.
+func upstreamFetchFailed(upstream config.Upstream, goFetched, ollamaFetched bool) bool {
+	switch upstream {
+	case config.UpstreamGo:
+		return !goFetched
+	case config.UpstreamOllama:
+		return !ollamaFetched
+	default:
+		return true
+	}
 }

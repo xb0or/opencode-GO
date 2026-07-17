@@ -57,6 +57,7 @@ type ModelRouteRow struct {
 	Name                    string     `gorm:"size:128" json:"name"`
 	Upstream                string     `gorm:"size:32;not null" json:"upstream"`
 	UpstreamsJSON           string     `gorm:"type:text" json:"upstreams_json,omitempty"`
+	UpstreamGroupsJSON      string     `gorm:"type:text" json:"upstream_groups_json,omitempty"`
 	Protocol                string     `gorm:"size:32;not null" json:"protocol"`
 	RealModel               string     `gorm:"size:255;not null" json:"real_model"`
 	Group                   string     `gorm:"size:32;not null" json:"group"`
@@ -68,6 +69,7 @@ type ModelRouteRow struct {
 	PricingJSON             string     `gorm:"type:text" json:"pricing_json,omitempty"`
 	ArchitectureJSON        string     `gorm:"type:text" json:"architecture_json,omitempty"`
 	SupportedParametersJSON string     `gorm:"type:text" json:"supported_parameters_json,omitempty"`
+	TargetsJSON            string     `gorm:"type:text" json:"targets_json,omitempty"`
 	OpenRouterID            string     `gorm:"size:255" json:"openrouter_id,omitempty"`
 	OpenRouterName          string     `gorm:"size:255" json:"openrouter_name,omitempty"`
 	OpenRouterMatchedBy     string     `gorm:"size:64" json:"openrouter_matched_by,omitempty"`
@@ -180,6 +182,7 @@ func ModelRouteFromRow(r ModelRouteRow) config.ModelRoute {
 		Name:                strings.TrimSpace(r.Name),
 		Upstream:            config.Upstream(strings.TrimSpace(r.Upstream)),
 		Upstreams:           decodeUpstreamSlice(r.UpstreamsJSON),
+		UpstreamGroups:      decodeUpstreamGroups(r.UpstreamGroupsJSON),
 		Protocol:            config.Protocol(strings.TrimSpace(r.Protocol)),
 		RealModel:           strings.TrimSpace(r.RealModel),
 		Group:               strings.TrimSpace(r.Group),
@@ -196,6 +199,13 @@ func ModelRouteFromRow(r ModelRouteRow) config.ModelRoute {
 		KnowledgeCutoff:     r.KnowledgeCutoff,
 		IsCustomized:        r.IsCustomized,
 		CustomizedFields:    config.NormalizeCustomizedFields(decodeStringSlice(r.CustomizedFieldsJSON)),
+	}
+	// Deserialize per-upstream targets.
+	if strings.TrimSpace(r.TargetsJSON) != "" {
+		var targets map[config.Upstream]config.UpstreamTarget
+		if err := json.Unmarshal([]byte(r.TargetsJSON), &targets); err == nil {
+			route.Targets = targets
+		}
 	}
 	if strings.TrimSpace(r.ArchitectureJSON) != "" {
 		var arch config.ModelArchitecture
@@ -253,6 +263,7 @@ func NewModelRouteRow(m config.ModelRoute) ModelRouteRow {
 		Name:                    strings.TrimSpace(m.Name),
 		Upstream:                string(m.Upstream),
 		UpstreamsJSON:           encodeUpstreamSlice(m.Upstreams),
+		UpstreamGroupsJSON:      encodeUpstreamGroups(m.UpstreamGroups),
 		Protocol:                string(m.Protocol),
 		RealModel:               strings.TrimSpace(m.RealModel),
 		Group:                   strings.TrimSpace(m.Group),
@@ -264,6 +275,7 @@ func NewModelRouteRow(m config.ModelRoute) ModelRouteRow {
 		PricingJSON:             encodeJSON(m.Pricing),
 		ArchitectureJSON:        encodeJSON(m.Architecture),
 		SupportedParametersJSON: encodeJSON(m.SupportedParameters),
+		TargetsJSON:            encodeJSON(m.Targets),
 		OpenRouterID:            m.OpenRouterID,
 		OpenRouterName:          m.OpenRouterName,
 		OpenRouterMatchedBy:     m.OpenRouterMatchedBy,
@@ -366,6 +378,29 @@ func encodeUpstreamSlice(upstreams []config.Upstream) string {
 	}
 	b, err := json.Marshal(names)
 	if err != nil || string(b) == "null" || string(b) == "[]" {
+		return ""
+	}
+	return string(b)
+}
+
+func decodeUpstreamGroups(raw string) map[config.Upstream]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out map[config.Upstream]string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func encodeUpstreamGroups(groups map[config.Upstream]string) string {
+	if len(groups) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(groups)
+	if err != nil {
 		return ""
 	}
 	return string(b)

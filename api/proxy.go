@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -41,31 +40,67 @@ func proxyResponses(p *pool.Picker) gin.HandlerFunc {
 	}
 }
 
+// attemptResult is the structured return value from a single upstream attempt.
+// The outer loop is the sole writer of client responses — helpers must not
+// write to the client directly.
+type attemptResult struct {
+	// Response is set when the upstream returned a response that should be
+	// forwarded to the client (success or last-upstream error).
+	Response *http.Response
+
+	// Status is the HTTP status code from the upstream (or a synthetic one).
+	Status int
+
+	// Err is set when a non-recoverable error occurred.
+	Err error
+
+	// ErrorType is an optional explicit error type string (e.g. "conversion_error").
+	// When set, it takes precedence over the status-based error type mapping.
+	ErrorType string
+
+	// Retryable indicates whether the caller should try the next upstream.
+	Retryable bool
+
+	// Terminal indicates that the request should be aborted immediately
+	// (e.g., client disconnected). No further upstreams should be tried.
+	Terminal bool
+
+	// Handled indicates that a successful response was written to the client.
+	Handled bool
+}
+
 // proxyRequest is the shared handler with full cross-protocol conversion.
 //
 // NOTE(stability): This function is intentionally the ONLY orchestrator in
 // proxy.go. It delegates to:
-//   - decode.go         — request body parsing
-//   - internal/router/  — model resolution & body rewriting
-//   - protocol/         — request/response conversion
-//   - pool/             — key picking & failure tracking
-//   - stream.go         — response streaming (same/cross protocol)
-//   - usage.go          — usage accounting & cost estimation
+//   - decode.go             — request body parsing
+//   - internal/router/      — model resolution & body rewriting
+//   - protocol/             — request/response conversion
+//   - pool/                 — key picking & failure tracking
+//   - stream.go             — response streaming (same/cross protocol)
+//   - usage.go              — usage accounting & cost estimation
+//
 // Do NOT add business logic here — it belongs in the layer above.
 //
 // Flow:
 //  1. Read & parse the client body to find the requested model.
 //  2. Resolve the model route.
-//  3. If the inbound protocol differs from the upstream protocol, convert the
-//     request body through the IR intermediate representation.
-//  4. Pick a KEY from the model's group.
-//  5. Forward to the upstream with the KEY injected.
-//  6. If cross-protocol: buffer the upstream response and convert it back.
-//     If same-protocol: stream verbatim.
-//  7. Bookkeeping: mark the KEY success/failure, write a usage log.
+//  3. For each upstream in the failover list:
+//     a. Determine the upstream's key-pool group and re-check token permission.
+//     b. Convert the request body from the inbound protocol to the upstream
+//        protocol (if different), starting from the original inbound body.
+//     c. Rewrite the model field, enable stream options, strip tool_choice.
+//     d. Pick a KEY from the upstream's group.
+//     e. Forward to the upstream with the KEY injected.
+//     f. If cross-protocol: buffer the upstream response and convert it back.
+//        If same-protocol: stream verbatim.
+//     g. Bookkeeping: mark the KEY success/failure, write a usage log.
+//  4. If all upstreams fail, return 502.
 func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstreamPath string) {
 	start := time.Now()
 
+	// Read the original inbound body — this is immutable and used as the
+	// starting point for per-upstream conversion.
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
@@ -74,7 +109,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	_ = c.Request.Body.Close()
 
 	head := parseRequestBody(c.Request.URL.Path, body)
-	upstreamBody := head.Body
+	originalBody := head.Body
 
 	resolution := router.Resolve(head.Model, inbound)
 	route := resolution.Route
@@ -85,100 +120,182 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		return
 	}
 
-	if tokAny, exists := c.Get("token"); exists {
-		if tok, ok := tokAny.(*store.Token); ok && !pool.GroupAllowed(tok, route.Group) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error": gin.H{
-					"type":    "permission_denied",
-					"message": "this token is not allowed to use group: " + route.Group,
-				},
-			})
-			return
-		}
-	}
-
-	// Stash group for logging/debugging after the model route is known.
+	// Stash the route's original group for logging/debugging.
+	// The actual group used per-upstream is resolved inside the failover loop.
 	c.Set("group", route.Group)
 
-	// Ollama upstream: dispatch to a fully self-contained handler that owns
-	// the entire request lifecycle — model rewrite, cross-protocol conversion
-	// (Messages/Responses → Chat), key picking, transparent reverse proxy,
-	// and usage bookkeeping. Placing this BEFORE the Go-specific logic avoids
-	// double PickAttempts / rewriteModel / ConvertRequest.
-	if route.Upstream == config.UpstreamOllama {
-		proxyOllamaRequest(c, p, route, inbound, upstreamBody, head, start)
-		return
+	// Save the original route before the failover loop so we can fall back
+	// to the original Group when no explicit UpstreamGroups mapping exists.
+	baseRoute := route
+
+	// -----------------------------------------------------------------------
+	// Multi-upstream failover loop
+	// -----------------------------------------------------------------------
+	// Try each upstream in config order. The first one that succeeds wins.
+	// On failure (network error, 4xx/5xx status) try the next upstream.
+	// Each upstream is tried at most once — no circular retry.
+	// SSE streaming that has already started sending data is never switched.
+	upstreamsToTry := route.Upstreams
+	if len(upstreamsToTry) == 0 {
+		upstreamsToTry = []config.Upstream{route.Upstream}
 	}
+	var lastResult attemptResult
+	var attemptedAny bool
 
-	// Cross-protocol request conversion.
-	// If the inbound protocol differs from the upstream model's protocol,
-	// convert the request body through the IR.
-	upstreamProto := route.Protocol
-	crossProtocol := routed && head.HasModel && inbound != upstreamProto
+	for ui, currentUpstream := range upstreamsToTry {
+		// Resolve the key-pool group for this upstream.
+		// When no explicit UpstreamGroups mapping exists and this upstream
+		// is the original primary upstream, fall back to baseRoute.Group
+		// for backward compatibility with old {Group: "premium"} configs.
+		upstreamGroup := route.UpstreamGroup(currentUpstream)
+		if upstreamGroup == string(currentUpstream) && currentUpstream == baseRoute.Upstream && baseRoute.Group != "" {
+			upstreamGroup = baseRoute.Group
+		}
 
-	if crossProtocol {
-		converted, err := protocol.ConvertRequest(inbound, upstreamProto, upstreamBody)
-		if err != nil {
-			writeOpenAIError(c, http.StatusBadRequest, "conversion_error",
-				fmt.Sprintf("failed to convert request from %s to %s: %v", inbound, upstreamProto, err))
+		// Check token permission for this upstream's resolved group.
+		// Each upstream may map to a different group via UpstreamGroups,
+		// so we must re-check every iteration.
+		// Permission-denied upstreams are silently skipped — they do NOT
+		// overwrite lastResult so a real upstream failure is preserved.
+		if tokAny, exists := c.Get("token"); exists {
+			if tok, ok := tokAny.(*store.Token); ok && !pool.GroupAllowed(tok, upstreamGroup) {
+				if ui+1 < len(upstreamsToTry) {
+					continue
+				}
+				// Last upstream and no upstream was ever attempted — return 403.
+				if !attemptedAny {
+					writeOpenAIError(c, http.StatusForbidden, "permission_denied",
+						"this token is not allowed to use group: "+upstreamGroup)
+					return
+				}
+				// A real upstream was attempted — fall through to return its result.
+				break
+			}
+		}
+		attemptedAny = true
+		route.Group = upstreamGroup
+
+		// --------------- Ollama upstream ---------------
+		if currentUpstream == config.UpstreamOllama {
+			// Pass the original body — proxyOllamaRequest handles all
+			// conversion internally. Do NOT call buildUpstreamBody here
+			// to avoid double conversion (the outer loop would convert
+			// to Chat, then the helper would try to convert again).
+			result := proxyOllamaRequest(c, p, route, inbound, originalBody, head, start)
+			if result.Terminal {
+				// Client disconnected — stop immediately.
+				return
+			}
+			if result.Handled {
+				incrementRequestsUsed(c)
+				return
+			}
+			lastResult = result
+			if result.Retryable && ui+1 < len(upstreamsToTry) {
+				continue
+			}
+			break
+		}
+
+		// --------------- Go upstream ---------------
+		result := proxyGoUpstream(c, p, route, inbound, head, originalBody, start, upstreamPath, currentUpstream, ui, upstreamsToTry, upstreamGroup)
+		if result.Terminal {
 			return
 		}
-		upstreamBody = converted
-		// The converted body may have a different stream field; re-parse.
-		var h struct {
-			Stream bool `json:"stream"`
+		if result.Handled {
+			incrementRequestsUsed(c)
+			return
 		}
-		_ = json.Unmarshal(upstreamBody, &h)
-		head.Stream = h.Stream
+		lastResult = result
+		if result.Retryable {
+			continue
+		}
+		break
 	}
 
-	attempts, err := p.PickAttempts(route.Group)
-	if err != nil {
-		writeOpenAIError(c, http.StatusServiceUnavailable, "no_upstream_key_error",
-			"no available upstream key for group "+route.Group)
+	// All upstreams failed. If the last upstream returned a real error response
+	// (not a synthetic 502), preserve its control headers (Retry-After,
+	// RateLimit-*, etc.) but use a generic error message for the body to avoid
+	// leaking provider/channel details. Representation headers (Content-Length,
+	// Content-Encoding, etc.) are deliberately NOT copied — they describe the
+	// upstream's body, not the replacement body we will write.
+	if lastResult.Response != nil {
+		copyControlHeaders(c, lastResult.Response)
+		_ = lastResult.Response.Body.Close()
+		writeOpenAIError(c, lastResult.Status, upstreamErrorType(lastResult.Status), genericUpstreamMessage(lastResult.Status))
 		return
 	}
+	if lastResult.Err != nil {
+		errType := lastResult.ErrorType
+		if errType == "" {
+			errType = "upstream_error"
+		}
+		writeOpenAIError(c, lastResult.Status, errType, genericUpstreamMessage(lastResult.Status))
+		return
+	}
+	// No upstream was ever attempted — all were skipped due to permission.
+	if !attemptedAny {
+		writeOpenAIError(c, http.StatusForbidden, "permission_denied",
+			"this token is not allowed to use any upstream group")
+		return
+	}
+	writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
+}
 
-	// Rewrite the model field in the body to the upstream's real model id.
-	rewritten, ok := router.RewriteRequestModel(upstreamBody, route.RealModel)
-	if ok {
-		upstreamBody = rewritten
-	}
-	if rewritten, ok := router.EnableRequestStreamUsage(upstreamBody, upstreamProto, head.Stream); ok {
-		upstreamBody = rewritten
-	}
-	// Reasoning/thinking models (e.g. DeepSeek) reject non-auto tool_choice
-	// values while thinking mode is active. Strip tool_choice to avoid an
-	// HTTP 400 from the upstream before the request is sent.
-	if upstreamProto == config.ProtocolChat {
-		if stripped, ok := protocol.StripToolChoiceForReasoning(upstreamBody, route.RealModel); ok {
-			upstreamBody = stripped
+// proxyGoUpstream handles a single Go upstream attempt, returning an
+// attemptResult. It does NOT write to the client directly — the outer
+// loop is the sole response writer.
+func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
+	inbound config.Protocol, head requestHead, originalBody []byte, start time.Time,
+	upstreamPath string, currentUpstream config.Upstream, ui int, upstreamsToTry []config.Upstream,
+	upstreamGroup string) attemptResult {
+
+	// Build per-upstream body from the original inbound body.
+	upstreamProto := route.TargetProtocol(currentUpstream)
+	upstreamBody := buildUpstreamBody(originalBody, route, inbound, head, upstreamPath, upstreamProto, currentUpstream)
+	if upstreamBody == nil {
+		return attemptResult{
+			Status:    http.StatusBadRequest,
+			Err:       errBodyConversion,
+			ErrorType: "conversion_error",
+			Retryable: false,
 		}
 	}
 
-	// Determine the upstream endpoint path.  If the client called /v1/messages
-	// but the model speaks "chat" upstream, we must hit /v1/chat/completions.
-	actualUpstreamPath := upstreamPath
-	if crossProtocol {
-		actualUpstreamPath = upstreamPathFor(upstreamProto)
+	baseURL := config.BaseURLFor(currentUpstream)
+	// Use upstreamPathFor to ensure the URL path matches the target
+	// protocol, not the inbound path. This is critical for cross-protocol
+	// requests (e.g. inbound Messages → Go upstream speaking Chat).
+	target := baseURL + upstreamPathFor(upstreamProto)
+
+	attempts, err := p.PickAttempts(upstreamGroup)
+	if err != nil {
+		return attemptResult{
+			Status:    http.StatusServiceUnavailable,
+			Err:       err,
+			Retryable: ui+1 < len(upstreamsToTry),
+		}
 	}
 
-	baseURL := config.BaseURLFor(route.Upstream)
-	target := baseURL + actualUpstreamPath
-
-	ctx, cancel := upstreamRequestContext(c.Request.Context(), head.Stream)
-	defer cancel()
-
-	var lastErrMsg string
 	for i := range attempts {
 		key := &attempts[i]
 		p.MarkUsed(key.ID)
 
+		// Create a fresh timeout context per key attempt so a timeout
+		// on one key does not poison the context for subsequent keys.
+		// Cancel immediately when this iteration ends (not deferred to
+		// function return) to avoid accumulating timers across keys.
+		ctx, cancel := upstreamRequestContext(c.Request.Context(), head.Stream)
+
 		req, err := http.NewRequestWithContext(ctx, c.Request.Method, target, bytes.NewReader(upstreamBody))
 		if err != nil {
+			cancel()
 			markAndLog(c, p, key, route, inbound, http.StatusInternalServerError, start, head.Stream, nil, err.Error())
-			writeOpenAIError(c, http.StatusInternalServerError, "internal_error", "failed to build upstream request")
-			return
+			return attemptResult{
+				Status:    http.StatusInternalServerError,
+				Err:       err,
+				Retryable: false,
+			}
 		}
 		copyForwardHeaders(req.Header, c.Request.Header)
 		setContentLength(req, len(upstreamBody))
@@ -187,63 +304,185 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		upstreamClient := upstream.NewClientForProxy(key.ProxyURL)
 		resp, err := upstreamClient.Do(req)
 		if err != nil {
-			lastErrMsg = "failed to reach upstream: " + err.Error()
-			if status, errType, message, ok := classifyProxyContextError(err); ok {
-				lastErrMsg = message
+			cancel()
+			if status, _, message, ok := classifyProxyContextError(err); ok {
 				markAndLog(c, p, key, route, inbound, status, start, head.Stream, nil, message)
-				if i+1 < len(attempts) && status != statusClientClosedRequest {
+				if status == statusClientClosedRequest {
+					return attemptResult{Terminal: true}
+				}
+				if i+1 < len(attempts) {
 					continue
 				}
-				writeOpenAIError(c, status, errType, message)
-				return
+				return attemptResult{
+					Status:    status,
+					Err:       err,
+					Retryable: ui+1 < len(upstreamsToTry),
+				}
 			}
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
+			lastErrMsg := "failed to reach upstream: " + err.Error()
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, lastErrMsg)
 			if i+1 < len(attempts) {
 				continue
 			}
-			// Don't expose the raw network error (which may contain the
-			// upstream host/URL) to the client.
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
-			return
+			return attemptResult{
+				Status:    http.StatusBadGateway,
+				Err:       err,
+				Retryable: ui+1 < len(upstreamsToTry),
+			}
 		}
 
 		if shouldRetryWithNextKey(resp.StatusCode) && i+1 < len(attempts) {
 			body, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
+			cancel()
 			if readErr != nil {
-				if status, errType, message, ok := classifyProxyContextError(readErr); ok {
-					lastErrMsg = message
-					markAndLog(c, p, key, route, inbound, status, start, head.Stream, nil, message)
-					writeOpenAIError(c, status, errType, message)
-					return
-				}
 				markKeyFailure(p, key, resp.StatusCode, nil)
-				lastErrMsg = "failed to read upstream error response: " + readErr.Error()
-				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, lastErrMsg)
+				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
 			} else {
 				markKeyFailure(p, key, resp.StatusCode, body)
-				lastErrMsg = summarizeUpstreamError(resp.StatusCode, body)
-				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, nil, lastErrMsg)
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, nil, summarizeUpstreamError(resp.StatusCode, body))
 			}
 			continue
 		}
 
-		defer resp.Body.Close()
-		if crossProtocol {
-			// Buffer the upstream response and convert it back to the inbound protocol.
-			proxyCrossProtocolResponse(c, resp, head.Stream, inbound, upstreamProto, p, key, route, start)
-		} else {
-			// Same-protocol: stream verbatim.
-			proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start)
+		// Failure status — if there are more upstreams to try, break out
+		// of the key loop and try the next upstream. On the last upstream,
+		// preserve the status and headers but use a generic error message.
+		if shouldMarkUpstreamFailure(resp.StatusCode) {
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			cancel()
+			if readErr != nil {
+				markKeyFailure(p, key, resp.StatusCode, nil)
+				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
+			} else {
+				markKeyFailure(p, key, resp.StatusCode, body)
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, nil, summarizeUpstreamError(resp.StatusCode, body))
+			}
+			if ui+1 < len(upstreamsToTry) {
+				return attemptResult{
+					Response:  resp,
+					Status:    resp.StatusCode,
+					Retryable: true,
+				}
+			}
+			// Last upstream — preserve the original error response
+			// for status/headers, but use generic error message for body.
+			return attemptResult{
+				Response:  resp,
+				Status:    resp.StatusCode,
+				Retryable: false,
+			}
 		}
-		return
+
+		// Success — pre-read the response body and delegate to the response
+		// handler. The handler returns a responseResult that tells us whether
+		// the response was committed (ResponseStarted) or whether we should
+		// try the next upstream (Retryable).
+		responseBody, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		cancel()
+		if readErr != nil {
+			markKeyFailure(p, key, http.StatusBadGateway, nil)
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
+			if i+1 < len(attempts) {
+				continue
+			}
+			return attemptResult{
+				Status:    http.StatusBadGateway,
+				Err:       readErr,
+				Retryable: ui+1 < len(upstreamsToTry),
+			}
+		}
+
+		var rr responseResult
+		if crossProtocol(route, inbound, head, currentUpstream) {
+			rr = proxyCrossProtocolResponse(c, resp, head.Stream, inbound, upstreamProto, p, key, route, start, responseBody)
+		} else {
+			rr = proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start, responseBody)
+		}
+
+		if rr.ResponseStarted {
+			return attemptResult{Handled: true}
+		}
+		// Response not started — can try next key or upstream.
+		if i+1 < len(attempts) {
+			continue
+		}
+		return attemptResult{
+			Status:    http.StatusBadGateway,
+			Err:       rr.Err,
+			Retryable: ui+1 < len(upstreamsToTry),
+		}
 	}
 
-	if lastErrMsg == "" {
-		lastErrMsg = "all upstream keys failed"
+	// All keys for this upstream failed.
+	return attemptResult{
+		Status:    http.StatusBadGateway,
+		Retryable: ui+1 < len(upstreamsToTry),
 	}
-	writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
+}
+
+// crossProtocol reports whether the request needs cross-protocol conversion
+// for the given route. It is called per-upstream because each upstream may
+// speak a different protocol.
+func crossProtocol(route config.ModelRoute, inbound config.Protocol, head requestHead, currentUpstream config.Upstream) bool {
+	return head.HasModel && inbound != route.TargetProtocol(currentUpstream)
+}
+
+// buildUpstreamBody constructs the request body for a specific upstream,
+// starting from the original inbound body. This ensures each upstream gets
+// a fresh conversion from the original client body, not a body that was
+// already converted for a previous upstream.
+//
+// Returns nil on conversion failure.
+// buildUpstreamBody constructs the request body for a specific upstream,
+// starting from the original inbound body. This ensures each upstream gets
+// a fresh conversion from the original client body, not a body that was
+// already converted for a previous upstream.
+//
+// Returns nil on conversion failure.
+func buildUpstreamBody(originalBody []byte, route config.ModelRoute, inbound config.Protocol, head requestHead, upstreamPath string, upstreamProto config.Protocol, currentUpstream config.Upstream) []byte {
+	body := originalBody
+
+	// Cross-protocol conversion: if the inbound protocol differs from the
+	// upstream protocol, convert through the IR.
+	if head.HasModel && inbound != upstreamProto {
+		converted, err := protocol.ConvertRequest(inbound, upstreamProto, body)
+		if err != nil {
+			return nil
+		}
+		body = converted
+		// Re-parse stream flag from the converted body.
+		var h struct {
+			Stream bool `json:"stream"`
+		}
+		_ = json.Unmarshal(body, &h)
+		head.Stream = h.Stream
+	}
+
+	// Rewrite the model field to the upstream's real model id.
+	realModel := route.TargetRealModel(currentUpstream)
+	if rewritten, ok := router.RewriteRequestModel(body, realModel); ok {
+		body = rewritten
+	}
+
+	// Enable stream_options.include_usage for Chat streaming.
+	if rewritten, ok := router.EnableRequestStreamUsage(body, upstreamProto, head.Stream); ok {
+		body = rewritten
+	}
+
+	// Reasoning/thinking models (e.g. DeepSeek) reject non-auto tool_choice
+	// values while thinking mode is active. Strip tool_choice to avoid an
+	// HTTP 400 from the upstream before the request is sent.
+	if upstreamProto == config.ProtocolChat {
+		if stripped, ok := protocol.StripToolChoiceForReasoning(body, realModel); ok {
+			body = stripped
+		}
+	}
+
+	return body
 }
 
 // upstreamPathFor returns the canonical upstream path for a protocol.
@@ -334,3 +573,48 @@ func copyResponseHeaders(c *gin.Context, resp *http.Response) {
 		}
 	}
 }
+
+// copyControlHeaders copies only control/retry headers from an upstream error
+// response, deliberately skipping representation headers (Content-Length,
+// Content-Encoding, Content-Type, ETag, Digest, Content-MD5) that describe
+// the upstream's body — not the replacement body we will write.
+//
+// Headers preserved:
+//   - Retry-After, RetryAfter
+//   - WWW-Authenticate
+//   - RateLimit-*, X-RateLimit-*
+//   - X-Request-Id (for tracing)
+func copyControlHeaders(c *gin.Context, resp *http.Response) {
+	for k, vs := range resp.Header {
+		if isHopHeader(k) {
+			continue
+		}
+		lower := strings.ToLower(k)
+		switch {
+		case lower == "retry-after",
+			lower == "www-authenticate",
+			lower == "x-request-id":
+			// pass
+		case strings.HasPrefix(lower, "ratelimit-"),
+			strings.HasPrefix(lower, "x-ratelimit-"):
+			// pass
+		default:
+			continue
+		}
+		for _, v := range vs {
+			c.Writer.Header().Add(k, v)
+		}
+	}
+}
+
+// Sentinel errors for attemptResult.
+var (
+	errBodyConversion    = &attemptError{"failed to build upstream request body"}
+	errPoolGroupNotAllowed = func(group string) error {
+		return &attemptError{"token not allowed to use group: " + group}
+	}
+)
+
+type attemptError struct{ msg string }
+
+func (e *attemptError) Error() string { return e.msg }

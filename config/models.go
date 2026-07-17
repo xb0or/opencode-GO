@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -29,29 +30,41 @@ const (
 	ProtocolGoogle    Protocol = "google"    // Google (not implemented in phase 1)
 )
 
+// UpstreamTarget holds per-upstream overrides for a model route.
+// When set, these values take precedence over the route-level fields
+// for the specific upstream. This allows Go and Ollama to use different
+// real_model IDs, protocols, and key-pool groups for the same gateway model.
+type UpstreamTarget struct {
+	RealModel string   `json:"real_model,omitempty"`
+	Protocol  Protocol `json:"protocol,omitempty"`
+	Group     string   `json:"group,omitempty"`
+}
+
 // ModelRoute maps a gateway-facing model id to its real upstream location.
 type ModelRoute struct {
-	ID                  string             `json:"id"`                              // gateway-facing model id, e.g. "glm-5.1"
-	Name                string             `json:"name"`                            // display name
-	Upstream            Upstream           `json:"upstream"`                        // primary upstream (used for routing); go | ollama
-	Upstreams           []Upstream         `json:"upstreams,omitempty"`            // all upstreams that serve this model, e.g. ["go","ollama"]
-	Protocol            Protocol           `json:"protocol"`                        // chat | messages | responses | google
-	RealModel           string             `json:"real_model"`                      // upstream model id, e.g. "glm-5.1"
-	Group               string             `json:"group"`                           // logical KEY-pool group name, e.g. "go"
-	ContextLen          int                `json:"context_len"`                     // optional context window hint
-	Status              *int               `json:"status,omitempty"`                // 0 disabled, 1 enabled; nil defaults to enabled
-	Priority            int                `json:"priority"`                        // optional admin-defined display/routing priority
-	Tags                []string           `json:"tags,omitempty"`                  // normalized capability tags
-	IsCustomized        bool               `json:"is_customized,omitempty"`         // true when admin edited protected fields
-	CustomizedFields    []string           `json:"customized_fields,omitempty"`     // fields protected from automatic sync
-	OpenRouterID        string             `json:"openrouter_id,omitempty"`         // matched OpenRouter model id
-	OpenRouterName      string             `json:"openrouter_name,omitempty"`       // matched OpenRouter display name
-	OpenRouterMatchedBy string             `json:"openrouter_matched_by,omitempty"` // matching strategy used during enrichment
-	Architecture        *ModelArchitecture `json:"architecture,omitempty"`
-	Pricing             map[string]string  `json:"pricing,omitempty"` // per-token OpenRouter prices as strings
-	SupportedParameters []string           `json:"supported_parameters,omitempty"`
-	Description         string             `json:"description,omitempty"`
-	KnowledgeCutoff     string             `json:"knowledge_cutoff,omitempty"`
+	ID                  string                       `json:"id"`                              // gateway-facing model id, e.g. "glm-5.1"
+	Name                string                       `json:"name"`                            // display name
+	Upstream            Upstream                     `json:"upstream"`                        // primary upstream (used for routing); go | ollama
+	Upstreams           []Upstream                   `json:"upstreams,omitempty"`            // all upstreams that serve this model, e.g. ["go","ollama"]
+	UpstreamGroups      map[Upstream]string           `json:"upstream_groups,omitempty"`      // per-upstream key-pool group override; empty = use upstream name
+	Targets             map[Upstream]UpstreamTarget   `json:"targets,omitempty"`              // per-upstream real_model/protocol/group overrides
+	Protocol            Protocol                     `json:"protocol"`                        // chat | messages | responses | google
+	RealModel           string                       `json:"real_model"`                      // upstream model id, e.g. "glm-5.1"
+	Group               string                       `json:"group"`                           // logical KEY-pool group name, e.g. "go"
+	ContextLen          int                          `json:"context_len"`                     // optional context window hint
+	Status              *int                         `json:"status,omitempty"`                // 0 disabled, 1 enabled; nil defaults to enabled
+	Priority            int                          `json:"priority"`                        // optional admin-defined display/routing priority
+	Tags                []string                     `json:"tags,omitempty"`                  // normalized capability tags
+	IsCustomized        bool                         `json:"is_customized,omitempty"`         // true when admin edited protected fields
+	CustomizedFields    []string                     `json:"customized_fields,omitempty"`     // fields protected from automatic sync
+	OpenRouterID        string                       `json:"openrouter_id,omitempty"`         // matched OpenRouter model id
+	OpenRouterName      string                       `json:"openrouter_name,omitempty"`       // matched OpenRouter display name
+	OpenRouterMatchedBy string                       `json:"openrouter_matched_by,omitempty"` // matching strategy used during enrichment
+	Architecture        *ModelArchitecture           `json:"architecture,omitempty"`
+	Pricing             map[string]string            `json:"pricing,omitempty"` // per-token OpenRouter prices as strings
+	SupportedParameters []string                     `json:"supported_parameters,omitempty"`
+	Description         string                       `json:"description,omitempty"`
+	KnowledgeCutoff     string                       `json:"knowledge_cutoff,omitempty"`
 }
 
 // ModelArchitecture describes OpenRouter modality/tokenizer metadata.
@@ -72,6 +85,54 @@ const (
 func ModelStatusPtr(status int) *int {
 	v := status
 	return &v
+}
+
+// UpstreamGroup returns the key-pool group for the given upstream.
+// When an explicit UpstreamGroups mapping exists, it takes precedence.
+// Otherwise, the upstream name itself is used as the group name.
+func (m ModelRoute) UpstreamGroup(u Upstream) string {
+	if m.UpstreamGroups != nil {
+		if g, ok := m.UpstreamGroups[u]; ok && g != "" {
+			return g
+		}
+	}
+	return string(u)
+}
+
+// TargetRealModel returns the real_model to use for the given upstream.
+// When a per-upstream Target exists with a non-empty RealModel, it takes
+// precedence. Otherwise, the route-level RealModel is used.
+func (m ModelRoute) TargetRealModel(u Upstream) string {
+	if m.Targets != nil {
+		if t, ok := m.Targets[u]; ok && t.RealModel != "" {
+			return t.RealModel
+		}
+	}
+	return m.RealModel
+}
+
+// TargetProtocol returns the protocol to use for the given upstream.
+// When a per-upstream Target exists with a non-empty Protocol, it takes
+// precedence. Otherwise, the route-level Protocol is used.
+func (m ModelRoute) TargetProtocol(u Upstream) Protocol {
+	if m.Targets != nil {
+		if t, ok := m.Targets[u]; ok && t.Protocol != "" {
+			return t.Protocol
+		}
+	}
+	return m.Protocol
+}
+
+// TargetGroup returns the key-pool group to use for the given upstream.
+// When a per-upstream Target exists with a non-empty Group, it takes
+// precedence. Otherwise, UpstreamGroup is used.
+func (m ModelRoute) TargetGroup(u Upstream) string {
+	if m.Targets != nil {
+		if t, ok := m.Targets[u]; ok && t.Group != "" {
+			return t.Group
+		}
+	}
+	return m.UpstreamGroup(u)
 }
 
 // IsEnabled reports whether a route should be visible and callable.
@@ -324,6 +385,9 @@ func applyLocalModelDefaults(route *ModelRoute) {
 	if route.Upstream == "" {
 		route.Upstream = UpstreamGo
 	}
+	if len(route.Upstreams) == 0 {
+		route.Upstreams = []Upstream{route.Upstream}
+	}
 	if route.Group == "" {
 		route.Group = "go"
 	}
@@ -341,6 +405,12 @@ func applyLocalModelDefaults(route *ModelRoute) {
 	}
 	route.CustomizedFields = NormalizeCustomizedFields(route.CustomizedFields)
 	route.IsCustomized = route.IsCustomized || len(route.CustomizedFields) > 0
+	// Validate invariants after all defaults are applied. Log warnings
+	// for invalid routes rather than panicking — the caller (RegisterModel,
+	// ReplaceModels) can decide whether to reject the route.
+	if err := ValidateModelRoute(*route); err != nil {
+		log.Printf("warn: model route %q failed validation: %v", route.ID, err)
+	}
 }
 
 // IsModelFieldCustomized reports whether automatic sync should preserve a
@@ -480,4 +550,90 @@ func sortModelRoutes(ms []ModelRoute) {
 		}
 		return ms[i].ID < ms[j].ID
 	})
+}
+
+// ValidUpstreams contains all recognized upstream names.
+var ValidUpstreams = []Upstream{UpstreamGo, UpstreamOllama}
+
+// IsValidUpstream returns true if the given upstream is recognized.
+func IsValidUpstream(u Upstream) bool {
+	return u == UpstreamGo || u == UpstreamOllama
+}
+
+// ValidateModelRoute checks invariants on a fully-merged ModelRoute.
+// It should be called after all field merging (defaults, sync, admin edits)
+// to ensure the route is internally consistent.
+//
+// Invariants checked:
+//   - Upstream must be a valid upstream name.
+//   - Upstreams must not be empty.
+//   - Upstream must appear in Upstreams.
+//   - All Upstreams entries must be valid upstream names.
+//   - All UpstreamGroups keys must be valid and appear in Upstreams.
+//   - All Targets keys must be valid and appear in Upstreams.
+//
+// Returns nil if valid, or an error describing the first violation.
+func ValidateModelRoute(m ModelRoute) error {
+	if !IsValidUpstream(m.Upstream) {
+		return fmt.Errorf("invalid primary upstream %q (valid: go, ollama)", m.Upstream)
+	}
+	if len(m.Upstreams) == 0 {
+		return fmt.Errorf("upstreams list must not be empty")
+	}
+	upstreamSet := make(map[Upstream]bool, len(m.Upstreams))
+	for _, u := range m.Upstreams {
+		if !IsValidUpstream(u) {
+			return fmt.Errorf("invalid upstream %q in upstreams list (valid: go, ollama)", u)
+		}
+		upstreamSet[u] = true
+	}
+	if !upstreamSet[m.Upstream] {
+		return fmt.Errorf("primary upstream %q not found in upstreams list %v", m.Upstream, m.Upstreams)
+	}
+	for k := range m.UpstreamGroups {
+		if !IsValidUpstream(k) {
+			return fmt.Errorf("invalid upstream %q in upstream_groups keys (valid: go, ollama)", k)
+		}
+		if !upstreamSet[k] {
+			return fmt.Errorf("upstream_groups key %q not found in upstreams list %v", k, m.Upstreams)
+		}
+	}
+	for k := range m.Targets {
+		if !IsValidUpstream(k) {
+			return fmt.Errorf("invalid upstream %q in targets keys (valid: go, ollama)", k)
+		}
+		if !upstreamSet[k] {
+			return fmt.Errorf("targets key %q not found in upstreams list %v", k, m.Upstreams)
+		}
+	}
+	return nil
+}
+
+// ValidateAndNormalizeUpstreams validates and deduplicates an upstream list.
+// Returns the deduplicated list (preserving original order) or an error.
+func ValidateAndNormalizeUpstreams(upstreams []Upstream, groups map[Upstream]string) ([]Upstream, error) {
+	seen := make(map[Upstream]bool)
+	out := make([]Upstream, 0, len(upstreams))
+	for _, u := range upstreams {
+		if !IsValidUpstream(u) {
+			return nil, fmt.Errorf("unknown upstream %q (valid: go, ollama)", u)
+		}
+		if seen[u] {
+			continue
+		}
+		seen[u] = true
+		out = append(out, u)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("at least one upstream is required")
+	}
+	for k, v := range groups {
+		if !IsValidUpstream(k) {
+			return nil, fmt.Errorf("unknown upstream group key %q (valid: go, ollama)", k)
+		}
+		if strings.TrimSpace(v) == "" {
+			return nil, fmt.Errorf("upstream group %q has empty value", k)
+		}
+	}
+	return out, nil
 }
