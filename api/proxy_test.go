@@ -2810,3 +2810,216 @@ func TestMultiUpstreamTokenAllowedOnlyMappedGroupAllSkipped(t *testing.T) {
 	}
 }
 
+// TestLastUpstreamErrorDoesNotPreserveStaleEntityHeaders verifies that when
+// all upstreams fail, the replacement error body does not carry stale
+// representation headers (Content-Length, Content-Encoding) from the
+// upstream response, but control headers (Retry-After) are preserved.
+func TestLastUpstreamErrorDoesNotPreserveStaleEntityHeaders(t *testing.T) {
+	if err := store.InitForTest("file:entity_headers?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "24")
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Retry-After", "120")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
+	}))
+	defer goSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "entity-headers-model",
+		Name:      "Entity Headers",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("entity-headers-model")
+
+	tok, err := pool.CreateToken("entity-headers-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "go-key",
+		Group:   "go",
+		Label:   "go-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+
+	body := `{"model":"entity-headers-model","messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r := NewRouter(pool.NewPicker())
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429; body=%s", w.Code, w.Body.String())
+	}
+
+	// Content-Length must NOT be the upstream's value (24).
+	if w.Header().Get("Content-Length") == "24" {
+		t.Fatal("stale Content-Length from upstream was preserved")
+	}
+	// Content-Encoding must NOT be "gzip".
+	if w.Header().Get("Content-Encoding") == "gzip" {
+		t.Fatal("stale Content-Encoding from upstream was preserved")
+	}
+	// Retry-After must be preserved.
+	if w.Header().Get("Retry-After") != "120" {
+		t.Fatalf("Retry-After = %q, want 120", w.Header().Get("Retry-After"))
+	}
+	// X-RateLimit-Remaining must be preserved.
+	if w.Header().Get("X-RateLimit-Remaining") != "0" {
+		t.Fatalf("X-RateLimit-Remaining = %q, want 0", w.Header().Get("X-RateLimit-Remaining"))
+	}
+	// Body must be valid JSON (not truncated).
+	var resp struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response body is not valid JSON: %v; raw=%q", err, w.Body.String())
+	}
+	if resp.Error.Type != "rate_limit_error" {
+		t.Fatalf("error type = %q, want rate_limit_error", resp.Error.Type)
+	}
+}
+
+// TestAllowedPrimaryFailureIsNotOverriddenByDisallowedFallback verifies that
+// when a token-allowed upstream fails (503) and the next upstream is not
+// allowed by the token, the real failure status (503) is returned — not 403.
+func TestAllowedPrimaryFailureIsNotOverriddenByDisallowedFallback(t *testing.T) {
+	if err := store.InitForTest("file:primary_fail_not_overridden?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"go overloaded"}}`))
+	}))
+	defer goSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	// Route has Go and Ollama upstreams. Token only allows "go" group.
+	config.RegisterModel(config.ModelRoute{
+		ID:        "primary-fail-model",
+		Name:      "Primary Fail",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("primary-fail-model")
+
+	tok, err := pool.CreateToken("primary-fail-client", "go", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "go-key",
+		Group:   "go",
+		Label:   "go-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+
+	body := `{"model":"primary-fail-model","messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r := NewRouter(pool.NewPicker())
+	r.ServeHTTP(w, req)
+
+	// Must be 503 (the real upstream failure), not 403 (permission denied).
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (real upstream failure), not 403; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestDisallowedPrimaryFallbackToAllowedSucceeds verifies the reverse case:
+// the first upstream is not allowed by the token, but the second is allowed
+// and succeeds — the request should succeed.
+func TestDisallowedPrimaryFallbackToAllowedSucceeds(t *testing.T) {
+	if err := store.InitForTest("file:disallowed_primary?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"m","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	cfg := config.Get()
+	oldOllamaURL := cfg.OllamaBaseURL
+	cfg.OllamaBaseURL = ollamaSrv.URL
+	defer func() { cfg.OllamaBaseURL = oldOllamaURL }()
+
+	// Route has Go and Ollama upstreams. Token only allows "ollama" group.
+	config.RegisterModel(config.ModelRoute{
+		ID:        "disallowed-primary-model",
+		Name:      "Disallowed Primary",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("disallowed-primary-model")
+
+	tok, err := pool.CreateToken("disallowed-primary-client", "ollama", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "ollama-key",
+		Group:   "ollama",
+		Label:   "ollama-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create ollama key: %v", err)
+	}
+
+	body := `{"model":"disallowed-primary-model","messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r := NewRouter(pool.NewPicker())
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+

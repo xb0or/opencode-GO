@@ -228,6 +228,8 @@ func TestSyncPreservesOllamaUpstream(t *testing.T) {
 		RealModel: "glm-5.2",
 		Group:     "ollama",
 		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+		IsCustomized:     true,
+		CustomizedFields: []string{"upstream", "upstreams", "group"},
 	}
 	row := store.NewModelRouteRow(ollamaRoute)
 	if err := store.SaveModelRoute(&row); err != nil {
@@ -305,5 +307,200 @@ func TestReloadRuntimeFromStorePreservesCustomGroup(t *testing.T) {
 	}
 	if !got.IsEnabled() {
 		t.Fatal("premium model should be enabled")
+	}
+}
+
+// TestSyncUpdatesDiscoveredUpstreamsForExistingRoute verifies that when a
+// model was previously Go-only and Ollama later starts serving it, the sync
+// updates Upstreams to include both providers.
+func TestSyncUpdatesDiscoveredUpstreamsForExistingRoute(t *testing.T) {
+	if err := store.InitForTest("file:modelsync_discover_upstream?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	// Route was previously Go-only (set by a previous sync run, not customized).
+	existing := config.ModelRoute{
+		ID:        "glm-5.2",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo},
+		Protocol:  config.ProtocolChat,
+		RealModel: "glm-5.2",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+	row := store.NewModelRouteRow(existing)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("save existing route: %v", err)
+	}
+
+	// Both Go and Ollama now serve this model.
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"glm-5.2"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"glm-5.2"}]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("glm-5.2")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	if len(got.Upstreams) != 2 {
+		t.Fatalf("expected 2 upstreams after discovery, got %v", got.Upstreams)
+	}
+	hasGo, hasOllama := false, false
+	for _, u := range got.Upstreams {
+		if u == config.UpstreamGo {
+			hasGo = true
+		}
+		if u == config.UpstreamOllama {
+			hasOllama = true
+		}
+	}
+	if !hasGo || !hasOllama {
+		t.Fatalf("expected both go and ollama upstreams, got %v", got.Upstreams)
+	}
+}
+
+// TestSyncRemovesUnavailableUpstreamForExistingRoute verifies that when a
+// provider stops serving a model, the sync removes it from Upstreams.
+func TestSyncRemovesUnavailableUpstreamForExistingRoute(t *testing.T) {
+	if err := store.InitForTest("file:modelsync_remove_upstream?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	// Route previously had both Go and Ollama (set by sync, not customized).
+	existing := config.ModelRoute{
+		ID:        "glm-5.2",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "glm-5.2",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+	row := store.NewModelRouteRow(existing)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("save existing route: %v", err)
+	}
+
+	// Only Go serves this model now; Ollama no longer has it.
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"glm-5.2"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("glm-5.2")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	if len(got.Upstreams) != 1 || got.Upstreams[0] != config.UpstreamGo {
+		t.Fatalf("expected only go upstream after removal, got %v", got.Upstreams)
+	}
+}
+
+// TestSyncPreservesExplicitlyCustomizedUpstreams verifies that when an admin
+// explicitly customized upstream/upstreams, sync does NOT overwrite them.
+func TestSyncPreservesExplicitlyCustomizedUpstreams(t *testing.T) {
+	if err := store.InitForTest("file:modelsync_custom_upstream?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	// Admin explicitly customized the upstream fields.
+	custom := config.ModelRoute{
+		ID:        "glm-5.2",
+		Name:      "Custom GLM",
+		Upstream:  config.UpstreamOllama,
+		Upstreams: []config.Upstream{config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "glm-5.2",
+		Group:     "ollama",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+		IsCustomized:     true,
+		CustomizedFields: []string{"upstream", "upstreams"},
+	}
+	row := store.NewModelRouteRow(custom)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("save custom route: %v", err)
+	}
+
+	// Go also serves this model, but admin customization should be preserved.
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"glm-5.2"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("glm-5.2")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	if got.Upstream != config.UpstreamOllama {
+		t.Fatalf("customized Upstream overwritten: got %q, want %q", got.Upstream, config.UpstreamOllama)
+	}
+	if len(got.Upstreams) != 1 || got.Upstreams[0] != config.UpstreamOllama {
+		t.Fatalf("customized Upstreams overwritten: got %v, want [ollama]", got.Upstreams)
 	}
 }

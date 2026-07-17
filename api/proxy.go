@@ -136,6 +136,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		upstreamsToTry = []config.Upstream{route.Upstream}
 	}
 	var lastResult attemptResult
+	var attemptedAny bool
 
 	for ui, currentUpstream := range upstreamsToTry {
 		// Resolve the key-pool group for this upstream.
@@ -150,21 +151,24 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		// Check token permission for this upstream's resolved group.
 		// Each upstream may map to a different group via UpstreamGroups,
 		// so we must re-check every iteration.
+		// Permission-denied upstreams are silently skipped — they do NOT
+		// overwrite lastResult so a real upstream failure is preserved.
 		if tokAny, exists := c.Get("token"); exists {
 			if tok, ok := tokAny.(*store.Token); ok && !pool.GroupAllowed(tok, upstreamGroup) {
-				lastResult = attemptResult{
-					Status:    http.StatusForbidden,
-					Err:       errPoolGroupNotAllowed(upstreamGroup),
-					Retryable: ui+1 < len(upstreamsToTry),
-				}
-				if lastResult.Retryable {
+				if ui+1 < len(upstreamsToTry) {
 					continue
 				}
-				writeOpenAIError(c, http.StatusForbidden, "permission_denied",
-					"this token is not allowed to use group: "+upstreamGroup)
-				return
+				// Last upstream and no upstream was ever attempted — return 403.
+				if !attemptedAny {
+					writeOpenAIError(c, http.StatusForbidden, "permission_denied",
+						"this token is not allowed to use group: "+upstreamGroup)
+					return
+				}
+				// A real upstream was attempted — fall through to return its result.
+				break
 			}
 		}
+		attemptedAny = true
 		route.Group = upstreamGroup
 
 		// --------------- Ollama upstream ---------------
@@ -206,25 +210,25 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	}
 
 	// All upstreams failed. If the last upstream returned a real error response
-	// (not a synthetic 502), preserve its status and headers but use a generic
-	// error message for the body to avoid leaking provider/channel details.
-	// The raw error body is still recorded in the admin usage log.
+	// (not a synthetic 502), preserve its control headers (Retry-After,
+	// RateLimit-*, etc.) but use a generic error message for the body to avoid
+	// leaking provider/channel details. Representation headers (Content-Length,
+	// Content-Encoding, etc.) are deliberately NOT copied — they describe the
+	// upstream's body, not the replacement body we will write.
 	if lastResult.Response != nil {
-		copyResponseHeaders(c, lastResult.Response)
+		copyControlHeaders(c, lastResult.Response)
 		_ = lastResult.Response.Body.Close()
 		writeOpenAIError(c, lastResult.Status, upstreamErrorType(lastResult.Status), genericUpstreamMessage(lastResult.Status))
 		return
 	}
 	if lastResult.Err != nil {
-		// All upstreams were skipped due to permission — return 403 with
-		// the proper error type so the client can distinguish it from
-		// a generic upstream failure.
-		if lastResult.Status == http.StatusForbidden {
-			writeOpenAIError(c, http.StatusForbidden, "permission_denied",
-				"this token is not allowed to use any upstream group")
-			return
-		}
 		writeOpenAIError(c, lastResult.Status, "upstream_error", genericUpstreamMessage(lastResult.Status))
+		return
+	}
+	// No upstream was ever attempted — all were skipped due to permission.
+	if !attemptedAny {
+		writeOpenAIError(c, http.StatusForbidden, "permission_denied",
+			"this token is not allowed to use any upstream group")
 		return
 	}
 	writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
@@ -342,6 +346,7 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 				}
 				if ui+1 < len(upstreamsToTry) {
 					return attemptResult{
+						Response:  resp,
 						Status:    resp.StatusCode,
 						Retryable: true,
 					}
@@ -507,6 +512,39 @@ func isHopHeader(k string) bool {
 func copyResponseHeaders(c *gin.Context, resp *http.Response) {
 	for k, vs := range resp.Header {
 		if isHopHeader(k) {
+			continue
+		}
+		for _, v := range vs {
+			c.Writer.Header().Add(k, v)
+		}
+	}
+}
+
+// copyControlHeaders copies only control/retry headers from an upstream error
+// response, deliberately skipping representation headers (Content-Length,
+// Content-Encoding, Content-Type, ETag, Digest, Content-MD5) that describe
+// the upstream's body — not the replacement body we will write.
+//
+// Headers preserved:
+//   - Retry-After, RetryAfter
+//   - WWW-Authenticate
+//   - RateLimit-*, X-RateLimit-*
+//   - X-Request-Id (for tracing)
+func copyControlHeaders(c *gin.Context, resp *http.Response) {
+	for k, vs := range resp.Header {
+		if isHopHeader(k) {
+			continue
+		}
+		lower := strings.ToLower(k)
+		switch {
+		case lower == "retry-after",
+			lower == "www-authenticate",
+			lower == "x-request-id":
+			// pass
+		case strings.HasPrefix(lower, "ratelimit-"),
+			strings.HasPrefix(lower, "x-ratelimit-"):
+			// pass
+		default:
 			continue
 		}
 		for _, v := range vs {

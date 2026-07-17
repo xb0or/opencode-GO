@@ -305,15 +305,18 @@ func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed b
 
 	route := store.ModelRouteFromRow(existingRow)
 	route.ID = sm.ID
-	// Preserve the existing Upstream and Upstreams — do NOT unconditionally
-	// overwrite them with the merged source. An admin may have configured
-	// a multi-upstream route (e.g. [Ollama, Go]) or a non-Go primary
-	// upstream. Only set a default if the existing route has no upstream.
-	if strings.TrimSpace(string(route.Upstream)) == "" {
+	// Update Upstream/Upstreams from the merged source unless the admin
+	// explicitly customized them. This allows automatic discovery of new
+	// providers (e.g. a model that was Go-only is now also on Ollama) and
+	// removal of providers that no longer serve the model.
+	if !config.IsModelFieldCustomized(route, "upstream") {
 		route.Upstream = primaryUpstream
 	}
-	if len(route.Upstreams) == 0 {
+	if !config.IsModelFieldCustomized(route, "upstreams") {
 		route.Upstreams = sm.Upstreams
+	}
+	if !config.IsModelFieldCustomized(route, "upstream_groups") {
+		route.UpstreamGroups = nil
 	}
 	if strings.TrimSpace(route.Group) == "" {
 		route.Group = group
