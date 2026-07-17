@@ -2595,3 +2595,218 @@ func TestMultiUpstreamOllamaBodyClosed(t *testing.T) {
 	_ = bodyClosed // marker: body close is verified by successful completion
 }
 
+// TestMultiUpstreamTokenAllowedOnlyMappedGroup verifies that a token which
+// only allows the mapped groups (via UpstreamGroups) but not the route's
+// original Group is NOT rejected by the early permission check. The check
+// must happen per-upstream against the resolved group, not against the
+// original route group.
+func TestMultiUpstreamTokenAllowedOnlyMappedGroup(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_token_mapped_group?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	// Model with Group="go" but UpstreamGroups mapping to "premium-go".
+	// Token only allows "premium-go" — the old code would reject at the
+	// early permission check because the token doesn't allow "go".
+	config.RegisterModel(config.ModelRoute{
+		ID:        "mapped-model",
+		Name:      "Mapped Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo},
+		UpstreamGroups: map[config.Upstream]string{
+			config.UpstreamGo: "premium-go",
+		},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("mapped-model")
+
+	// Token restricted to "premium-go" only — NOT "go".
+	tok, err := pool.CreateToken("mapped-client", "premium-go", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	// Key in the "premium-go" group.
+	if err := store.DB().Create(&store.Key{
+		Value:   "premium-key",
+		Group:   "premium-go",
+		Label:   "premium-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create premium-go key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"mapped-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	// Verify the usage log has the mapped group, not the original "go".
+	var logRow store.UsageLog
+	if err := store.DB().First(&logRow).Error; err != nil {
+		t.Fatalf("load usage log: %v", err)
+	}
+	if logRow.Group != "premium-go" {
+		t.Fatalf("usage log group = %q, want premium-go", logRow.Group)
+	}
+}
+
+// TestMultiUpstreamTokenAllowedOnlyMappedGroupSkipsUnmapped verifies that
+// when a token only allows one mapped group but not another, the disallowed
+// upstream is skipped and the allowed one is used.
+func TestMultiUpstreamTokenAllowedOnlyMappedGroupSkipsUnmapped(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_token_skip_unmapped?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	// Model with two upstreams: Go (mapped to "premium-go") and Ollama
+	// (mapped to "premium-ollama"). Token only allows "premium-go".
+	config.RegisterModel(config.ModelRoute{
+		ID:        "multi-mapped-model",
+		Name:      "Multi Mapped Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		UpstreamGroups: map[config.Upstream]string{
+			config.UpstreamGo:     "premium-go",
+			config.UpstreamOllama: "premium-ollama",
+		},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("multi-mapped-model")
+
+	// Token restricted to "premium-go" only.
+	tok, err := pool.CreateToken("multi-mapped-client", "premium-go", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	// Key in the "premium-go" group.
+	if err := store.DB().Create(&store.Key{
+		Value:   "premium-key",
+		Group:   "premium-go",
+		Label:   "premium-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create premium-go key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"multi-mapped-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	// Verify the usage log has the mapped group, not the original "go".
+	var logRow store.UsageLog
+	if err := store.DB().First(&logRow).Error; err != nil {
+		t.Fatalf("load usage log: %v", err)
+	}
+	if logRow.Group != "premium-go" {
+		t.Fatalf("usage log group = %q, want premium-go", logRow.Group)
+	}
+}
+
+// TestMultiUpstreamTokenAllowedOnlyMappedGroupAllSkipped verifies that when
+// a token doesn't allow any of the mapped groups, all upstreams are skipped
+// and a 403 is returned.
+func TestMultiUpstreamTokenAllowedOnlyMappedGroupAllSkipped(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_token_all_skipped?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = "http://127.0.0.1:1"
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	// Model with two upstreams, both mapped to groups the token doesn't allow.
+	config.RegisterModel(config.ModelRoute{
+		ID:        "all-skipped-model",
+		Name:      "All Skipped Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		UpstreamGroups: map[config.Upstream]string{
+			config.UpstreamGo:     "premium-go",
+			config.UpstreamOllama: "premium-ollama",
+		},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("all-skipped-model")
+
+	// Token restricted to "basic" only — doesn't match any mapped group.
+	tok, err := pool.CreateToken("all-skipped-client", "basic", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"all-skipped-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+
+	// Verify the error type is "permission_denied", not "upstream_error".
+	var resp struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse response: %v", err)
+	}
+	if resp.Error.Type != "permission_denied" {
+		t.Fatalf("error type = %q, want permission_denied", resp.Error.Type)
+	}
+}
+

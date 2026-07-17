@@ -116,22 +116,9 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		return
 	}
 
-	// Permission check on the original route group.
-	originalGroup := route.Group
-	if tokAny, exists := c.Get("token"); exists {
-		if tok, ok := tokAny.(*store.Token); ok && !pool.GroupAllowed(tok, originalGroup) {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error": gin.H{
-					"type":    "permission_denied",
-					"message": "this token is not allowed to use group: " + originalGroup,
-				},
-			})
-			return
-		}
-	}
-
-	// Stash group for logging/debugging after the model route is known.
-	c.Set("group", originalGroup)
+	// Stash the route's original group for logging/debugging.
+	// The actual group used per-upstream is resolved inside the failover loop.
+	c.Set("group", route.Group)
 
 	// Save the original route before the failover loop so we can fall back
 	// to the original Group when no explicit UpstreamGroups mapping exists.
@@ -160,22 +147,22 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			upstreamGroup = baseRoute.Group
 		}
 
-		// Re-check token permission for fallback groups.
-		if upstreamGroup != originalGroup {
-			if tokAny, exists := c.Get("token"); exists {
-				if tok, ok := tokAny.(*store.Token); ok && !pool.GroupAllowed(tok, upstreamGroup) {
-					lastResult = attemptResult{
-						Status:    http.StatusForbidden,
-						Err:       errPoolGroupNotAllowed(upstreamGroup),
-						Retryable: ui+1 < len(upstreamsToTry),
-					}
-					if lastResult.Retryable {
-						continue
-					}
-					writeOpenAIError(c, http.StatusForbidden, "permission_denied",
-						"this token is not allowed to use group: "+upstreamGroup)
-					return
+		// Check token permission for this upstream's resolved group.
+		// Each upstream may map to a different group via UpstreamGroups,
+		// so we must re-check every iteration.
+		if tokAny, exists := c.Get("token"); exists {
+			if tok, ok := tokAny.(*store.Token); ok && !pool.GroupAllowed(tok, upstreamGroup) {
+				lastResult = attemptResult{
+					Status:    http.StatusForbidden,
+					Err:       errPoolGroupNotAllowed(upstreamGroup),
+					Retryable: ui+1 < len(upstreamsToTry),
 				}
+				if lastResult.Retryable {
+					continue
+				}
+				writeOpenAIError(c, http.StatusForbidden, "permission_denied",
+					"this token is not allowed to use group: "+upstreamGroup)
+				return
 			}
 		}
 		route.Group = upstreamGroup
@@ -229,6 +216,14 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		return
 	}
 	if lastResult.Err != nil {
+		// All upstreams were skipped due to permission — return 403 with
+		// the proper error type so the client can distinguish it from
+		// a generic upstream failure.
+		if lastResult.Status == http.StatusForbidden {
+			writeOpenAIError(c, http.StatusForbidden, "permission_denied",
+				"this token is not allowed to use any upstream group")
+			return
+		}
 		writeOpenAIError(c, lastResult.Status, "upstream_error", genericUpstreamMessage(lastResult.Status))
 		return
 	}

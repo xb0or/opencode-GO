@@ -16,12 +16,14 @@ import (
 const (
 	defaultOpenCodeModelsURL   = "https://opencode.ai/zen/go/v1/models"
 	defaultOpenRouterModelsURL = "https://openrouter.ai/api/v1/models"
+	defaultOllamaModelsURL     = "https://ollama.com/api/tags"
 )
 
 // Options configures a model catalog synchronization run.
 type Options struct {
 	OpenCodeModelsURL   string
 	OpenRouterModelsURL string
+	OllamaModelsURL     string
 	Client              *http.Client
 	Now                 func() time.Time
 }
@@ -29,6 +31,7 @@ type Options struct {
 // Result summarizes a synchronization run.
 type Result struct {
 	OpenCodeCount   int      `json:"opencode_count"`
+	OllamaCount     int      `json:"ollama_count"`
 	OpenRouterCount int      `json:"openrouter_count"`
 	MatchedCount    int      `json:"matched_count"`
 	CreatedCount    int      `json:"created_count"`
@@ -48,30 +51,115 @@ type openCodeModel struct {
 	OwnedBy string `json:"owned_by"`
 }
 
+type ollamaTagsPayload struct {
+	Models []ollamaModel `json:"models"`
+}
+
+type ollamaModel struct {
+	Name string `json:"name"`
+}
+
 type openRouterPayload struct {
 	Data []config.OpenRouterModel `json:"data"`
 }
 
-// Sync fetches the OpenCode Go model list, enriches it with OpenRouter metadata,
-// persists the merged catalog, and refreshes the runtime route table. Admin
-// customized fields are preserved according to each row's customized_fields set.
+// sourceModel is a unified representation of a model from any upstream source.
+type sourceModel struct {
+	ID       string
+	Name     string
+	Upstream config.Upstream
+	Upstreams []config.Upstream
+}
+
+// Sync fetches models from both the OpenCode Go and Ollama Cloud APIs, merges
+// them by ID (overlapping models get both upstreams), enriches with OpenRouter
+// metadata, persists the merged catalog, and refreshes the runtime route table.
+// Admin customized fields are preserved according to each row's customized_fields set.
 func Sync(ctx context.Context, opts Options) (Result, error) {
 	opts = withDefaults(opts)
 	client := opts.Client
 
-	opencodeModels, err := fetchOpenCodeModels(ctx, client, opts.OpenCodeModelsURL)
-	if err != nil {
-		return Result{}, err
+	// --- Fetch all upstream sources concurrently ---
+	type fetchResult struct {
+		source  string
+		models  []sourceModel
+		warning string
 	}
 
-	result := Result{OpenCodeCount: len(opencodeModels)}
-	openrouterModels, err := fetchOpenRouterModels(ctx, client, opts.OpenRouterModelsURL)
-	if err != nil {
-		result.Warnings = append(result.Warnings, "openrouter: "+err.Error())
-	} else {
-		result.OpenRouterCount = len(openrouterModels)
+	results := make(chan fetchResult, 3)
+	// Go upstream
+	go func() {
+		models, err := fetchOpenCodeModels(ctx, client, opts.OpenCodeModelsURL)
+		if err != nil {
+			results <- fetchResult{source: "go", warning: "opencode: " + err.Error()}
+			return
+		}
+		out := make([]sourceModel, 0, len(models))
+		for _, m := range models {
+			out = append(out, sourceModel{ID: m.ID, Name: m.Name, Upstream: config.UpstreamGo})
+		}
+		results <- fetchResult{source: "go", models: out}
+	}()
+
+	// Ollama upstream
+	go func() {
+		models, err := fetchOllamaModels(ctx, client, opts.OllamaModelsURL)
+		if err != nil {
+			results <- fetchResult{source: "ollama", warning: "ollama: " + err.Error()}
+			return
+		}
+		out := make([]sourceModel, 0, len(models))
+		for _, m := range models {
+			out = append(out, sourceModel{ID: m.Name, Name: m.Name, Upstream: config.UpstreamOllama})
+		}
+		results <- fetchResult{source: "ollama", models: out}
+	}()
+
+	// OpenRouter (for metadata enrichment, non-blocking)
+	var openrouterModels []config.OpenRouterModel
+	go func() {
+		orm, err := fetchOpenRouterModels(ctx, client, opts.OpenRouterModelsURL)
+		if err != nil {
+			results <- fetchResult{source: "openrouter", warning: "openrouter: " + err.Error()}
+			return
+		}
+		results <- fetchResult{source: "openrouter", models: nil}
+		openrouterModels = orm
+	}()
+
+	// Collect results
+	var goModels, ollamaModels []sourceModel
+	result := Result{}
+	for i := 0; i < 3; i++ {
+		r := <-results
+		switch r.source {
+		case "go":
+			if r.warning != "" {
+				result.Warnings = append(result.Warnings, r.warning)
+			} else {
+				goModels = r.models
+				result.OpenCodeCount = len(goModels)
+			}
+		case "ollama":
+			if r.warning != "" {
+				result.Warnings = append(result.Warnings, r.warning)
+			} else {
+				ollamaModels = r.models
+				result.OllamaCount = len(ollamaModels)
+			}
+		case "openrouter":
+			if r.warning != "" {
+				result.Warnings = append(result.Warnings, r.warning)
+			} else {
+				result.OpenRouterCount = len(openrouterModels)
+			}
+		}
 	}
 
+	// --- Merge by model ID ---
+	merged := mergeModels(goModels, ollamaModels)
+
+	// --- Load existing DB rows ---
 	existingRows, err := store.LoadModelRoutes()
 	if err != nil {
 		return result, fmt.Errorf("load model routes: %w", err)
@@ -81,22 +169,18 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		existingByID[row.ID] = row
 	}
 
-	defaultByID := map[string]config.ModelRoute{}
-	for _, route := range config.DefaultModels() {
-		defaultByID[route.ID] = route
-	}
-
 	now := opts.Now()
 	seen := map[string]bool{}
-	for _, source := range opencodeModels {
-		id := strings.TrimSpace(source.ID)
+	for _, sm := range merged {
+		id := strings.TrimSpace(sm.ID)
 		if id == "" || seen[id] {
 			continue
 		}
 		seen[id] = true
 
 		row, existed := existingByID[id]
-		route := buildSyncedRoute(source, row, existed, defaultByID)
+		route := buildMergedRoute(sm, row, existed)
+
 		if matched, matchedBy, ok := config.MatchOpenRouterModel(route, openrouterModels); ok {
 			config.ApplyOpenRouterMetadata(&route, matched, matchedBy)
 			result.MatchedCount++
@@ -124,6 +208,143 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 	return result, nil
 }
 
+// mergeModels combines Go and Ollama model lists by ID, producing a single
+// deduplicated list where overlapping models carry both upstreams.
+func mergeModels(goModels, ollamaModels []sourceModel) []sourceModel {
+	byID := make(map[string]sourceModel)
+	order := []string{}
+
+	addUpstream := func(sm sourceModel) {
+		existing, ok := byID[sm.ID]
+		if !ok {
+			byID[sm.ID] = sm
+			order = append(order, sm.ID)
+			return
+		}
+		// Merge: add this upstream to the existing entry
+		existing.Upstreams = appendUniqueUpstream(existing.Upstreams, sm.Upstream)
+		byID[sm.ID] = existing
+	}
+
+	for _, m := range goModels {
+		m.Upstreams = []config.Upstream{config.UpstreamGo}
+		addUpstream(m)
+	}
+	for _, m := range ollamaModels {
+		existing, ok := byID[m.ID]
+		if ok {
+			// Overlap: merge upstreams
+			existing.Upstreams = appendUniqueUpstream(existing.Upstreams, config.UpstreamOllama)
+			byID[m.ID] = existing
+		} else {
+			m.Upstreams = []config.Upstream{config.UpstreamOllama}
+			byID[m.ID] = m
+			order = append(order, m.ID)
+		}
+	}
+
+	out := make([]sourceModel, 0, len(order))
+	for _, id := range order {
+		out = append(out, byID[id])
+	}
+	return out
+}
+
+// appendUniqueUpstream adds an upstream to the slice if not already present.
+func appendUniqueUpstream(slice []config.Upstream, u config.Upstream) []config.Upstream {
+	for _, existing := range slice {
+		if existing == u {
+			return slice
+		}
+	}
+	return append(slice, u)
+}
+
+// buildMergedRoute constructs a ModelRoute from a merged sourceModel entry,
+// preserving admin-customized fields from the existing DB row.
+func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed bool) config.ModelRoute {
+	// Determine primary upstream and group
+	primaryUpstream := sm.Upstreams[0]
+	// Prefer Go as primary when available (Go has richer metadata)
+	for _, u := range sm.Upstreams {
+		if u == config.UpstreamGo {
+			primaryUpstream = config.UpstreamGo
+			break
+		}
+	}
+	group := "go"
+	if primaryUpstream == config.UpstreamOllama {
+		group = "ollama"
+	}
+	// If Go is in the list, group should be "go" (it has keys)
+	for _, u := range sm.Upstreams {
+		if u == config.UpstreamGo {
+			group = "go"
+			break
+		}
+	}
+
+	fallback := config.ModelRoute{
+		ID:        sm.ID,
+		Name:      sm.Name,
+		Upstream:  primaryUpstream,
+		Upstreams: sm.Upstreams,
+		Protocol:  inferProtocol(sm.ID, nil),
+		RealModel: sm.ID,
+		Group:     group,
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+		Tags:      fallbackTags(config.ModelRoute{ID: sm.ID, Name: sm.Name, RealModel: sm.ID}),
+	}
+	if fallback.Name == "" {
+		fallback.Name = sm.ID
+	}
+
+	if !existed {
+		return fallback
+	}
+
+	route := store.ModelRouteFromRow(existingRow)
+	route.ID = sm.ID
+	// Preserve the existing Upstream and Upstreams — do NOT unconditionally
+	// overwrite them with the merged source. An admin may have configured
+	// a multi-upstream route (e.g. [Ollama, Go]) or a non-Go primary
+	// upstream. Only set a default if the existing route has no upstream.
+	if strings.TrimSpace(string(route.Upstream)) == "" {
+		route.Upstream = primaryUpstream
+	}
+	if len(route.Upstreams) == 0 {
+		route.Upstreams = sm.Upstreams
+	}
+	if strings.TrimSpace(route.Group) == "" {
+		route.Group = group
+	}
+	if route.Status == nil {
+		route.Status = config.ModelStatusPtr(config.ModelStatusEnabled)
+	}
+	if !config.IsModelFieldCustomized(route, "name") {
+		route.Name = fallback.Name
+	}
+	if !config.IsModelFieldCustomized(route, "protocol") {
+		route.Protocol = fallback.Protocol
+	}
+	if !config.IsModelFieldCustomized(route, "real_model") {
+		route.RealModel = fallback.RealModel
+	}
+	if !config.IsModelFieldCustomized(route, "tags") && len(route.Tags) == 0 {
+		route.Tags = fallback.Tags
+	}
+	if route.Name == "" {
+		route.Name = fallback.Name
+	}
+	if route.Protocol == "" {
+		route.Protocol = fallback.Protocol
+	}
+	if route.RealModel == "" {
+		route.RealModel = fallback.RealModel
+	}
+	return route
+}
+
 // ReloadRuntimeFromStore replaces the in-memory model route table from SQLite.
 func ReloadRuntimeFromStore() error {
 	rows, err := store.LoadModelRoutes()
@@ -132,9 +353,6 @@ func ReloadRuntimeFromStore() error {
 	}
 	routes := make([]config.ModelRoute, 0, len(rows))
 	for _, row := range rows {
-		if row.Upstream != string(config.UpstreamGo) && row.Upstream != string(config.UpstreamOllama) {
-			continue
-		}
 		routes = append(routes, store.ModelRouteFromRow(row))
 	}
 	config.ReplaceModels(routes)
@@ -170,6 +388,9 @@ func withDefaults(opts Options) Options {
 	if strings.TrimSpace(opts.OpenRouterModelsURL) == "" {
 		opts.OpenRouterModelsURL = defaultOpenRouterModelsURL
 	}
+	if strings.TrimSpace(opts.OllamaModelsURL) == "" {
+		opts.OllamaModelsURL = defaultOllamaModelsURL
+	}
 	if opts.Client == nil {
 		opts.Client = &http.Client{Timeout: 15 * time.Second}
 	}
@@ -186,6 +407,16 @@ func fetchOpenCodeModels(ctx context.Context, client *http.Client, url string) (
 	}
 	models := payload.Data
 	sort.SliceStable(models, func(i, j int) bool { return models[i].ID < models[j].ID })
+	return models, nil
+}
+
+func fetchOllamaModels(ctx context.Context, client *http.Client, url string) ([]ollamaModel, error) {
+	var payload ollamaTagsPayload
+	if err := fetchJSON(ctx, client, url, &payload); err != nil {
+		return nil, fmt.Errorf("fetch ollama models: %w", err)
+	}
+	models := payload.Models
+	sort.SliceStable(models, func(i, j int) bool { return models[i].Name < models[j].Name })
 	return models, nil
 }
 
@@ -217,69 +448,9 @@ func fetchJSON(ctx context.Context, client *http.Client, url string, dst any) er
 	return nil
 }
 
-func buildSyncedRoute(source openCodeModel, existingRow store.ModelRouteRow, existed bool, defaults map[string]config.ModelRoute) config.ModelRoute {
-	id := strings.TrimSpace(source.ID)
-	fallback := config.ModelRoute{
-		ID:        id,
-		Name:      displayNameFor(source),
-		Upstream:  config.UpstreamGo,
-		Protocol:  inferProtocol(id, defaults),
-		RealModel: id,
-		Group:     "go",
-		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
-		Tags:      fallbackTags(config.ModelRoute{ID: id, Name: displayNameFor(source), RealModel: id}),
-	}
-	if def, ok := defaults[id]; ok {
-		fallback.Name = def.Name
-		fallback.Protocol = def.Protocol
-		fallback.RealModel = def.RealModel
-	}
-	if !existed {
-		return fallback
-	}
-
-	route := store.ModelRouteFromRow(existingRow)
-	route.ID = id
-	// Preserve the existing Upstream and Upstreams — do NOT unconditionally
-	// overwrite them with Go. An admin may have configured a multi-upstream
-	// route (e.g. [Ollama, Go]) or a non-Go primary upstream. Only set a
-	// default if the existing route has no upstream configured at all.
-	if strings.TrimSpace(string(route.Upstream)) == "" {
-		route.Upstream = config.UpstreamGo
-	}
-	if len(route.Upstreams) == 0 && route.Upstream == "" {
-		route.Upstream = config.UpstreamGo
-	}
-	if strings.TrimSpace(route.Group) == "" {
-		route.Group = "go"
-	}
-	if route.Status == nil {
-		route.Status = config.ModelStatusPtr(config.ModelStatusEnabled)
-	}
-	if !config.IsModelFieldCustomized(route, "name") {
-		route.Name = fallback.Name
-	}
-	if !config.IsModelFieldCustomized(route, "protocol") {
-		route.Protocol = fallback.Protocol
-	}
-	if !config.IsModelFieldCustomized(route, "real_model") {
-		route.RealModel = fallback.RealModel
-	}
-	if !config.IsModelFieldCustomized(route, "tags") && len(route.Tags) == 0 {
-		route.Tags = fallback.Tags
-	}
-	if route.Name == "" {
-		route.Name = fallback.Name
-	}
-	if route.Protocol == "" {
-		route.Protocol = fallback.Protocol
-	}
-	if route.RealModel == "" {
-		route.RealModel = fallback.RealModel
-	}
-	return route
-}
-
+// inferProtocol guesses the upstream protocol from the model id when no
+// DefaultModels seed is available. minimax-* and qwen* use Messages; all
+// others use Chat.
 func inferProtocol(id string, defaults map[string]config.ModelRoute) config.Protocol {
 	if def, ok := defaults[id]; ok && def.Protocol != "" {
 		return def.Protocol
@@ -289,28 +460,6 @@ func inferProtocol(id string, defaults map[string]config.ModelRoute) config.Prot
 		return config.ProtocolMessages
 	}
 	return config.ProtocolChat
-}
-
-func displayNameFor(source openCodeModel) string {
-	if name := strings.TrimSpace(source.Name); name != "" {
-		return name
-	}
-	parts := strings.FieldsFunc(source.ID, func(r rune) bool { return r == '-' || r == '_' })
-	for i, part := range parts {
-		lower := strings.ToLower(part)
-		switch lower {
-		case "glm", "kimi", "mimo", "qwen", "hy3":
-			parts[i] = strings.ToUpper(part)
-		default:
-			if len(part) > 0 {
-				parts[i] = strings.ToUpper(part[:1]) + part[1:]
-			}
-		}
-	}
-	if len(parts) == 0 {
-		return source.ID
-	}
-	return strings.Join(parts, " ")
 }
 
 func fallbackTags(route config.ModelRoute) []string {

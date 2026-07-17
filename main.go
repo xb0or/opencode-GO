@@ -34,16 +34,16 @@ func main() {
 	if result, err := modelsync.Sync(context.Background(), modelsync.Options{}); err != nil {
 		log.Printf("warn: model catalog sync failed: %v", err)
 	} else {
-		log.Printf("synced model catalog: opencode=%d openrouter=%d matched=%d created=%d updated=%d warnings=%v",
-			result.OpenCodeCount, result.OpenRouterCount, result.MatchedCount, result.CreatedCount, result.UpdatedCount, result.Warnings)
+		log.Printf("synced model catalog: opencode=%d ollama=%d openrouter=%d matched=%d created=%d updated=%d warnings=%v",
+			result.OpenCodeCount, result.OllamaCount, result.OpenRouterCount, result.MatchedCount, result.CreatedCount, result.UpdatedCount, result.Warnings)
 	}
 	modelsync.StartBackground(context.Background(), 6*time.Hour, modelsync.Options{}, func(result modelsync.Result, err error) {
 		if err != nil {
 			log.Printf("warn: background model catalog sync failed: %v", err)
 			return
 		}
-		log.Printf("background model catalog synced: opencode=%d matched=%d created=%d updated=%d warnings=%v",
-			result.OpenCodeCount, result.MatchedCount, result.CreatedCount, result.UpdatedCount, result.Warnings)
+		log.Printf("background model catalog synced: opencode=%d ollama=%d matched=%d created=%d updated=%d warnings=%v",
+			result.OpenCodeCount, result.OllamaCount, result.MatchedCount, result.CreatedCount, result.UpdatedCount, result.Warnings)
 	})
 
 	// Release mode in production.
@@ -99,23 +99,18 @@ func loadModelMappings() {
 	config.LoadModelMappings()
 }
 
-// loadModelRoutes loads model routes from DB, seeding defaults if empty.
+// loadModelRoutes loads model routes from DB. If the DB is empty, it waits for
+// the first modelsync.Sync() call (triggered immediately in main) to populate
+// the catalog from upstream APIs. No hardcoded seed models are used.
 func loadModelRoutes() {
 	rows, err := store.LoadModelRoutes()
-	defaults := config.DefaultModels()
 	if err != nil {
 		log.Printf("warn: cannot load model routes: %v", err)
-		config.RegisterModels(defaults)
 		return
 	}
 	if len(rows) == 0 {
-		// First run: seed defaults into DB.
-		for _, m := range defaults {
-			row := store.NewModelRouteRow(m)
-			store.SaveModelRoute(&row)
-		}
-		config.ReplaceModels(defaults)
-		log.Printf("seeded %d default model routes into DB", len(defaults))
+		// First run: no seed models; modelsync.Sync() will populate from APIs.
+		log.Printf("model routes DB is empty; waiting for first sync to populate from upstream APIs")
 		return
 	}
 	// Load from DB into config.
@@ -128,16 +123,6 @@ func loadModelRoutes() {
 			continue
 		}
 		routes = append(routes, store.ModelRouteFromRow(r))
-	}
-	if len(routes) == 0 {
-		defaults := config.DefaultModels()
-		for _, m := range defaults {
-			row := store.NewModelRouteRow(m)
-			store.SaveModelRoute(&row)
-		}
-		config.ReplaceModels(defaults)
-		log.Printf("seeded %d default Go model routes into DB", len(defaults))
-		return
 	}
 	config.ReplaceModels(routes)
 	log.Printf("loaded %d model routes from DB", len(rows))

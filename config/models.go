@@ -33,12 +33,12 @@ const (
 type ModelRoute struct {
 	ID                  string             `json:"id"`                              // gateway-facing model id, e.g. "glm-5.1"
 	Name                string             `json:"name"`                            // display name
-	Upstream            Upstream           `json:"upstream"`                        // go
-	Upstreams           []Upstream         `json:"upstreams,omitempty"`             // ordered failover list; populated from Upstream when empty
+	Upstream            Upstream           `json:"upstream"`                        // primary upstream (used for routing); go | ollama
+	Upstreams           []Upstream         `json:"upstreams,omitempty"`            // all upstreams that serve this model, e.g. ["go","ollama"]
 	UpstreamGroups      map[Upstream]string `json:"upstream_groups,omitempty"`      // per-upstream key-pool group override; empty = use upstream name
 	Protocol            Protocol           `json:"protocol"`                        // chat | messages | responses | google
 	RealModel           string             `json:"real_model"`                      // upstream model id, e.g. "glm-5.1"
-	Group               string             `json:"group"`                           // logical KEY-pool group, e.g. "go"
+	Group               string             `json:"group"`                           // logical KEY-pool group name, e.g. "go"
 	ContextLen          int                `json:"context_len"`                     // optional context window hint
 	Status              *int               `json:"status,omitempty"`                // 0 disabled, 1 enabled; nil defaults to enabled
 	Priority            int                `json:"priority"`                        // optional admin-defined display/routing priority
@@ -53,18 +53,6 @@ type ModelRoute struct {
 	SupportedParameters []string           `json:"supported_parameters,omitempty"`
 	Description         string             `json:"description,omitempty"`
 	KnowledgeCutoff     string             `json:"knowledge_cutoff,omitempty"`
-}
-
-// UpstreamGroup returns the key-pool group for a given upstream.
-// If UpstreamGroups has an explicit mapping, that is used.
-// Otherwise the upstream name itself is used as the group (backward compatible).
-func (m ModelRoute) UpstreamGroup(u Upstream) string {
-	if m.UpstreamGroups != nil {
-		if g, ok := m.UpstreamGroups[u]; ok && g != "" {
-			return g
-		}
-	}
-	return string(u)
 }
 
 // ModelArchitecture describes OpenRouter modality/tokenizer metadata.
@@ -85,6 +73,18 @@ const (
 func ModelStatusPtr(status int) *int {
 	v := status
 	return &v
+}
+
+// UpstreamGroup returns the key-pool group for the given upstream.
+// When an explicit UpstreamGroups mapping exists, it takes precedence.
+// Otherwise, the upstream name itself is used as the group name.
+func (m ModelRoute) UpstreamGroup(u Upstream) string {
+	if m.UpstreamGroups != nil {
+		if g, ok := m.UpstreamGroups[u]; ok && g != "" {
+			return g
+		}
+	}
+	return string(u)
 }
 
 // IsEnabled reports whether a route should be visible and callable.
@@ -181,40 +181,12 @@ func BaseURLFor(u Upstream) string {
 	}
 }
 
-// DefaultModels is the OpenCode Go seed catalog.
-// The group field doubles as the KEY-pool group name used by the pool package.
+// DefaultModels returns an empty seed catalog. All models are now discovered
+// automatically by the modelsync package from upstream APIs (OpenCode Go and
+// Ollama Cloud). This function is kept for backward compatibility with callers
+// that reference it during startup; it returns nil.
 func DefaultModels() []ModelRoute {
-	return []ModelRoute{
-		// --- OpenAI-compatible Chat Completions ---
-		{ID: "glm-5.1", Name: "GLM-5.1", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "glm-5.1", Group: "go"},
-		{ID: "glm-5", Name: "GLM-5", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "glm-5", Group: "go"},
-		{ID: "kimi-k2.7-code", Name: "Kimi K2.7 Code", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "kimi-k2.7-code", Group: "go"},
-		{ID: "kimi-k2.6", Name: "Kimi K2.6", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "kimi-k2.6", Group: "go"},
-		{ID: "mimo-v2.5", Name: "MiMo-V2.5", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "mimo-v2.5", Group: "go"},
-		{ID: "mimo-v2.5-pro", Name: "MiMo-V2.5-Pro", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "mimo-v2.5-pro", Group: "go"},
-		{ID: "deepseek-v4-pro", Name: "DeepSeek V4 Pro", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "deepseek-v4-pro", Group: "go"},
-		{ID: "deepseek-v4-flash", Name: "DeepSeek V4 Flash", Upstream: UpstreamGo, Protocol: ProtocolChat, RealModel: "deepseek-v4-flash", Group: "go"},
-
-		// --- Anthropic-compatible Messages ---
-		{ID: "minimax-m3", Name: "MiniMax M3", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "minimax-m3", Group: "go"},
-		{ID: "minimax-m2.7", Name: "MiniMax M2.7", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "minimax-m2.7", Group: "go"},
-		{ID: "minimax-m2.5", Name: "MiniMax M2.5", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "minimax-m2.5", Group: "go"},
-		{ID: "qwen3.7-max", Name: "Qwen3.7 Max", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "qwen3.7-max", Group: "go"},
-		{ID: "qwen3.7-plus", Name: "Qwen3.7 Plus", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "qwen3.7-plus", Group: "go"},
-		{ID: "qwen3.6-plus", Name: "Qwen3.6 Plus", Upstream: UpstreamGo, Protocol: ProtocolMessages, RealModel: "qwen3.6-plus", Group: "go"},
-
-		// --- Ollama Cloud models (group: ollama) ---
-		// Ollama Cloud is a hosted service at https://ollama.com offering
-		// an OpenAI-compatible /v1/chat/completions endpoint with Bearer auth.
-		{ID: "gpt-oss:120b", Name: "GPT-OSS 120B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "gpt-oss:120b", Group: "ollama"},
-		{ID: "gpt-oss:20b", Name: "GPT-OSS 20B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "gpt-oss:20b", Group: "ollama"},
-		{ID: "qwen3.5:397b", Name: "Qwen3.5 397B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "qwen3.5:397b", Group: "ollama"},
-		{ID: "gemma4:31b", Name: "Gemma4 31B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "gemma4:31b", Group: "ollama"},
-		{ID: "mistral-large-3:675b", Name: "Mistral Large 3 675B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "mistral-large-3:675b", Group: "ollama"},
-		{ID: "nemotron-3-ultra", Name: "Nemotron 3 Ultra", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "nemotron-3-ultra", Group: "ollama"},
-		{ID: "nemotron-3-super", Name: "Nemotron 3 Super", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "nemotron-3-super", Group: "ollama"},
-		{ID: "nemotron-3-nano:30b", Name: "Nemotron 3 Nano 30B", Upstream: UpstreamOllama, Protocol: ProtocolChat, RealModel: "nemotron-3-nano:30b", Group: "ollama"},
-	}
+	return nil
 }
 
 // EnrichModelsFromOpenRouter fetches OpenRouter metadata and best-effort
@@ -365,9 +337,6 @@ func applyLocalModelDefaults(route *ModelRoute) {
 	if route.Upstream == "" {
 		route.Upstream = UpstreamGo
 	}
-	// Populate Upstreams from Upstream when empty, so the request phase always
-	// has a complete list to iterate over. This keeps single-upstream configs
-	// working identically while enabling multi-upstream failover.
 	if len(route.Upstreams) == 0 {
 		route.Upstreams = []Upstream{route.Upstream}
 	}

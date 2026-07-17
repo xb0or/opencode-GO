@@ -56,8 +56,8 @@ type ModelRouteRow struct {
 	ID                      string     `gorm:"primaryKey;size:128" json:"id"`
 	Name                    string     `gorm:"size:128" json:"name"`
 	Upstream                string     `gorm:"size:32;not null" json:"upstream"`
-	UpstreamsJSON           string     `gorm:"type:text" json:"upstreams_json,omitempty"`          // JSON array of Upstream for multi-upstream failover
-	UpstreamGroupsJSON      string     `gorm:"type:text" json:"upstream_groups_json,omitempty"`    // JSON map[Upstream]string for per-upstream group overrides
+	UpstreamsJSON           string     `gorm:"type:text" json:"upstreams_json,omitempty"`
+	UpstreamGroupsJSON      string     `gorm:"type:text" json:"upstream_groups_json,omitempty"`
 	Protocol                string     `gorm:"size:32;not null" json:"protocol"`
 	RealModel               string     `gorm:"size:255;not null" json:"real_model"`
 	Group                   string     `gorm:"size:32;not null" json:"group"`
@@ -180,7 +180,7 @@ func ModelRouteFromRow(r ModelRouteRow) config.ModelRoute {
 		ID:                  strings.TrimSpace(r.ID),
 		Name:                strings.TrimSpace(r.Name),
 		Upstream:            config.Upstream(strings.TrimSpace(r.Upstream)),
-		Upstreams:           decodeUpstreams(r.UpstreamsJSON),
+		Upstreams:           decodeUpstreamSlice(r.UpstreamsJSON),
 		UpstreamGroups:      decodeUpstreamGroups(r.UpstreamGroupsJSON),
 		Protocol:            config.Protocol(strings.TrimSpace(r.Protocol)),
 		RealModel:           strings.TrimSpace(r.RealModel),
@@ -254,7 +254,7 @@ func NewModelRouteRow(m config.ModelRoute) ModelRouteRow {
 		ID:                      strings.TrimSpace(m.ID),
 		Name:                    strings.TrimSpace(m.Name),
 		Upstream:                string(m.Upstream),
-		UpstreamsJSON:           encodeUpstreams(m.Upstreams),
+		UpstreamsJSON:           encodeUpstreamSlice(m.Upstreams),
 		UpstreamGroupsJSON:      encodeUpstreamGroups(m.UpstreamGroups),
 		Protocol:                string(m.Protocol),
 		RealModel:               strings.TrimSpace(m.RealModel),
@@ -333,16 +333,45 @@ func decodeStringMap(raw string) map[string]string {
 	return out
 }
 
-func decodeUpstreams(raw string) []config.Upstream {
+// decodeUpstreamSlice parses a JSON array of upstream names into a typed slice.
+func decodeUpstreamSlice(raw string) []config.Upstream {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}
-	var out []config.Upstream
-	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+	var names []string
+	if err := json.Unmarshal([]byte(raw), &names); err != nil {
+		return nil
+	}
+	out := make([]config.Upstream, 0, len(names))
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		out = append(out, config.Upstream(n))
+	}
+	if len(out) == 0 {
 		return nil
 	}
 	return out
+}
+
+// encodeUpstreamSlice serialises a typed upstream slice to JSON, returning ""
+// for nil/empty so the column stays clean.
+func encodeUpstreamSlice(upstreams []config.Upstream) string {
+	if len(upstreams) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(upstreams))
+	for _, u := range upstreams {
+		names = append(names, string(u))
+	}
+	b, err := json.Marshal(names)
+	if err != nil || string(b) == "null" || string(b) == "[]" {
+		return ""
+	}
+	return string(b)
 }
 
 func decodeUpstreamGroups(raw string) map[config.Upstream]string {
@@ -355,17 +384,6 @@ func decodeUpstreamGroups(raw string) map[config.Upstream]string {
 		return nil
 	}
 	return out
-}
-
-func encodeUpstreams(upstreams []config.Upstream) string {
-	if len(upstreams) == 0 {
-		return ""
-	}
-	b, err := json.Marshal(upstreams)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }
 
 func encodeUpstreamGroups(groups map[config.Upstream]string) string {

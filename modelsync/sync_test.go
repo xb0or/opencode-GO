@@ -42,6 +42,12 @@ func TestSyncMergesSourcesAndPreservesCustomizedFields(t *testing.T) {
 	}))
 	defer opencodeSrv.Close()
 
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"glm-5.2"},{"name":"gpt-oss:120b"}]}`))
+	}))
+	defer ollamaSrv.Close()
+
 	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[
@@ -53,16 +59,21 @@ func TestSyncMergesSourcesAndPreservesCustomizedFields(t *testing.T) {
 
 	result, err := Sync(context.Background(), Options{
 		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
 		OpenRouterModelsURL: openrouterSrv.URL,
 		Now:                 func() time.Time { return time.Unix(100, 0) },
 	})
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if result.OpenCodeCount != 2 || result.MatchedCount != 2 || result.CreatedCount != 1 || result.UpdatedCount != 1 {
+	// Go returned 2 models, Ollama returned 2 models, one overlaps (glm-5.2).
+	// Merged unique: gpt-4o, glm-5.2, gpt-oss:120b = 3 models.
+	// gpt-4o existed (updated), glm-5.2 + gpt-oss:120b are new (created).
+	if result.OpenCodeCount != 2 || result.OllamaCount != 2 || result.MatchedCount != 2 || result.CreatedCount != 2 || result.UpdatedCount != 1 {
 		t.Fatalf("unexpected result: %#v", result)
 	}
 
+	// Custom fields preserved
 	got, ok := config.LookupModel("gpt-4o")
 	if !ok {
 		t.Fatal("custom model missing from runtime config")
@@ -76,16 +87,46 @@ func TestSyncMergesSourcesAndPreservesCustomizedFields(t *testing.T) {
 	if got.OpenRouterID != "openai/gpt-4o" {
 		t.Fatalf("OpenRouter metadata not refreshed: %#v", got)
 	}
+	// gpt-4o is Go-only → Upstreams should be ["go"]
+	if len(got.Upstreams) != 1 || got.Upstreams[0] != config.UpstreamGo {
+		t.Fatalf("gpt-4o upstreams should be [go]: %#v", got.Upstreams)
+	}
 
-	created, ok := config.LookupModel("glm-5.2")
+	// Overlapping model: glm-5.2 appears in both Go and Ollama
+	overlap, ok := config.LookupModel("glm-5.2")
 	if !ok {
-		t.Fatal("new opencode model missing from runtime config")
+		t.Fatal("overlapping model glm-5.2 missing from runtime config")
 	}
-	if !created.IsEnabled() || created.ContextLen != 202752 || created.OpenRouterID != "z-ai/glm-5.2" {
-		t.Fatalf("new model not enriched/enabled: %#v", created)
+	if !overlap.IsEnabled() || overlap.ContextLen != 202752 || overlap.OpenRouterID != "z-ai/glm-5.2" {
+		t.Fatalf("overlapping model not enriched/enabled: %#v", overlap)
 	}
-	if len(created.Tags) == 0 {
-		t.Fatalf("new model should have derived tags: %#v", created)
+	// glm-5.2 appears in both Go and Ollama → Upstreams should be ["go","ollama"]
+	if len(overlap.Upstreams) != 2 {
+		t.Fatalf("glm-5.2 should have 2 upstreams: %#v", overlap.Upstreams)
+	}
+	hasGo, hasOllama := false, false
+	for _, u := range overlap.Upstreams {
+		if u == config.UpstreamGo {
+			hasGo = true
+		}
+		if u == config.UpstreamOllama {
+			hasOllama = true
+		}
+	}
+	if !hasGo || !hasOllama {
+		t.Fatalf("glm-5.2 should have both go and ollama upstreams: %#v", overlap.Upstreams)
+	}
+
+	// Ollama-only model: gpt-oss:120b
+	ollamaOnly, ok := config.LookupModel("gpt-oss:120b")
+	if !ok {
+		t.Fatal("ollama-only model gpt-oss:120b missing from runtime config")
+	}
+	if len(ollamaOnly.Upstreams) != 1 || ollamaOnly.Upstreams[0] != config.UpstreamOllama {
+		t.Fatalf("gpt-oss:120b should have only ollama upstream: %#v", ollamaOnly.Upstreams)
+	}
+	if ollamaOnly.Group != "ollama" {
+		t.Fatalf("gpt-oss:120b group should be ollama: %s", ollamaOnly.Group)
 	}
 }
 
@@ -99,12 +140,23 @@ func TestSyncContinuesWhenOpenRouterFails(t *testing.T) {
 		_, _ = w.Write([]byte(`{"data":[{"id":"fallback-model"}]}`))
 	}))
 	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer ollamaSrv.Close()
+
 	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer openrouterSrv.Close()
 
-	result, err := Sync(context.Background(), Options{OpenCodeModelsURL: opencodeSrv.URL, OpenRouterModelsURL: openrouterSrv.URL})
+	result, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+	})
 	if err != nil {
 		t.Fatalf("sync should tolerate OpenRouter failure: %v", err)
 	}
@@ -116,17 +168,57 @@ func TestSyncContinuesWhenOpenRouterFails(t *testing.T) {
 	}
 }
 
+func TestSyncContinuesWhenOllamaFails(t *testing.T) {
+	if err := store.InitForTest("file:modelsync_ollama_fail?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"go-only-model"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	// Ollama server returns error
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	result, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+	})
+	if err != nil {
+		t.Fatalf("sync should tolerate Ollama failure: %v", err)
+	}
+	if len(result.Warnings) == 0 || result.CreatedCount != 1 {
+		t.Fatalf("expected warning and created row: %#v", result)
+	}
+	got, ok := config.LookupModel("go-only-model")
+	if !ok {
+		t.Fatal("go-only model missing after partial sync")
+	}
+	if len(got.Upstreams) != 1 || got.Upstreams[0] != config.UpstreamGo {
+		t.Fatalf("go-only model should have only go upstream: %#v", got.Upstreams)
+	}
+}
+
 // TestSyncPreservesOllamaUpstream verifies that when an existing route has
 // Ollama as its primary upstream, model sync does NOT overwrite it to Go.
-// This prevents credential exposure where Ollama keys would be sent to the
-// Go base URL.
 func TestSyncPreservesOllamaUpstream(t *testing.T) {
 	if err := store.InitForTest("file:modelsync_preserve_ollama?mode=memory&cache=shared"); err != nil {
 		t.Fatalf("init test db: %v", err)
 	}
 	config.ReplaceModels(nil)
 
-	// Save a route with Ollama as the primary upstream.
 	ollamaRoute := config.ModelRoute{
 		ID:        "glm-5.2",
 		Name:      "GLM 5.2 (Ollama)",
@@ -179,15 +271,13 @@ func TestSyncPreservesOllamaUpstream(t *testing.T) {
 }
 
 // TestReloadRuntimeFromStorePreservesCustomGroup verifies that routes with
-// custom groups (e.g. "premium") survive ReloadRuntimeFromStore and can be
-// resolved at runtime.
+// custom groups (e.g. "premium") survive ReloadRuntimeFromStore.
 func TestReloadRuntimeFromStorePreservesCustomGroup(t *testing.T) {
 	if err := store.InitForTest("file:modelsync_custom_group?mode=memory&cache=shared"); err != nil {
 		t.Fatalf("init test db: %v", err)
 	}
 	config.ReplaceModels(nil)
 
-	// Save a route with a custom group.
 	customRoute := config.ModelRoute{
 		ID:        "premium-model",
 		Name:      "Premium Model",
@@ -202,7 +292,6 @@ func TestReloadRuntimeFromStorePreservesCustomGroup(t *testing.T) {
 		t.Fatalf("save custom route: %v", err)
 	}
 
-	// Reload from store — this should NOT filter out the premium group.
 	if err := ReloadRuntimeFromStore(); err != nil {
 		t.Fatalf("ReloadRuntimeFromStore: %v", err)
 	}
