@@ -321,6 +321,15 @@ func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed b
 		}
 		// When the primary provider's fetch failed, keep existing upstream.
 	}
+	// When the primary upstream changed and Group is not admin-customized,
+	// update Group to match the new upstream's default group. This prevents
+	// stale Group values (e.g. "go") from persisting after the upstream
+	// switched to "ollama".
+	if !config.IsModelFieldCustomized(route, "group") {
+		if !upstreamFetchFailed(primaryUpstream, goFetched, ollamaFetched) {
+			route.Group = group
+		}
+	}
 	if !config.IsModelFieldCustomized(route, "upstreams") {
 		// Per-provider membership: each provider's presence in the merged
 		// result is authoritative only when its catalog fetch succeeded.
@@ -381,9 +390,6 @@ func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed b
 	}
 	if !config.IsModelFieldCustomized(route, "upstream_groups") {
 		route.UpstreamGroups = nil
-	}
-	if strings.TrimSpace(route.Group) == "" {
-		route.Group = group
 	}
 	if route.Status == nil {
 		route.Status = config.ModelStatusPtr(config.ModelStatusEnabled)

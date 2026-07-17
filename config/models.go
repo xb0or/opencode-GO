@@ -405,6 +405,12 @@ func applyLocalModelDefaults(route *ModelRoute) {
 	}
 	route.CustomizedFields = NormalizeCustomizedFields(route.CustomizedFields)
 	route.IsCustomized = route.IsCustomized || len(route.CustomizedFields) > 0
+	// Validate invariants after all defaults are applied. Log warnings
+	// for invalid routes rather than panicking — the caller (RegisterModel,
+	// ReplaceModels) can decide whether to reject the route.
+	if err := ValidateModelRoute(*route); err != nil {
+		log.Printf("warn: model route %q failed validation: %v", route.ID, err)
+	}
 }
 
 // IsModelFieldCustomized reports whether automatic sync should preserve a
@@ -552,6 +558,55 @@ var ValidUpstreams = []Upstream{UpstreamGo, UpstreamOllama}
 // IsValidUpstream returns true if the given upstream is recognized.
 func IsValidUpstream(u Upstream) bool {
 	return u == UpstreamGo || u == UpstreamOllama
+}
+
+// ValidateModelRoute checks invariants on a fully-merged ModelRoute.
+// It should be called after all field merging (defaults, sync, admin edits)
+// to ensure the route is internally consistent.
+//
+// Invariants checked:
+//   - Upstream must be a valid upstream name.
+//   - Upstreams must not be empty.
+//   - Upstream must appear in Upstreams.
+//   - All Upstreams entries must be valid upstream names.
+//   - All UpstreamGroups keys must be valid and appear in Upstreams.
+//   - All Targets keys must be valid and appear in Upstreams.
+//
+// Returns nil if valid, or an error describing the first violation.
+func ValidateModelRoute(m ModelRoute) error {
+	if !IsValidUpstream(m.Upstream) {
+		return fmt.Errorf("invalid primary upstream %q (valid: go, ollama)", m.Upstream)
+	}
+	if len(m.Upstreams) == 0 {
+		return fmt.Errorf("upstreams list must not be empty")
+	}
+	upstreamSet := make(map[Upstream]bool, len(m.Upstreams))
+	for _, u := range m.Upstreams {
+		if !IsValidUpstream(u) {
+			return fmt.Errorf("invalid upstream %q in upstreams list (valid: go, ollama)", u)
+		}
+		upstreamSet[u] = true
+	}
+	if !upstreamSet[m.Upstream] {
+		return fmt.Errorf("primary upstream %q not found in upstreams list %v", m.Upstream, m.Upstreams)
+	}
+	for k := range m.UpstreamGroups {
+		if !IsValidUpstream(k) {
+			return fmt.Errorf("invalid upstream %q in upstream_groups keys (valid: go, ollama)", k)
+		}
+		if !upstreamSet[k] {
+			return fmt.Errorf("upstream_groups key %q not found in upstreams list %v", k, m.Upstreams)
+		}
+	}
+	for k := range m.Targets {
+		if !IsValidUpstream(k) {
+			return fmt.Errorf("invalid upstream %q in targets keys (valid: go, ollama)", k)
+		}
+		if !upstreamSet[k] {
+			return fmt.Errorf("targets key %q not found in upstreams list %v", k, m.Upstreams)
+		}
+	}
+	return nil
 }
 
 // ValidateAndNormalizeUpstreams validates and deduplicates an upstream list.

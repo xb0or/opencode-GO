@@ -283,11 +283,13 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 
 		// Create a fresh timeout context per key attempt so a timeout
 		// on one key does not poison the context for subsequent keys.
+		// Cancel immediately when this iteration ends (not deferred to
+		// function return) to avoid accumulating timers across keys.
 		ctx, cancel := upstreamRequestContext(c.Request.Context(), head.Stream)
-		defer cancel()
 
 		req, err := http.NewRequestWithContext(ctx, c.Request.Method, target, bytes.NewReader(upstreamBody))
 		if err != nil {
+			cancel()
 			markAndLog(c, p, key, route, inbound, http.StatusInternalServerError, start, head.Stream, nil, err.Error())
 			return attemptResult{
 				Status:    http.StatusInternalServerError,
@@ -302,6 +304,7 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		upstreamClient := upstream.NewClientForProxy(key.ProxyURL)
 		resp, err := upstreamClient.Do(req)
 		if err != nil {
+			cancel()
 			if status, _, message, ok := classifyProxyContextError(err); ok {
 				markAndLog(c, p, key, route, inbound, status, start, head.Stream, nil, message)
 				if status == statusClientClosedRequest {
@@ -332,6 +335,7 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		if shouldRetryWithNextKey(resp.StatusCode) && i+1 < len(attempts) {
 			body, readErr := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
+			cancel()
 			if readErr != nil {
 				markKeyFailure(p, key, resp.StatusCode, nil)
 				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
@@ -343,33 +347,34 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		}
 
 		// Failure status — if there are more upstreams to try, break out
-			// of the key loop and try the next upstream. On the last upstream,
-			// preserve the status and headers but use a generic error message.
-			if shouldMarkUpstreamFailure(resp.StatusCode) {
-				body, readErr := io.ReadAll(resp.Body)
-				_ = resp.Body.Close()
-				if readErr != nil {
-					markKeyFailure(p, key, resp.StatusCode, nil)
-					markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
-				} else {
-					markKeyFailure(p, key, resp.StatusCode, body)
-					markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, nil, summarizeUpstreamError(resp.StatusCode, body))
-				}
-				if ui+1 < len(upstreamsToTry) {
-					return attemptResult{
-						Response:  resp,
-						Status:    resp.StatusCode,
-						Retryable: true,
-					}
-				}
-				// Last upstream — preserve the original error response
-				// for status/headers, but use generic error message for body.
+		// of the key loop and try the next upstream. On the last upstream,
+		// preserve the status and headers but use a generic error message.
+		if shouldMarkUpstreamFailure(resp.StatusCode) {
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			cancel()
+			if readErr != nil {
+				markKeyFailure(p, key, resp.StatusCode, nil)
+				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
+			} else {
+				markKeyFailure(p, key, resp.StatusCode, body)
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, nil, summarizeUpstreamError(resp.StatusCode, body))
+			}
+			if ui+1 < len(upstreamsToTry) {
 				return attemptResult{
 					Response:  resp,
 					Status:    resp.StatusCode,
-					Retryable: false,
+					Retryable: true,
 				}
 			}
+			// Last upstream — preserve the original error response
+			// for status/headers, but use generic error message for body.
+			return attemptResult{
+				Response:  resp,
+				Status:    resp.StatusCode,
+				Retryable: false,
+			}
+		}
 
 		// Success — pre-read the response body and delegate to the response
 		// handler. The handler returns a responseResult that tells us whether
@@ -377,6 +382,7 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		// try the next upstream (Retryable).
 		responseBody, readErr := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		cancel()
 		if readErr != nil {
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
