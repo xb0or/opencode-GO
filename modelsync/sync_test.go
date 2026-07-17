@@ -115,3 +115,106 @@ func TestSyncContinuesWhenOpenRouterFails(t *testing.T) {
 		t.Fatal("fallback model missing after partial sync")
 	}
 }
+
+// TestSyncPreservesOllamaUpstream verifies that when an existing route has
+// Ollama as its primary upstream, model sync does NOT overwrite it to Go.
+// This prevents credential exposure where Ollama keys would be sent to the
+// Go base URL.
+func TestSyncPreservesOllamaUpstream(t *testing.T) {
+	if err := store.InitForTest("file:modelsync_preserve_ollama?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	// Save a route with Ollama as the primary upstream.
+	ollamaRoute := config.ModelRoute{
+		ID:        "glm-5.2",
+		Name:      "GLM 5.2 (Ollama)",
+		Upstream:  config.UpstreamOllama,
+		Upstreams: []config.Upstream{config.UpstreamOllama, config.UpstreamGo},
+		Protocol:  config.ProtocolChat,
+		RealModel: "glm-5.2",
+		Group:     "ollama",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+	row := store.NewModelRouteRow(ollamaRoute)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("save ollama route: %v", err)
+	}
+
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"glm-5.2"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("glm-5.2")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	if got.Upstream != config.UpstreamOllama {
+		t.Fatalf("Upstream overwritten: got %q, want %q", got.Upstream, config.UpstreamOllama)
+	}
+	if len(got.Upstreams) != 2 || got.Upstreams[0] != config.UpstreamOllama {
+		t.Fatalf("Upstreams modified: got %v, want [ollama go]", got.Upstreams)
+	}
+	if got.Group != "ollama" {
+		t.Fatalf("Group overwritten: got %q, want %q", got.Group, "ollama")
+	}
+}
+
+// TestReloadRuntimeFromStorePreservesCustomGroup verifies that routes with
+// custom groups (e.g. "premium") survive ReloadRuntimeFromStore and can be
+// resolved at runtime.
+func TestReloadRuntimeFromStorePreservesCustomGroup(t *testing.T) {
+	if err := store.InitForTest("file:modelsync_custom_group?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	// Save a route with a custom group.
+	customRoute := config.ModelRoute{
+		ID:        "premium-model",
+		Name:      "Premium Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "premium-v1",
+		Group:     "premium",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+	row := store.NewModelRouteRow(customRoute)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("save custom route: %v", err)
+	}
+
+	// Reload from store — this should NOT filter out the premium group.
+	if err := ReloadRuntimeFromStore(); err != nil {
+		t.Fatalf("ReloadRuntimeFromStore: %v", err)
+	}
+
+	got, ok := config.LookupModel("premium-model")
+	if !ok {
+		t.Fatal("premium model missing after ReloadRuntimeFromStore")
+	}
+	if got.Group != "premium" {
+		t.Fatalf("Group overwritten: got %q, want %q", got.Group, "premium")
+	}
+	if !got.IsEnabled() {
+		t.Fatal("premium model should be enabled")
+	}
+}

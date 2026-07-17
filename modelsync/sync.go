@@ -135,9 +135,6 @@ func ReloadRuntimeFromStore() error {
 		if row.Upstream != string(config.UpstreamGo) && row.Upstream != string(config.UpstreamOllama) {
 			continue
 		}
-		if row.Group != "go" && row.Group != "ollama" {
-			continue
-		}
 		routes = append(routes, store.ModelRouteFromRow(row))
 	}
 	config.ReplaceModels(routes)
@@ -243,7 +240,16 @@ func buildSyncedRoute(source openCodeModel, existingRow store.ModelRouteRow, exi
 
 	route := store.ModelRouteFromRow(existingRow)
 	route.ID = id
-	route.Upstream = config.UpstreamGo
+	// Preserve the existing Upstream and Upstreams — do NOT unconditionally
+	// overwrite them with Go. An admin may have configured a multi-upstream
+	// route (e.g. [Ollama, Go]) or a non-Go primary upstream. Only set a
+	// default if the existing route has no upstream configured at all.
+	if strings.TrimSpace(string(route.Upstream)) == "" {
+		route.Upstream = config.UpstreamGo
+	}
+	if len(route.Upstreams) == 0 && route.Upstream == "" {
+		route.Upstream = config.UpstreamGo
+	}
 	if strings.TrimSpace(route.Group) == "" {
 		route.Group = "go"
 	}
