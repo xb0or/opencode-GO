@@ -38,6 +38,7 @@ import (
 //  6. Cross-protocol (Messages/Responses → Chat): read full response, convert
 //     back to inbound protocol, relay to client.
 //  7. Bookkeeping: mark key success/failure, write usage log.
+//
 // proxyOllamaRequest handles an Ollama Cloud-routed request.
 // When handled is non-nil, the function sets *handled = true only when it
 // writes a successful response (2xx) to the client. On failure (4xx/5xx)
@@ -68,7 +69,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		if convErr != nil {
 			writeOpenAIError(c, http.StatusBadRequest, "conversion_error",
 				fmt.Sprintf("failed to convert request from %s to chat: %v", inbound, convErr))
-			setHandled()
+			// Don't set handled — caller may retry with next upstream
 			return
 		}
 		upstreamBody = converted
@@ -90,9 +91,8 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 	// Pick key from the Ollama pool.
 	attempts, err := p.PickAttempts(route.Group)
 	if err != nil {
-		writeOpenAIError(c, http.StatusServiceUnavailable, "no_upstream_key_error",
-			"no available upstream key for group "+route.Group)
-		setHandled()
+		// Don't set handled — caller may retry with next upstream.
+		// Don't call markAndLog with nil key — it panics on key.ID.
 		return
 	}
 
@@ -111,8 +111,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		req, err := http.NewRequestWithContext(ctx, c.Request.Method, target, bytes.NewReader(upstreamBody))
 		if err != nil {
 			markAndLog(c, p, key, route, inbound, http.StatusInternalServerError, start, stream, nil, err.Error())
-			writeOpenAIError(c, http.StatusInternalServerError, "internal_error", "failed to build upstream request")
-			setHandled()
+			// Don't set handled — caller may retry with next upstream
 			return
 		}
 		copyForwardHeaders(req.Header, c.Request.Header)
@@ -126,20 +125,20 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			resp, doErr := upstreamClient.Do(req)
 			if doErr != nil {
 				lastErrMsg = "failed to reach upstream: " + doErr.Error()
-				if status, errType, message, ok := classifyProxyContextError(doErr); ok {
+				if status, _, message, ok := classifyProxyContextError(doErr); ok {
 					if i+1 < len(attempts) && status != statusClientClosedRequest {
 						continue
 					}
-					writeOpenAIError(c, status, errType, message)
-					setHandled()
+					// Client closed request or last key: don't set handled
+					markAndLog(c, p, key, route, inbound, status, start, stream, nil, message)
 					return
 				}
 				markKeyFailure(p, key, http.StatusBadGateway, nil)
 				if i+1 < len(attempts) {
 					continue
 				}
-				writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
-				setHandled()
+				// Last key failed — don't set handled
+				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, lastErrMsg)
 				return
 			}
 
@@ -158,7 +157,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 				markKeyFailure(p, key, resp.StatusCode, errBody)
 				lastErrMsg = summarizeUpstreamError(resp.StatusCode, errBody)
 				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, lastErrMsg)
-				break
+				return
 			}
 
 			proxyCrossProtocolResponse(c, resp, stream, inbound, config.ProtocolChat, p, key, route, start)
@@ -170,22 +169,21 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		resp, doErr := upstreamClient.Do(req)
 		if doErr != nil {
 			lastErrMsg = "failed to reach upstream: " + doErr.Error()
-			if status, errType, message, ok := classifyProxyContextError(doErr); ok {
+			if status, _, message, ok := classifyProxyContextError(doErr); ok {
 				if i+1 < len(attempts) && status != statusClientClosedRequest {
 					continue
 				}
-				writeOpenAIError(c, status, errType, message)
-				setHandled()
+				// Client closed request or last key: don't set handled
+				markAndLog(c, p, key, route, inbound, status, start, stream, nil, message)
 				return
 			}
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			if i+1 < len(attempts) {
 				continue
 			}
-			// Last key failed — return without setting handled so caller can retry upstream
-			lastErrMsg = "failed to reach upstream"
+			// Last key failed — don't set handled
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, lastErrMsg)
-			break
+			return
 		}
 
 		if shouldRetryWithNextKey(resp.StatusCode) && i+1 < len(attempts) {
@@ -204,7 +202,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			markKeyFailure(p, key, resp.StatusCode, errBody)
 			lastErrMsg = summarizeUpstreamError(resp.StatusCode, errBody)
 			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, lastErrMsg)
-			break
+			return
 		}
 
 		// Success — stream the response

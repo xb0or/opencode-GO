@@ -34,6 +34,8 @@ type ModelRoute struct {
 	ID                  string             `json:"id"`                              // gateway-facing model id, e.g. "glm-5.1"
 	Name                string             `json:"name"`                            // display name
 	Upstream            Upstream           `json:"upstream"`                        // go
+	Upstreams           []Upstream         `json:"upstreams,omitempty"`             // ordered failover list; populated from Upstream when empty
+	UpstreamGroups      map[Upstream]string `json:"upstream_groups,omitempty"`      // per-upstream key-pool group override; empty = use upstream name
 	Protocol            Protocol           `json:"protocol"`                        // chat | messages | responses | google
 	RealModel           string             `json:"real_model"`                      // upstream model id, e.g. "glm-5.1"
 	Group               string             `json:"group"`                           // logical KEY-pool group, e.g. "go"
@@ -51,6 +53,18 @@ type ModelRoute struct {
 	SupportedParameters []string           `json:"supported_parameters,omitempty"`
 	Description         string             `json:"description,omitempty"`
 	KnowledgeCutoff     string             `json:"knowledge_cutoff,omitempty"`
+}
+
+// UpstreamGroup returns the key-pool group for a given upstream.
+// If UpstreamGroups has an explicit mapping, that is used.
+// Otherwise the upstream name itself is used as the group (backward compatible).
+func (m ModelRoute) UpstreamGroup(u Upstream) string {
+	if m.UpstreamGroups != nil {
+		if g, ok := m.UpstreamGroups[u]; ok && g != "" {
+			return g
+		}
+	}
+	return string(u)
 }
 
 // ModelArchitecture describes OpenRouter modality/tokenizer metadata.
