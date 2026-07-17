@@ -1243,3 +1243,366 @@ func TestParseRequestBodyParsesModelAndStream(t *testing.T) {
 		t.Fatalf("invalid JSON should not parse: %#v", head)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Multi-Upstream Failover Tests
+// ---------------------------------------------------------------------------
+
+// closeNotifyRecorder wraps httptest.ResponseRecorder to implement
+// http.CloseNotifier, which httputil.ReverseProxy requires. Gin's
+// responseWriter delegates CloseNotify to the underlying writer, so
+// httptest.ResponseRecorder alone panics when ReverseProxy is used.
+type closeNotifyRecorder struct {
+	*httptest.ResponseRecorder
+	ch chan bool
+}
+
+func (r *closeNotifyRecorder) CloseNotify() <-chan bool {
+	return r.ch
+}
+
+func newCloseNotifyRecorder() *closeNotifyRecorder {
+	return &closeNotifyRecorder{
+		ResponseRecorder: httptest.NewRecorder(),
+		ch:               make(chan bool),
+	}
+}
+
+// TestMultiUpstreamSingleGo verifies that a single Go upstream works
+// identically to the pre-multi-upstream behaviour.
+func TestMultiUpstreamSingleGo(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_single_go?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	// Single upstream — only Upstream is set, Upstreams is empty.
+	// applyLocalModelDefaults should populate Upstreams = [UpstreamGo].
+	config.RegisterModel(config.ModelRoute{
+		ID:        "single-go-model",
+		Name:      "Single Go Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("single-go-model")
+
+	tok, err := pool.CreateToken("single-go-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "upstream-key",
+		Group:   "go",
+		Label:   "test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"single-go-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestMultiUpstreamFirstGoSucceeds verifies that when both Go and Ollama are
+// configured, the first upstream (Go) is used and the second is never contacted.
+func TestMultiUpstreamFirstGoSucceeds(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_first_go?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	// Go upstream — will succeed
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-go","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer goSrv.Close()
+
+	// Ollama upstream — should never be contacted
+	ollamaContacted := false
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ollamaContacted = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-ollama","model":"m","choices":[]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	oldOllamaURL := cfg.OllamaBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	cfg.OllamaBaseURL = ollamaSrv.URL
+	defer func() {
+		cfg.GoBaseURL = oldGoURL
+		cfg.OllamaBaseURL = oldOllamaURL
+	}()
+
+	// Model with both upstreams — Go first, Ollama second
+	config.RegisterModel(config.ModelRoute{
+		ID:        "dual-model",
+		Name:      "Dual Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("dual-model")
+
+	tok, err := pool.CreateToken("dual-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "go-key",
+		Group:   "go",
+		Label:   "go-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "ollama-key",
+		Group:   "ollama",
+		Label:   "ollama-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create ollama key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"dual-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if ollamaContacted {
+		t.Fatal("Ollama upstream was contacted but Go should have succeeded first")
+	}
+}
+
+// TestMultiUpstreamFirstGoFailsSecondOllamaSucceeds verifies that when the
+// first upstream (Go) fails, the request is retried on the second (Ollama).
+func TestMultiUpstreamFirstGoFailsSecondOllamaSucceeds(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_go_fail_ollama_ok?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	// Go upstream — returns 500 so failover kicks in
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"upstream failure","type":"server_error"}}`))
+	}))
+	defer goSrv.Close()
+
+	// Ollama upstream — succeeds
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-ollama","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer ollamaSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	oldOllamaURL := cfg.OllamaBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	cfg.OllamaBaseURL = ollamaSrv.URL
+	defer func() {
+		cfg.GoBaseURL = oldGoURL
+		cfg.OllamaBaseURL = oldOllamaURL
+	}()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "failover-model",
+		Name:      "Failover Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("failover-model")
+
+	tok, err := pool.CreateToken("failover-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "go-key",
+		Group:   "go",
+		Label:   "go-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "ollama-key",
+		Group:   "ollama",
+		Label:   "ollama-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create ollama key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"failover-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := newCloseNotifyRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestMultiUpstreamAllFail verifies that when all upstreams fail, a 502 error
+// is returned to the client.
+func TestMultiUpstreamAllFail(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_all_fail?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	// Go upstream — returns 500
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"go failure"}}`))
+	}))
+	defer goSrv.Close()
+
+	// Ollama upstream — also returns 500
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"ollama failure"}}`))
+	}))
+	defer ollamaSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	oldOllamaURL := cfg.OllamaBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	cfg.OllamaBaseURL = ollamaSrv.URL
+	defer func() {
+		cfg.GoBaseURL = oldGoURL
+		cfg.OllamaBaseURL = oldOllamaURL
+	}()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "all-fail-model",
+		Name:      "All Fail Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("all-fail-model")
+
+	tok, err := pool.CreateToken("all-fail-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "go-key",
+		Group:   "go",
+		Label:   "go-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "ollama-key",
+		Group:   "ollama",
+		Label:   "ollama-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create ollama key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"all-fail-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := newCloseNotifyRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestMultiUpstreamNoKeysForAnyUpstream verifies that when no keys exist for
+// any upstream, a 503 error is returned.
+func TestMultiUpstreamNoKeysForAnyUpstream(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_no_keys?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "no-keys-model",
+		Name:      "No Keys Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("no-keys-model")
+
+	tok, err := pool.CreateToken("no-keys-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	// No keys created — both upstreams should fail with 503
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"no-keys-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", w.Code, w.Body.String())
+	}
+}

@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httputil"
-	"net/url"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -41,8 +38,20 @@ import (
 //  6. Cross-protocol (Messages/Responses → Chat): read full response, convert
 //     back to inbound protocol, relay to client.
 //  7. Bookkeeping: mark key success/failure, write usage log.
+// proxyOllamaRequest handles an Ollama Cloud-routed request.
+// When handled is non-nil, the function sets *handled = true only when it
+// writes a successful response (2xx) to the client. On failure (4xx/5xx)
+// it marks the key failure and returns without setting *handled, so the
+// caller can try the next upstream in a multi-upstream failover.
 func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
-	inbound config.Protocol, upstreamBody []byte, head requestHead, start time.Time) {
+	inbound config.Protocol, upstreamBody []byte, head requestHead, start time.Time,
+	handled *bool) {
+
+	setHandled := func() {
+		if handled != nil {
+			*handled = true
+		}
+	}
 
 	// Rewrite model to the real upstream model id (e.g. gpt-oss:120b).
 	rewritten, ok := router.RewriteRequestModel(upstreamBody, route.RealModel)
@@ -59,6 +68,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		if convErr != nil {
 			writeOpenAIError(c, http.StatusBadRequest, "conversion_error",
 				fmt.Sprintf("failed to convert request from %s to chat: %v", inbound, convErr))
+			setHandled()
 			return
 		}
 		upstreamBody = converted
@@ -82,6 +92,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 	if err != nil {
 		writeOpenAIError(c, http.StatusServiceUnavailable, "no_upstream_key_error",
 			"no available upstream key for group "+route.Group)
+		setHandled()
 		return
 	}
 
@@ -101,6 +112,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		if err != nil {
 			markAndLog(c, p, key, route, inbound, http.StatusInternalServerError, start, stream, nil, err.Error())
 			writeOpenAIError(c, http.StatusInternalServerError, "internal_error", "failed to build upstream request")
+			setHandled()
 			return
 		}
 		copyForwardHeaders(req.Header, c.Request.Header)
@@ -119,6 +131,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 						continue
 					}
 					writeOpenAIError(c, status, errType, message)
+					setHandled()
 					return
 				}
 				markKeyFailure(p, key, http.StatusBadGateway, nil)
@@ -126,6 +139,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 					continue
 				}
 				writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
+				setHandled()
 				return
 			}
 
@@ -137,63 +151,70 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 				continue
 			}
 
+			// Retryable failure on the last key — don't write a response.
+			if shouldMarkUpstreamFailure(resp.StatusCode) {
+				errBody, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				markKeyFailure(p, key, resp.StatusCode, errBody)
+				lastErrMsg = summarizeUpstreamError(resp.StatusCode, errBody)
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, lastErrMsg)
+				break
+			}
+
 			proxyCrossProtocolResponse(c, resp, stream, inbound, config.ProtocolChat, p, key, route, start)
+			setHandled()
 			return
 		}
 
-		// --------------- Same-protocol (Chat → Chat) transparent ReverseProxy ---------------
-		targetURL, _ := url.Parse(target)
-		rp := &httputil.ReverseProxy{
-			Director: func(r *http.Request) {
-				r.URL.Scheme = targetURL.Scheme
-				r.URL.Host = targetURL.Host
-				r.URL.Path = targetURL.Path
-				r.Host = targetURL.Host
-				r.Body = io.NopCloser(bytes.NewReader(upstreamBody))
-				r.ContentLength = int64(len(upstreamBody))
-				copyForwardHeaders(r.Header, c.Request.Header)
-				injectUpstreamAuth(r.Header, key.Value)
-			},
-			Transport: upstreamClient.Transport,
-			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-				if status, errType, message, ok := classifyProxyContextError(err); ok {
-					writeOpenAIError(c, status, errType, message)
-					return
+		// --------------- Same-protocol (Chat → Chat) ---------------
+		resp, doErr := upstreamClient.Do(req)
+		if doErr != nil {
+			lastErrMsg = "failed to reach upstream: " + doErr.Error()
+			if status, errType, message, ok := classifyProxyContextError(doErr); ok {
+				if i+1 < len(attempts) && status != statusClientClosedRequest {
+					continue
 				}
-				writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
-			},
+				writeOpenAIError(c, status, errType, message)
+				setHandled()
+				return
+			}
+			markKeyFailure(p, key, http.StatusBadGateway, nil)
+			if i+1 < len(attempts) {
+				continue
+			}
+			// Last key failed — return without setting handled so caller can retry upstream
+			lastErrMsg = "failed to reach upstream"
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, lastErrMsg)
+			break
 		}
 
-		// Wrap the response writer to capture the status code for bookkeeping.
-		lw := &statusCaptureWriter{ResponseWriter: c.Writer, code: http.StatusOK}
-		rp.ServeHTTP(lw, c.Request)
-
-		code := lw.code
-
-		if code < 400 {
-			p.MarkSuccess(key.ID)
-		} else if shouldMarkUpstreamFailure(code) {
-			markKeyFailure(p, key, code, nil)
+		if shouldRetryWithNextKey(resp.StatusCode) && i+1 < len(attempts) {
+			errBody, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			markKeyFailure(p, key, resp.StatusCode, errBody)
+			lastErrMsg = summarizeUpstreamError(resp.StatusCode, errBody)
+			continue
 		}
-		markAndLog(c, p, key, route, inbound, code, start, stream, nil, lastErrMsg)
+
+		// Retryable failure on the last key — don't stream the error response.
+		// Let the caller try the next upstream (or return 502 if none left).
+		if shouldMarkUpstreamFailure(resp.StatusCode) {
+			errBody, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			markKeyFailure(p, key, resp.StatusCode, errBody)
+			lastErrMsg = summarizeUpstreamError(resp.StatusCode, errBody)
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, lastErrMsg)
+			break
+		}
+
+		// Success — stream the response
+		proxySameProtocolResponse(c, resp, stream, p, key, route, inbound, start)
+		setHandled()
 		return
 	}
 
 	if lastErrMsg == "" {
 		lastErrMsg = "all upstream keys failed"
 	}
-	writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
-}
-
-// statusCaptureWriter wraps gin.ResponseWriter to capture the WriteHeader
-// status code set by httputil.ReverseProxy.
-type statusCaptureWriter struct {
-	gin.ResponseWriter
-	code int
-	once sync.Once
-}
-
-func (w *statusCaptureWriter) WriteHeader(code int) {
-	w.once.Do(func() { w.code = code })
-	w.ResponseWriter.WriteHeader(code)
+	// Don't set handled — let the caller try the next upstream
 }

@@ -351,6 +351,12 @@ func applyLocalModelDefaults(route *ModelRoute) {
 	if route.Upstream == "" {
 		route.Upstream = UpstreamGo
 	}
+	// Populate Upstreams from Upstream when empty, so the request phase always
+	// has a complete list to iterate over. This keeps single-upstream configs
+	// working identically while enabling multi-upstream failover.
+	if len(route.Upstreams) == 0 {
+		route.Upstreams = []Upstream{route.Upstream}
+	}
 	if route.Group == "" {
 		route.Group = "go"
 	}
