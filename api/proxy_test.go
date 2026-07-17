@@ -1608,8 +1608,251 @@ func TestMultiUpstreamNoKeysForAnyUpstream(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Review-requested tests
+// Review-requested tests (round 2)
 // ---------------------------------------------------------------------------
+
+// TestMultiUpstreamCrossProtocolEndpointPath verifies that when a Messages
+// inbound request is routed to a Go upstream speaking Messages protocol,
+// the upstream receives the correct URL path (/v1/messages) and a
+// Messages-format body (not Chat-format).
+func TestMultiUpstreamCrossProtocolEndpointPath(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_endpoint_path?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	var upstreamPath string
+	var upstreamBody []byte
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamPath = r.URL.Path
+		var err error
+		upstreamBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"msg_1",
+			"type":"message",
+			"role":"assistant",
+			"model":"m",
+			"content":[{"type":"text","text":"hello"}],
+			"stop_reason":"end_turn",
+			"usage":{"input_tokens":10,"output_tokens":5}
+		}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	// Model with Messages protocol — Go upstream speaks Messages natively.
+	config.RegisterModel(config.ModelRoute{
+		ID:        "messages-endpoint-model",
+		Name:      "Messages Endpoint Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolMessages,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("messages-endpoint-model")
+
+	tok, err := pool.CreateToken("endpoint-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "upstream-key",
+		Group:   "go",
+		Label:   "test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	// Client sends a Messages-format request to /v1/messages.
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		bytes.NewBufferString(`{"model":"messages-endpoint-model","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	// Verify the upstream received the correct path for Messages protocol.
+	if upstreamPath != "/v1/messages" {
+		t.Fatalf("upstream path = %q, want /v1/messages", upstreamPath)
+	}
+
+	// Verify the upstream received a Messages-format body (has "messages" array).
+	var bodyMap map[string]any
+	if err := json.Unmarshal(upstreamBody, &bodyMap); err != nil {
+		t.Fatalf("upstream body is not JSON: %v\n%s", err, string(upstreamBody))
+	}
+	if _, hasMessages := bodyMap["messages"]; !hasMessages {
+		t.Fatalf("upstream body should have 'messages' field for Messages protocol, got: %s", string(upstreamBody))
+	}
+	if _, hasModel := bodyMap["model"]; !hasModel {
+		t.Fatalf("upstream body missing 'model' field: %s", string(upstreamBody))
+	}
+}
+
+// TestMultiUpstreamLegacyGroupFallback verifies that a model configured with
+// only {Group: "premium"} and no UpstreamGroups mapping still resolves to
+// group "premium" for key selection and permission checks.
+func TestMultiUpstreamLegacyGroupFallback(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_legacy_group?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	oldMultipliers := cfg.GroupMultipliers
+	cfg.GoBaseURL = upstreamSrv.URL
+	cfg.GroupMultipliers = "premium=0.5,default=1"
+	defer func() {
+		cfg.GoBaseURL = oldGoURL
+		cfg.GroupMultipliers = oldMultipliers
+	}()
+
+	// Model with Group "premium" but NO UpstreamGroups mapping.
+	// This is the old-style config that must still work.
+	config.RegisterModel(config.ModelRoute{
+		ID:        "legacy-premium-model",
+		Name:      "Legacy Premium Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "premium",
+	})
+	defer config.RemoveModel("legacy-premium-model")
+
+	// Token restricted to "premium" group.
+	tok, err := pool.CreateToken("legacy-premium-client", "premium", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	// Key in the "premium" group.
+	if err := store.DB().Create(&store.Key{
+		Value:   "premium-key",
+		Group:   "premium",
+		Label:   "premium-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create premium key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"legacy-premium-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	// Verify the usage log has the correct group and multiplier.
+	var logRow store.UsageLog
+	if err := store.DB().First(&logRow).Error; err != nil {
+		t.Fatalf("load usage log: %v", err)
+	}
+	if logRow.Group != "premium" {
+		t.Fatalf("usage log group = %q, want premium", logRow.Group)
+	}
+	if logRow.GroupMultiplier != 0.5 {
+		t.Fatalf("group multiplier = %v, want 0.5", logRow.GroupMultiplier)
+	}
+}
+
+// TestMultiUpstreamFirstKeyTimeoutSecondKeySucceeds verifies that when the
+// first key attempt times out, the second key gets a fresh context and
+// succeeds. This guards against the P2 bug where a shared timeout context
+// would cause the second key to immediately fail with deadline exceeded.
+func TestMultiUpstreamFirstKeyTimeoutSecondKeySucceeds(t *testing.T) {
+	if err := store.InitForTest("file:multi_upstream_key_timeout?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	var attemptCount int
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attemptCount++
+		if attemptCount == 1 {
+			// First attempt: sleep longer than the timeout to trigger deadline exceeded.
+			time.Sleep(2 * time.Second)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"m","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	oldTimeout := cfg.UpstreamTimeout
+	cfg.GoBaseURL = upstreamSrv.URL
+	cfg.UpstreamTimeout = 1 // 1 second timeout — first key will exceed it
+	defer func() {
+		cfg.GoBaseURL = oldGoURL
+		cfg.UpstreamTimeout = oldTimeout
+	}()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "timeout-retry-model",
+		Name:      "Timeout Retry Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("timeout-retry-model")
+
+	tok, err := pool.CreateToken("timeout-retry-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	// Two keys in the same group — first will timeout, second should succeed.
+	key1 := &store.Key{Value: "slow-key", Group: "go", Label: "slow", Enabled: true, Weight: 1}
+	key2 := &store.Key{Value: "fast-key", Group: "go", Label: "fast", Enabled: true, Weight: 1}
+	if err := store.DB().Create(key1).Error; err != nil {
+		t.Fatalf("create key1: %v", err)
+	}
+	if err := store.DB().Create(key2).Error; err != nil {
+		t.Fatalf("create key2: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"timeout-retry-model","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if attemptCount != 2 {
+		t.Fatalf("upstream attempts = %d, want 2 (first timeout, second success)", attemptCount)
+	}
+}
 
 // TestMultiUpstreamTimeoutAfterHeaders verifies that when an upstream flushes
 // response headers immediately but delays the body, and UPSTREAM_TIMEOUT is

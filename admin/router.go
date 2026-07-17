@@ -542,17 +542,19 @@ func syncModels(c *gin.Context) {
 
 func upsertModel(c *gin.Context) {
 	var body struct {
-		ID         string            `json:"id"`
-		Name       *string           `json:"name"`
-		Upstream   config.Upstream   `json:"upstream"`
-		Protocol   *config.Protocol  `json:"protocol"`
-		RealModel  *string           `json:"real_model"`
-		Group      string            `json:"group"`
-		ContextLen *int              `json:"context_len"`
-		Status     *int              `json:"status"`
-		Priority   *int              `json:"priority"`
-		Tags       []string          `json:"tags"`
-		Pricing    map[string]string `json:"pricing"`
+		ID            string              `json:"id"`
+		Name          *string             `json:"name"`
+		Upstream      config.Upstream     `json:"upstream"`
+		Upstreams     []config.Upstream   `json:"upstreams,omitempty"`
+		UpstreamGroups map[config.Upstream]string `json:"upstream_groups,omitempty"`
+		Protocol      *config.Protocol    `json:"protocol"`
+		RealModel     *string             `json:"real_model"`
+		Group         string              `json:"group"`
+		ContextLen    *int                `json:"context_len"`
+		Status        *int                `json:"status"`
+		Priority      *int                `json:"priority"`
+		Tags          []string            `json:"tags"`
+		Pricing       map[string]string   `json:"pricing"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -578,11 +580,13 @@ func upsertModel(c *gin.Context) {
 		}
 	}
 	route := config.ModelRoute{
-		ID:       strings.TrimSpace(body.ID),
-		Upstream: body.Upstream,
-		Protocol: *body.Protocol,
-		Group:    body.Group,
-		Status:   config.ModelStatusPtr(config.ModelStatusEnabled),
+		ID:             strings.TrimSpace(body.ID),
+		Upstream:       body.Upstream,
+		Upstreams:      body.Upstreams,
+		UpstreamGroups: body.UpstreamGroups,
+		Protocol:       *body.Protocol,
+		Group:          body.Group,
+		Status:         config.ModelStatusPtr(config.ModelStatusEnabled),
 	}
 	changed := []string{"protocol"}
 	if body.Name != nil {
@@ -638,14 +642,16 @@ func updateModel(c *gin.Context) {
 	route := store.ModelRouteFromRow(row)
 
 	var body struct {
-		Name       *string           `json:"name"`
-		Protocol   *config.Protocol  `json:"protocol"`
-		RealModel  *string           `json:"real_model"`
-		ContextLen *int              `json:"context_len"`
-		Status     *int              `json:"status"`
-		Priority   *int              `json:"priority"`
-		Tags       []string          `json:"tags"`
-		Pricing    map[string]string `json:"pricing"`
+		Name          *string             `json:"name"`
+		Upstreams     []config.Upstream   `json:"upstreams,omitempty"`
+		UpstreamGroups map[config.Upstream]string `json:"upstream_groups,omitempty"`
+		Protocol      *config.Protocol    `json:"protocol"`
+		RealModel     *string             `json:"real_model"`
+		ContextLen    *int                `json:"context_len"`
+		Status        *int                `json:"status"`
+		Priority      *int                `json:"priority"`
+		Tags          []string            `json:"tags"`
+		Pricing       map[string]string   `json:"pricing"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -655,6 +661,14 @@ func updateModel(c *gin.Context) {
 	if body.Name != nil {
 		route.Name = strings.TrimSpace(*body.Name)
 		changed = append(changed, "name")
+	}
+	if body.Upstreams != nil {
+		route.Upstreams = body.Upstreams
+		changed = append(changed, "upstreams")
+	}
+	if body.UpstreamGroups != nil {
+		route.UpstreamGroups = body.UpstreamGroups
+		changed = append(changed, "upstream_groups")
 	}
 	if body.Protocol != nil {
 		route.Protocol = *body.Protocol

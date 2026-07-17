@@ -56,6 +56,8 @@ type ModelRouteRow struct {
 	ID                      string     `gorm:"primaryKey;size:128" json:"id"`
 	Name                    string     `gorm:"size:128" json:"name"`
 	Upstream                string     `gorm:"size:32;not null" json:"upstream"`
+	UpstreamsJSON           string     `gorm:"type:text" json:"upstreams_json,omitempty"`          // JSON array of Upstream for multi-upstream failover
+	UpstreamGroupsJSON      string     `gorm:"type:text" json:"upstream_groups_json,omitempty"`    // JSON map[Upstream]string for per-upstream group overrides
 	Protocol                string     `gorm:"size:32;not null" json:"protocol"`
 	RealModel               string     `gorm:"size:255;not null" json:"real_model"`
 	Group                   string     `gorm:"size:32;not null" json:"group"`
@@ -178,6 +180,8 @@ func ModelRouteFromRow(r ModelRouteRow) config.ModelRoute {
 		ID:                  strings.TrimSpace(r.ID),
 		Name:                strings.TrimSpace(r.Name),
 		Upstream:            config.Upstream(strings.TrimSpace(r.Upstream)),
+		Upstreams:           decodeUpstreams(r.UpstreamsJSON),
+		UpstreamGroups:      decodeUpstreamGroups(r.UpstreamGroupsJSON),
 		Protocol:            config.Protocol(strings.TrimSpace(r.Protocol)),
 		RealModel:           strings.TrimSpace(r.RealModel),
 		Group:               strings.TrimSpace(r.Group),
@@ -250,6 +254,8 @@ func NewModelRouteRow(m config.ModelRoute) ModelRouteRow {
 		ID:                      strings.TrimSpace(m.ID),
 		Name:                    strings.TrimSpace(m.Name),
 		Upstream:                string(m.Upstream),
+		UpstreamsJSON:           encodeUpstreams(m.Upstreams),
+		UpstreamGroupsJSON:      encodeUpstreamGroups(m.UpstreamGroups),
 		Protocol:                string(m.Protocol),
 		RealModel:               strings.TrimSpace(m.RealModel),
 		Group:                   strings.TrimSpace(m.Group),
@@ -325,6 +331,52 @@ func decodeStringMap(raw string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func decodeUpstreams(raw string) []config.Upstream {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []config.Upstream
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func decodeUpstreamGroups(raw string) map[config.Upstream]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out map[config.Upstream]string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func encodeUpstreams(upstreams []config.Upstream) string {
+	if len(upstreams) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(upstreams)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func encodeUpstreamGroups(groups map[config.Upstream]string) string {
+	if len(groups) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(groups)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // InitForTest opens an in-memory SQLite for testing. Not for production use.

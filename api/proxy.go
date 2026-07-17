@@ -108,6 +108,10 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	// Stash group for logging/debugging after the model route is known.
 	c.Set("group", originalGroup)
 
+	// Save the original route before the failover loop so we can fall back
+	// to the original Group when no explicit UpstreamGroups mapping exists.
+	baseRoute := route
+
 	// -----------------------------------------------------------------------
 	// Multi-upstream failover loop
 	// -----------------------------------------------------------------------
@@ -122,10 +126,14 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	var lastErrMsg string
 
 	for ui, currentUpstream := range upstreamsToTry {
-		route.Upstream = currentUpstream
-
 		// Resolve the key-pool group for this upstream.
+		// When no explicit UpstreamGroups mapping exists and this upstream
+		// is the original primary upstream, fall back to baseRoute.Group
+		// for backward compatibility with old {Group: "premium"} configs.
 		upstreamGroup := route.UpstreamGroup(currentUpstream)
+		if upstreamGroup == string(currentUpstream) && currentUpstream == baseRoute.Upstream && baseRoute.Group != "" {
+			upstreamGroup = baseRoute.Group
+		}
 
 		// Re-check token permission for fallback groups.
 		if upstreamGroup != originalGroup {
@@ -144,19 +152,12 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 
 		// --------------- Ollama upstream ---------------
 		if currentUpstream == config.UpstreamOllama {
-			// Build per-upstream body from the original inbound body.
-			upstreamBody := buildUpstreamBody(originalBody, route, inbound, head, upstreamPath, config.ProtocolChat)
-			if upstreamBody == nil {
-				lastErrMsg = "failed to build upstream request body"
-				if ui+1 < len(upstreamsToTry) {
-					continue
-				}
-				writeOpenAIError(c, http.StatusInternalServerError, "internal_error", lastErrMsg)
-				return
-			}
-
+			// Pass the original body — proxyOllamaRequest handles all
+			// conversion internally. Do NOT call buildUpstreamBody here
+			// to avoid double conversion (the outer loop would convert
+			// to Chat, then the helper would try to convert again).
 			var handled bool
-			proxyOllamaRequest(c, p, route, inbound, upstreamBody, head, start, &handled)
+			proxyOllamaRequest(c, p, route, inbound, originalBody, head, start, &handled)
 			if handled {
 				return
 			}
@@ -176,8 +177,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			return
 		}
 
-		baseURL := config.BaseURLFor(route.Upstream)
-		target := baseURL + upstreamPath
+		baseURL := config.BaseURLFor(currentUpstream)
+		// Use upstreamPathFor to ensure the URL path matches the target
+		// protocol, not the inbound path. This is critical for cross-protocol
+		// requests (e.g. inbound Messages → Go upstream speaking Chat).
+		target := baseURL + upstreamPathFor(route.Protocol)
 
 		attempts, err := p.PickAttempts(route.Group)
 		if err != nil {
@@ -189,12 +193,14 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			return
 		}
 
-		ctx, cancel := upstreamRequestContext(c.Request.Context(), head.Stream)
-		defer cancel()
-
 		for i := range attempts {
 			key := &attempts[i]
 			p.MarkUsed(key.ID)
+
+			// Create a fresh timeout context per key attempt so a timeout
+			// on one key does not poison the context for subsequent keys.
+			ctx, cancel := upstreamRequestContext(c.Request.Context(), head.Stream)
+			defer cancel()
 
 			req, err := http.NewRequestWithContext(ctx, c.Request.Method, target, bytes.NewReader(upstreamBody))
 			if err != nil {
