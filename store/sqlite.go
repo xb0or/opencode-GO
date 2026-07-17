@@ -69,6 +69,7 @@ type ModelRouteRow struct {
 	PricingJSON             string     `gorm:"type:text" json:"pricing_json,omitempty"`
 	ArchitectureJSON        string     `gorm:"type:text" json:"architecture_json,omitempty"`
 	SupportedParametersJSON string     `gorm:"type:text" json:"supported_parameters_json,omitempty"`
+	TargetsJSON            string     `gorm:"type:text" json:"targets_json,omitempty"`
 	OpenRouterID            string     `gorm:"size:255" json:"openrouter_id,omitempty"`
 	OpenRouterName          string     `gorm:"size:255" json:"openrouter_name,omitempty"`
 	OpenRouterMatchedBy     string     `gorm:"size:64" json:"openrouter_matched_by,omitempty"`
@@ -199,6 +200,13 @@ func ModelRouteFromRow(r ModelRouteRow) config.ModelRoute {
 		IsCustomized:        r.IsCustomized,
 		CustomizedFields:    config.NormalizeCustomizedFields(decodeStringSlice(r.CustomizedFieldsJSON)),
 	}
+	// Deserialize per-upstream targets.
+	if strings.TrimSpace(r.TargetsJSON) != "" {
+		var targets map[config.Upstream]config.UpstreamTarget
+		if err := json.Unmarshal([]byte(r.TargetsJSON), &targets); err == nil {
+			route.Targets = targets
+		}
+	}
 	if strings.TrimSpace(r.ArchitectureJSON) != "" {
 		var arch config.ModelArchitecture
 		if err := json.Unmarshal([]byte(r.ArchitectureJSON), &arch); err == nil {
@@ -267,6 +275,7 @@ func NewModelRouteRow(m config.ModelRoute) ModelRouteRow {
 		PricingJSON:             encodeJSON(m.Pricing),
 		ArchitectureJSON:        encodeJSON(m.Architecture),
 		SupportedParametersJSON: encodeJSON(m.SupportedParameters),
+		TargetsJSON:            encodeJSON(m.Targets),
 		OpenRouterID:            m.OpenRouterID,
 		OpenRouterName:          m.OpenRouterName,
 		OpenRouterMatchedBy:     m.OpenRouterMatchedBy,

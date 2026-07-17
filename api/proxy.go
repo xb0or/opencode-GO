@@ -198,7 +198,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		}
 
 		// --------------- Go upstream ---------------
-		result := proxyGoUpstream(c, p, route, inbound, head, originalBody, start, upstreamPath, currentUpstream, ui, upstreamsToTry)
+		result := proxyGoUpstream(c, p, route, inbound, head, originalBody, start, upstreamPath, currentUpstream, ui, upstreamsToTry, upstreamGroup)
 		if result.Terminal {
 			return
 		}
@@ -247,10 +247,12 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 // loop is the sole response writer.
 func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 	inbound config.Protocol, head requestHead, originalBody []byte, start time.Time,
-	upstreamPath string, currentUpstream config.Upstream, ui int, upstreamsToTry []config.Upstream) attemptResult {
+	upstreamPath string, currentUpstream config.Upstream, ui int, upstreamsToTry []config.Upstream,
+	upstreamGroup string) attemptResult {
 
 	// Build per-upstream body from the original inbound body.
-	upstreamBody := buildUpstreamBody(originalBody, route, inbound, head, upstreamPath, route.Protocol, currentUpstream)
+	upstreamProto := route.TargetProtocol(currentUpstream)
+	upstreamBody := buildUpstreamBody(originalBody, route, inbound, head, upstreamPath, upstreamProto, currentUpstream)
 	if upstreamBody == nil {
 		return attemptResult{
 			Status:    http.StatusBadRequest,
@@ -264,9 +266,9 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 	// Use upstreamPathFor to ensure the URL path matches the target
 	// protocol, not the inbound path. This is critical for cross-protocol
 	// requests (e.g. inbound Messages → Go upstream speaking Chat).
-	target := baseURL + upstreamPathFor(route.Protocol)
+	target := baseURL + upstreamPathFor(upstreamProto)
 
-	attempts, err := p.PickAttempts(route.Group)
+	attempts, err := p.PickAttempts(upstreamGroup)
 	if err != nil {
 		return attemptResult{
 			Status:    http.StatusServiceUnavailable,
@@ -389,8 +391,8 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		}
 
 		var rr responseResult
-		if crossProtocol(route, inbound, head) {
-			rr = proxyCrossProtocolResponse(c, resp, head.Stream, inbound, route.Protocol, p, key, route, start, responseBody)
+		if crossProtocol(route, inbound, head, currentUpstream) {
+			rr = proxyCrossProtocolResponse(c, resp, head.Stream, inbound, upstreamProto, p, key, route, start, responseBody)
 		} else {
 			rr = proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start, responseBody)
 		}
@@ -419,8 +421,8 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 // crossProtocol reports whether the request needs cross-protocol conversion
 // for the given route. It is called per-upstream because each upstream may
 // speak a different protocol.
-func crossProtocol(route config.ModelRoute, inbound config.Protocol, head requestHead) bool {
-	return head.HasModel && inbound != route.Protocol
+func crossProtocol(route config.ModelRoute, inbound config.Protocol, head requestHead, currentUpstream config.Upstream) bool {
+	return head.HasModel && inbound != route.TargetProtocol(currentUpstream)
 }
 
 // buildUpstreamBody constructs the request body for a specific upstream,

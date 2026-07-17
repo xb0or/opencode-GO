@@ -548,6 +548,7 @@ func upsertModel(c *gin.Context) {
 		Upstream        *config.Upstream           `json:"upstream"`
 		Upstreams       *[]config.Upstream         `json:"upstreams,omitempty"`
 		UpstreamGroups  *map[config.Upstream]string `json:"upstream_groups,omitempty"`
+		Targets         *map[config.Upstream]config.UpstreamTarget `json:"targets,omitempty"`
 		Protocol        *config.Protocol           `json:"protocol"`
 		RealModel       *string                    `json:"real_model"`
 		Group           string                     `json:"group"`
@@ -643,6 +644,25 @@ func upsertModel(c *gin.Context) {
 		route.UpstreamGroups = groups
 		changed = append(changed, "upstream_groups")
 	}
+	if body.Targets != nil {
+		targets := *body.Targets
+		// Validate that every target key appears in upstreams.
+		for k := range targets {
+			found := false
+			for _, u := range route.Upstreams {
+				if u == k {
+					found = true
+					break
+				}
+			}
+			if !found {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("targets key %q must appear in upstreams", k)})
+				return
+			}
+		}
+		route.Targets = targets
+		changed = append(changed, "targets")
+	}
 	if body.Name != nil {
 		route.Name = strings.TrimSpace(*body.Name)
 		changed = append(changed, "name")
@@ -700,6 +720,7 @@ func updateModel(c *gin.Context) {
 		Upstream        *config.Upstream           `json:"upstream"`
 		Upstreams       *[]config.Upstream         `json:"upstreams,omitempty"`
 		UpstreamGroups  *map[config.Upstream]string `json:"upstream_groups,omitempty"`
+		Targets         *map[config.Upstream]config.UpstreamTarget `json:"targets,omitempty"`
 		Protocol        *config.Protocol           `json:"protocol"`
 		RealModel       *string                    `json:"real_model"`
 		ContextLen      *int                       `json:"context_len"`
@@ -772,6 +793,24 @@ func updateModel(c *gin.Context) {
 		}
 		route.UpstreamGroups = groups
 		changed = append(changed, "upstream_groups")
+	}
+	if body.Targets != nil {
+		targets := *body.Targets
+		for k := range targets {
+			found := false
+			for _, u := range route.Upstreams {
+				if u == k {
+					found = true
+					break
+				}
+			}
+			if !found {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("targets key %q must appear in upstreams", k)})
+				return
+			}
+		}
+		route.Targets = targets
+		changed = append(changed, "targets")
 	}
 	if body.Protocol != nil {
 		route.Protocol = *body.Protocol

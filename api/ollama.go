@@ -82,11 +82,11 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 	}
 
 	// Pick key from the Ollama pool.
-	attempts, err := p.PickAttempts(route.Group)
+	attempts, err := p.PickAttempts(route.TargetGroup(config.UpstreamOllama))
 	if err != nil {
 		return attemptResult{
 			Status:    http.StatusServiceUnavailable,
-			Err:       fmt.Errorf("no available upstream key for group %s: %w", route.Group, err),
+			Err:       fmt.Errorf("no available upstream key for group %s: %w", route.TargetGroup(config.UpstreamOllama), err),
 			Retryable: true,
 		}
 	}
