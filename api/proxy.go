@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -53,6 +54,10 @@ type attemptResult struct {
 
 	// Err is set when a non-recoverable error occurred.
 	Err error
+
+	// ErrorType is an optional explicit error type string (e.g. "conversion_error").
+	// When set, it takes precedence over the status-based error type mapping.
+	ErrorType string
 
 	// Retryable indicates whether the caller should try the next upstream.
 	Retryable bool
@@ -183,14 +188,13 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 				return
 			}
 			if result.Handled {
+				incrementRequestsUsed(c)
 				return
 			}
 			lastResult = result
 			if result.Retryable && ui+1 < len(upstreamsToTry) {
 				continue
 			}
-			// Non-retryable failure or last upstream — fall through to 502
-			// or preserved error response.
 			break
 		}
 
@@ -200,6 +204,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			return
 		}
 		if result.Handled {
+			incrementRequestsUsed(c)
 			return
 		}
 		lastResult = result
@@ -222,7 +227,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		return
 	}
 	if lastResult.Err != nil {
-		writeOpenAIError(c, lastResult.Status, "upstream_error", genericUpstreamMessage(lastResult.Status))
+		errType := lastResult.ErrorType
+		if errType == "" {
+			errType = "upstream_error"
+		}
+		writeOpenAIError(c, lastResult.Status, errType, genericUpstreamMessage(lastResult.Status))
 		return
 	}
 	// No upstream was ever attempted — all were skipped due to permission.
@@ -242,12 +251,13 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 	upstreamPath string, currentUpstream config.Upstream, ui int, upstreamsToTry []config.Upstream) attemptResult {
 
 	// Build per-upstream body from the original inbound body.
-	upstreamBody := buildUpstreamBody(originalBody, route, inbound, head, upstreamPath, route.Protocol)
+	upstreamBody := buildUpstreamBody(originalBody, route, inbound, head, upstreamPath, route.Protocol, currentUpstream)
 	if upstreamBody == nil {
 		return attemptResult{
-			Status:    http.StatusInternalServerError,
+			Status:    http.StatusBadRequest,
 			Err:       errBodyConversion,
-			Retryable: ui+1 < len(upstreamsToTry),
+			ErrorType: "conversion_error",
+			Retryable: false,
 		}
 	}
 
@@ -360,12 +370,103 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 				}
 			}
 
-		// Success
-		defer resp.Body.Close()
+		// Success — pre-validate the response before committing to the client.
+		// This allows failover to the next upstream if the response body is
+		// invalid (e.g. Cloudflare HTML instead of JSON, or connection drops
+		// before the first SSE event). Once the first valid data is sent to
+		// the client, we cannot switch upstreams.
 		if crossProtocol(route, inbound, head) {
-			proxyCrossProtocolResponse(c, resp, head.Stream, inbound, route.Protocol, p, key, route, start)
+			// Cross-protocol: buffer the full response, convert it.
+			// If conversion fails, try the next upstream.
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				markKeyFailure(p, key, http.StatusBadGateway, nil)
+				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
+				if i+1 < len(attempts) {
+					continue
+				}
+				return attemptResult{
+					Status:    http.StatusBadGateway,
+					Err:       readErr,
+					Retryable: ui+1 < len(upstreamsToTry),
+				}
+			}
+			proxyCrossProtocolResponse(c, resp, head.Stream, inbound, route.Protocol, p, key, route, start, body)
+			return attemptResult{Handled: true}
+		}
+
+		if !head.Stream {
+			// Non-streaming: read the full body. If the read fails, the
+			// response is invalid — try the next upstream.
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				markKeyFailure(p, key, http.StatusBadGateway, nil)
+				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, readErr.Error())
+				if i+1 < len(attempts) {
+					continue
+				}
+				return attemptResult{
+					Status:    http.StatusBadGateway,
+					Err:       readErr,
+					Retryable: ui+1 < len(upstreamsToTry),
+				}
+			}
+			// Body read succeeded — write to client.
+			copyResponseHeaders(c, resp)
+			c.Writer.WriteHeader(resp.StatusCode)
+			_, writeErr := c.Writer.Write(body)
+			usage := usageFromResponse(inbound, body)
+			errMsg := copyErrString(writeErr)
+			if errMsg == "" && resp.StatusCode >= http.StatusBadRequest {
+				errMsg = summarizeUpstreamError(resp.StatusCode, body)
+			}
+			if resp.StatusCode < 400 && writeErr == nil {
+				p.MarkSuccess(key.ID)
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, "")
+			} else if shouldMarkUpstreamFailure(resp.StatusCode) {
+				markKeyFailure(p, key, resp.StatusCode, body)
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, errMsg)
+			} else {
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, false, usage, errMsg)
+			}
+			return attemptResult{Handled: true}
+		}
+
+		// Streaming: pre-read the first SSE event before committing headers.
+		// If the connection drops before the first event, try the next
+		// upstream. Once the first event is received, commit to the client.
+		reader := bufio.NewReader(resp.Body)
+		firstLine, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			_ = resp.Body.Close()
+			markKeyFailure(p, key, http.StatusBadGateway, nil)
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, readErr.Error())
+			if i+1 < len(attempts) {
+				continue
+			}
+			return attemptResult{
+				Status:    http.StatusBadGateway,
+				Err:       readErr,
+				Retryable: ui+1 < len(upstreamsToTry),
+			}
+		}
+		// First event received — commit to client and stream the rest.
+		copyResponseHeaders(c, resp)
+		c.Writer.WriteHeader(resp.StatusCode)
+		_, _ = c.Writer.Write([]byte(firstLine))
+		usage, firstResponseMs, copyErr := proxyStreamAndCaptureUsage(c.Writer, reader, inbound, start)
+		if resp.StatusCode < 400 && copyErr == nil {
+			p.MarkSuccess(key.ID)
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "", firstResponseMs)
+		} else if status, _, message, ok := classifyProxyContextError(copyErr); ok {
+			markAndLog(c, p, key, route, inbound, status, start, true, usage, message, firstResponseMs)
+		} else if shouldMarkUpstreamFailure(resp.StatusCode) {
+			markKeyFailure(p, key, resp.StatusCode, nil)
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, copyErrString(copyErr), firstResponseMs)
 		} else {
-			proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start)
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, copyErrString(copyErr), firstResponseMs)
 		}
 		return attemptResult{Handled: true}
 	}
@@ -390,7 +491,13 @@ func crossProtocol(route config.ModelRoute, inbound config.Protocol, head reques
 // already converted for a previous upstream.
 //
 // Returns nil on conversion failure.
-func buildUpstreamBody(originalBody []byte, route config.ModelRoute, inbound config.Protocol, head requestHead, upstreamPath string, upstreamProto config.Protocol) []byte {
+// buildUpstreamBody constructs the request body for a specific upstream,
+// starting from the original inbound body. This ensures each upstream gets
+// a fresh conversion from the original client body, not a body that was
+// already converted for a previous upstream.
+//
+// Returns nil on conversion failure.
+func buildUpstreamBody(originalBody []byte, route config.ModelRoute, inbound config.Protocol, head requestHead, upstreamPath string, upstreamProto config.Protocol, currentUpstream config.Upstream) []byte {
 	body := originalBody
 
 	// Cross-protocol conversion: if the inbound protocol differs from the
@@ -410,7 +517,8 @@ func buildUpstreamBody(originalBody []byte, route config.ModelRoute, inbound con
 	}
 
 	// Rewrite the model field to the upstream's real model id.
-	if rewritten, ok := router.RewriteRequestModel(body, route.RealModel); ok {
+	realModel := route.TargetRealModel(currentUpstream)
+	if rewritten, ok := router.RewriteRequestModel(body, realModel); ok {
 		body = rewritten
 	}
 
@@ -423,7 +531,7 @@ func buildUpstreamBody(originalBody []byte, route config.ModelRoute, inbound con
 	// values while thinking mode is active. Strip tool_choice to avoid an
 	// HTTP 400 from the upstream before the request is sent.
 	if upstreamProto == config.ProtocolChat {
-		if stripped, ok := protocol.StripToolChoiceForReasoning(body, route.RealModel); ok {
+		if stripped, ok := protocol.StripToolChoiceForReasoning(body, realModel); ok {
 			body = stripped
 		}
 	}

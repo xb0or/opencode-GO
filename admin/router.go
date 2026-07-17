@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -589,6 +590,10 @@ func upsertModel(c *gin.Context) {
 	}
 	changed := []string{"protocol"}
 	if body.Upstream != nil {
+		if !config.IsValidUpstream(*body.Upstream) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unknown upstream %q (valid: go, ollama)", *body.Upstream)})
+			return
+		}
 		changed = append(changed, "upstream")
 	}
 	if body.Upstreams != nil {
@@ -596,6 +601,20 @@ func upsertModel(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+		// If upstream was also set, ensure it's in the upstreams list.
+		if body.Upstream != nil {
+			found := false
+			for _, u := range normalized {
+				if u == *body.Upstream {
+					found = true
+					break
+				}
+			}
+			if !found {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("upstream %q must be included in upstreams", *body.Upstream)})
+				return
+			}
 		}
 		route.Upstreams = normalized
 		changed = append(changed, "upstreams")
@@ -606,6 +625,20 @@ func upsertModel(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+		// Ensure every group key appears in upstreams.
+		for k := range groups {
+			found := false
+			for _, u := range route.Upstreams {
+				if u == k {
+					found = true
+					break
+				}
+			}
+			if !found {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("upstream_groups key %q must appear in upstreams", k)})
+				return
+			}
 		}
 		route.UpstreamGroups = groups
 		changed = append(changed, "upstream_groups")
@@ -685,6 +718,10 @@ func updateModel(c *gin.Context) {
 		changed = append(changed, "name")
 	}
 	if body.Upstream != nil {
+		if !config.IsValidUpstream(*body.Upstream) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unknown upstream %q (valid: go, ollama)", *body.Upstream)})
+			return
+		}
 		route.Upstream = *body.Upstream
 		changed = append(changed, "upstream")
 	}
@@ -693,6 +730,20 @@ func updateModel(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+		// If upstream was also set, ensure it's in the upstreams list.
+		if body.Upstream != nil {
+			found := false
+			for _, u := range normalized {
+				if u == *body.Upstream {
+					found = true
+					break
+				}
+			}
+			if !found {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("upstream %q must be included in upstreams", *body.Upstream)})
+				return
+			}
 		}
 		route.Upstreams = normalized
 		changed = append(changed, "upstreams")
@@ -704,6 +755,20 @@ func updateModel(c *gin.Context) {
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+		// Ensure every group key appears in upstreams.
+		for k := range groups {
+			found := false
+			for _, u := range route.Upstreams {
+				if u == k {
+					found = true
+					break
+				}
+			}
+			if !found {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("upstream_groups key %q must appear in upstreams", k)})
+				return
+			}
 		}
 		route.UpstreamGroups = groups
 		changed = append(changed, "upstream_groups")

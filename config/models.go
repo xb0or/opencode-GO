@@ -30,30 +30,41 @@ const (
 	ProtocolGoogle    Protocol = "google"    // Google (not implemented in phase 1)
 )
 
+// UpstreamTarget holds per-upstream overrides for a model route.
+// When set, these values take precedence over the route-level fields
+// for the specific upstream. This allows Go and Ollama to use different
+// real_model IDs, protocols, and key-pool groups for the same gateway model.
+type UpstreamTarget struct {
+	RealModel string   `json:"real_model,omitempty"`
+	Protocol  Protocol `json:"protocol,omitempty"`
+	Group     string   `json:"group,omitempty"`
+}
+
 // ModelRoute maps a gateway-facing model id to its real upstream location.
 type ModelRoute struct {
-	ID                  string             `json:"id"`                              // gateway-facing model id, e.g. "glm-5.1"
-	Name                string             `json:"name"`                            // display name
-	Upstream            Upstream           `json:"upstream"`                        // primary upstream (used for routing); go | ollama
-	Upstreams           []Upstream         `json:"upstreams,omitempty"`            // all upstreams that serve this model, e.g. ["go","ollama"]
-	UpstreamGroups      map[Upstream]string `json:"upstream_groups,omitempty"`      // per-upstream key-pool group override; empty = use upstream name
-	Protocol            Protocol           `json:"protocol"`                        // chat | messages | responses | google
-	RealModel           string             `json:"real_model"`                      // upstream model id, e.g. "glm-5.1"
-	Group               string             `json:"group"`                           // logical KEY-pool group name, e.g. "go"
-	ContextLen          int                `json:"context_len"`                     // optional context window hint
-	Status              *int               `json:"status,omitempty"`                // 0 disabled, 1 enabled; nil defaults to enabled
-	Priority            int                `json:"priority"`                        // optional admin-defined display/routing priority
-	Tags                []string           `json:"tags,omitempty"`                  // normalized capability tags
-	IsCustomized        bool               `json:"is_customized,omitempty"`         // true when admin edited protected fields
-	CustomizedFields    []string           `json:"customized_fields,omitempty"`     // fields protected from automatic sync
-	OpenRouterID        string             `json:"openrouter_id,omitempty"`         // matched OpenRouter model id
-	OpenRouterName      string             `json:"openrouter_name,omitempty"`       // matched OpenRouter display name
-	OpenRouterMatchedBy string             `json:"openrouter_matched_by,omitempty"` // matching strategy used during enrichment
-	Architecture        *ModelArchitecture `json:"architecture,omitempty"`
-	Pricing             map[string]string  `json:"pricing,omitempty"` // per-token OpenRouter prices as strings
-	SupportedParameters []string           `json:"supported_parameters,omitempty"`
-	Description         string             `json:"description,omitempty"`
-	KnowledgeCutoff     string             `json:"knowledge_cutoff,omitempty"`
+	ID                  string                       `json:"id"`                              // gateway-facing model id, e.g. "glm-5.1"
+	Name                string                       `json:"name"`                            // display name
+	Upstream            Upstream                     `json:"upstream"`                        // primary upstream (used for routing); go | ollama
+	Upstreams           []Upstream                   `json:"upstreams,omitempty"`            // all upstreams that serve this model, e.g. ["go","ollama"]
+	UpstreamGroups      map[Upstream]string           `json:"upstream_groups,omitempty"`      // per-upstream key-pool group override; empty = use upstream name
+	Targets             map[Upstream]UpstreamTarget   `json:"targets,omitempty"`              // per-upstream real_model/protocol/group overrides
+	Protocol            Protocol                     `json:"protocol"`                        // chat | messages | responses | google
+	RealModel           string                       `json:"real_model"`                      // upstream model id, e.g. "glm-5.1"
+	Group               string                       `json:"group"`                           // logical KEY-pool group name, e.g. "go"
+	ContextLen          int                          `json:"context_len"`                     // optional context window hint
+	Status              *int                         `json:"status,omitempty"`                // 0 disabled, 1 enabled; nil defaults to enabled
+	Priority            int                          `json:"priority"`                        // optional admin-defined display/routing priority
+	Tags                []string                     `json:"tags,omitempty"`                  // normalized capability tags
+	IsCustomized        bool                         `json:"is_customized,omitempty"`         // true when admin edited protected fields
+	CustomizedFields    []string                     `json:"customized_fields,omitempty"`     // fields protected from automatic sync
+	OpenRouterID        string                       `json:"openrouter_id,omitempty"`         // matched OpenRouter model id
+	OpenRouterName      string                       `json:"openrouter_name,omitempty"`       // matched OpenRouter display name
+	OpenRouterMatchedBy string                       `json:"openrouter_matched_by,omitempty"` // matching strategy used during enrichment
+	Architecture        *ModelArchitecture           `json:"architecture,omitempty"`
+	Pricing             map[string]string            `json:"pricing,omitempty"` // per-token OpenRouter prices as strings
+	SupportedParameters []string                     `json:"supported_parameters,omitempty"`
+	Description         string                       `json:"description,omitempty"`
+	KnowledgeCutoff     string                       `json:"knowledge_cutoff,omitempty"`
 }
 
 // ModelArchitecture describes OpenRouter modality/tokenizer metadata.
@@ -86,6 +97,42 @@ func (m ModelRoute) UpstreamGroup(u Upstream) string {
 		}
 	}
 	return string(u)
+}
+
+// TargetRealModel returns the real_model to use for the given upstream.
+// When a per-upstream Target exists with a non-empty RealModel, it takes
+// precedence. Otherwise, the route-level RealModel is used.
+func (m ModelRoute) TargetRealModel(u Upstream) string {
+	if m.Targets != nil {
+		if t, ok := m.Targets[u]; ok && t.RealModel != "" {
+			return t.RealModel
+		}
+	}
+	return m.RealModel
+}
+
+// TargetProtocol returns the protocol to use for the given upstream.
+// When a per-upstream Target exists with a non-empty Protocol, it takes
+// precedence. Otherwise, the route-level Protocol is used.
+func (m ModelRoute) TargetProtocol(u Upstream) Protocol {
+	if m.Targets != nil {
+		if t, ok := m.Targets[u]; ok && t.Protocol != "" {
+			return t.Protocol
+		}
+	}
+	return m.Protocol
+}
+
+// TargetGroup returns the key-pool group to use for the given upstream.
+// When a per-upstream Target exists with a non-empty Group, it takes
+// precedence. Otherwise, UpstreamGroup is used.
+func (m ModelRoute) TargetGroup(u Upstream) string {
+	if m.Targets != nil {
+		if t, ok := m.Targets[u]; ok && t.Group != "" {
+			return t.Group
+		}
+	}
+	return m.UpstreamGroup(u)
 }
 
 // IsEnabled reports whether a route should be visible and callable.

@@ -46,7 +46,8 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 	inbound config.Protocol, upstreamBody []byte, head requestHead, start time.Time) attemptResult {
 
 	// Rewrite model to the real upstream model id (e.g. gpt-oss:120b).
-	rewritten, ok := router.RewriteRequestModel(upstreamBody, route.RealModel)
+	realModel := route.TargetRealModel(config.UpstreamOllama)
+	rewritten, ok := router.RewriteRequestModel(upstreamBody, realModel)
 	if ok {
 		upstreamBody = rewritten
 	}
@@ -173,7 +174,7 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			}
 
 			// Success — proxyCrossProtocolResponse writes to the client.
-			proxyCrossProtocolResponse(c, resp, stream, inbound, config.ProtocolChat, p, key, route, start)
+			proxyCrossProtocolResponse(c, resp, stream, inbound, config.ProtocolChat, p, key, route, start, upstreamBody)
 			return attemptResult{Handled: true}
 		}
 

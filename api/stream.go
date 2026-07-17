@@ -100,25 +100,14 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 // ---------------------------------------------------------------------------
 // proxyCrossProtocolResponse buffers the upstream response, converts it through
 // the IR, and writes the converted response to the client.
+// body is the pre-read upstream response body (already read by the caller).
 func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 	inbound, upstreamProto config.Protocol,
-	p *pool.Picker, key *store.Key, route config.ModelRoute, start time.Time) {
+	p *pool.Picker, key *store.Key, route config.ModelRoute, start time.Time, body []byte) {
 
 	if resp.StatusCode >= 400 {
 		// Don't convert error responses; return a generic error to hide
 		// upstream provider/channel details from the client.
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			if status, errType, message, ok := classifyProxyContextError(err); ok {
-				markAndLog(c, p, key, route, inbound, status, start, stream, nil, message)
-				writeOpenAIError(c, status, errType, message)
-				return
-			}
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
-			return
-		}
 		if shouldMarkUpstreamFailure(resp.StatusCode) {
 			markKeyFailure(p, key, resp.StatusCode, body)
 		}
@@ -129,33 +118,15 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 
 	if stream {
 		// ---- SSE Reader (buffer full upstream stream) ----
-		// We must buffer the body before writing the SSE headers, because if
-		// the upstream returned an error page (e.g. a Cloudflare 502 HTML
-		// page served with HTTP 200) we cannot decode it and must surface a
-		// meaningful error instead of a confusing "invalid character" message
-		// after having already committed a 200 status to the client.
-		upstreamBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			if status, errType, message, ok := classifyProxyContextError(err); ok {
-				markAndLog(c, p, key, route, inbound, status, start, true, nil, message)
-				writeOpenAIError(c, status, errType, message)
-				return
-			}
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream response")
-			return
-		}
-
 		// Decode the upstream stream first so we can report a clean error to
 		// the client (without having already committed a 200 status) when the
 		// upstream payload is not a valid SSE/JSON stream — e.g. an HTML
 		// gateway error page served with HTTP 200.
-		streamResp, convErr := protocol.DecodeStreamBuffer(upstreamProto, upstreamBody)
+		streamResp, convErr := protocol.DecodeStreamBuffer(upstreamProto, body)
 		if convErr != nil {
-			markKeyFailure(p, key, http.StatusBadGateway, upstreamBody)
+			markKeyFailure(p, key, http.StatusBadGateway, body)
 			errMsg := fmt.Sprintf("upstream %s stream response could not be decoded: %v; body: %s",
-				upstreamProto, convErr, previewBody(upstreamBody))
+				upstreamProto, convErr, previewBody(body))
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, errMsg)
 			writeOpenAIError(c, http.StatusBadGateway, "upstream_error",
 				"upstream returned a non-streaming response that could not be decoded")
@@ -168,7 +139,7 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.WriteHeader(http.StatusOK)
-		usage := usageFromSSEBuffer(upstreamProto, upstreamBody)
+		usage := usageFromSSEBuffer(upstreamProto, body)
 		if usage == nil {
 			usage = usageFromIRUsage(streamResp)
 		}
@@ -180,28 +151,15 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		p.MarkSuccess(key.ID)
 		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true, usage, "")
 	} else {
-		// Non-streaming: buffer, convert, write.
-		upstreamBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			if status, errType, message, ok := classifyProxyContextError(err); ok {
-				markAndLog(c, p, key, route, inbound, status, start, false, nil, message)
-				writeOpenAIError(c, status, errType, message)
-				return
-			}
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, err.Error())
-			writeOpenAIError(c, http.StatusBadGateway, "upstream_error", "failed to read upstream response")
-			return
-		}
-
-		converted, err := protocol.ConvertResponse(upstreamProto, inbound, upstreamBody)
+		// ---- Non-SSE (buffer full response) ----
+		converted, err := protocol.ConvertResponse(upstreamProto, inbound, body)
 		if err != nil {
 			// Upstream returned a body that is not valid JSON for its protocol
 			// (commonly an HTML error page from an upstream proxy/CDN). Report
 			// the real cause instead of the opaque JSON parse error.
-			markKeyFailure(p, key, http.StatusBadGateway, upstreamBody)
+			markKeyFailure(p, key, http.StatusBadGateway, body)
 			errMsg := fmt.Sprintf("upstream %s response could not be decoded: %v; body: %s",
-				upstreamProto, err, previewBody(upstreamBody))
+				upstreamProto, err, previewBody(body))
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, false, nil, errMsg)
 			writeOpenAIError(c, http.StatusBadGateway, "upstream_error",
 				"upstream returned a non-JSON response that could not be decoded")
@@ -219,7 +177,7 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		c.Writer.Write(converted)
 
 		p.MarkSuccess(key.ID)
-		usage := usageFromResponse(upstreamProto, upstreamBody)
+		usage := usageFromResponse(upstreamProto, body)
 		if usage == nil {
 			usage = usageFromResponse(inbound, converted)
 		}

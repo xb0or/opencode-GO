@@ -322,12 +322,62 @@ func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed b
 		// When the primary provider's fetch failed, keep existing upstream.
 	}
 	if !config.IsModelFieldCustomized(route, "upstreams") {
-		if goFetched && ollamaFetched {
-			// Both fetches succeeded — use the authoritative merged result.
-			route.Upstreams = sm.Upstreams
+		// Per-provider membership: each provider's presence in the merged
+		// result is authoritative only when its catalog fetch succeeded.
+		// When a fetch failed, preserve the existing membership for that
+		// provider — a temporary fetch failure should not be treated as
+		// authoritative model removal.
+		mergedHasGo := false
+		mergedHasOllama := false
+		for _, u := range sm.Upstreams {
+			if u == config.UpstreamGo {
+				mergedHasGo = true
+			}
+			if u == config.UpstreamOllama {
+				mergedHasOllama = true
+			}
 		}
-		// When a fetch failed, keep existing upstreams — the merged result
-		// is incomplete and should not overwrite the existing membership.
+		existingHasGo := false
+		existingHasOllama := false
+		for _, u := range route.Upstreams {
+			if u == config.UpstreamGo {
+				existingHasGo = true
+			}
+			if u == config.UpstreamOllama {
+				existingHasOllama = true
+			}
+		}
+
+		// Build the final upstreams list: for each provider, use the merged
+		// result if its fetch succeeded, otherwise preserve the existing state.
+		var finalUpstreams []config.Upstream
+		for _, candidate := range []config.Upstream{config.UpstreamGo, config.UpstreamOllama} {
+			mergedHas := false
+			existingHas := false
+			fetchSucceeded := false
+			switch candidate {
+			case config.UpstreamGo:
+				mergedHas = mergedHasGo
+				existingHas = existingHasGo
+				fetchSucceeded = goFetched
+			case config.UpstreamOllama:
+				mergedHas = mergedHasOllama
+				existingHas = existingHasOllama
+				fetchSucceeded = ollamaFetched
+			}
+			if fetchSucceeded {
+				// Authoritative: include if merged result says so.
+				if mergedHas {
+					finalUpstreams = append(finalUpstreams, candidate)
+				}
+			} else {
+				// Fetch failed: preserve existing membership.
+				if existingHas {
+					finalUpstreams = append(finalUpstreams, candidate)
+				}
+			}
+		}
+		route.Upstreams = finalUpstreams
 	}
 	if !config.IsModelFieldCustomized(route, "upstream_groups") {
 		route.UpstreamGroups = nil
