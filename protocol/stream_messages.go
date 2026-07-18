@@ -16,9 +16,14 @@ import (
 //
 // We ignore the event: line and parse the JSON from data: instead (the JSON
 // already contains the "type" field).
+//
+// P0-1: tracks whether a terminal event was seen (message_stop). If EOF is
+// reached without it, the decoder returns io.ErrUnexpectedEOF so the caller
+// does NOT call onComplete (which would synthesize a fake message_stop).
 func MessagesStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	terminalSeen := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -39,8 +44,18 @@ func MessagesStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) erro
 		if err := onEvent(ev); err != nil {
 			return err
 		}
+		if ev.Type == "message_stop" {
+			terminalSeen = true
+		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	// P0-1: clean EOF without message_stop → unexpected EOF.
+	if !terminalSeen {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 // MessagesStreamEncoder writes IRStreamEvents as Anthropic Messages SSE lines.

@@ -258,10 +258,21 @@ func normalizeMessagesStopReason(reason string) string {
 }
 
 // DecodeMessagesStreamEvent parses an Anthropic SSE event into an IRStreamEvent.
+//
+// P0-2: unknown/empty event types and {"error":...} payloads are rejected with
+// an error so the gateway does not commit HTTP 200 on a meaningless event.
 func DecodeMessagesStreamEvent(data []byte) (*IRStreamEvent, error) {
+	// P0-2: detect upstream {"error":...} payloads first (Anthropic returns
+	// these on overload / policy errors even with HTTP 200 in streaming mode).
+	if msg := streamErrorPayload(data); msg != "" {
+		return nil, fmt.Errorf("messages stream: error payload: %s", msg)
+	}
 	var ev MsgStreamEvent
 	if err := json.Unmarshal(data, &ev); err != nil {
 		return nil, fmt.Errorf("messages: decode stream event: %w", err)
+	}
+	if ev.Type == "" {
+		return nil, fmt.Errorf("messages stream: event has empty type")
 	}
 	ir := &IRStreamEvent{Type: ev.Type}
 	switch ev.Type {
@@ -287,7 +298,10 @@ func DecodeMessagesStreamEvent(data []byte) (*IRStreamEvent, error) {
 			} else if ev.ContentBlock.Type == "thinking" {
 				ir.Choice.Delta.Content = []IRContent{{Type: "thinking"}}
 			} else if ev.ContentBlock.Type == "tool_use" {
-				ir.Choice.Delta.ToolCalls = []IRToolCall{{ID: ev.ContentBlock.ID, Name: ev.ContentBlock.Name}}
+				// P1-2: preserve the upstream tool index (the content block
+				// index) on the IR tool call so the target emitter can route
+				// interleaved tool deltas to the correct block.
+				ir.Choice.Delta.ToolCalls = []IRToolCall{{Index: ev.Index, ID: ev.ContentBlock.ID, Name: ev.ContentBlock.Name}}
 			}
 		}
 	case "content_block_delta":
@@ -332,8 +346,40 @@ func DecodeMessagesStreamEvent(data []byte) (*IRStreamEvent, error) {
 				ReasoningTokens:     ev.Usage.ReasoningTokens,
 			}}
 		}
+	case "ping":
+		// Anthropic heartbeat event; no semantic content. Treat as a
+		// no-op lifecycle event (normalize keeps the event but it is not
+		// meaningful enough to trigger onStart).
+	default:
+		// P0-2: unknown event type → error rather than silently emitting
+		// an empty IR event that would trigger onStart.
+		return nil, fmt.Errorf("messages stream: unknown event type %q", ev.Type)
 	}
 	return ir, nil
+}
+
+// streamErrorPayload returns a human-readable message from an upstream
+// {"error":{"message":"..."}} payload, or "" if the payload is not an error
+// object. Shared by the Messages and Responses decoders.
+func streamErrorPayload(data []byte) string {
+	var probe struct {
+		Error *struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    any    `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil || probe.Error == nil {
+		return ""
+	}
+	if probe.Error.Message == "" && probe.Error.Type == "" {
+		return ""
+	}
+	msg := probe.Error.Message
+	if msg == "" {
+		msg = probe.Error.Type
+	}
+	return msg
 }
 
 // EncodeMessagesStreamEvent serializes an IRStreamEvent into Anthropic SSE events.

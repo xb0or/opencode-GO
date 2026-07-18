@@ -85,8 +85,16 @@ func StreamConvertIncremental(
 
 	// Normalize each upstream event and feed to the target emitter.
 	normalize := func(ev *IRStreamEvent) error {
-		// Extract metadata on first event.
+		// P0-2: only call onStart once we've seen a MEANINGFUL event.
+		// Semantically empty events (no deltas, no usage, no finish reason,
+		// no response metadata) must NOT commit HTTP 200. Error objects are
+		// already rejected by the decoders, so by the time we get here the
+		// event decoded successfully — but it might still be a no-op
+		// (e.g. a content_block_stop with no payload, or a ping).
 		if !emitterStarted {
+			if !isMeaningfulEvent(ev) {
+				return nil
+			}
 			id, model := extractIDModel(ev)
 			acc.ID = id
 			acc.Model = model
@@ -121,13 +129,19 @@ func StreamConvertIncremental(
 			}
 			// Tool calls.
 			for _, tc := range ev.Choice.Delta.ToolCalls {
+				// P1-2: prefer the tool call's own Index; fall back to the
+				// Choice.Index when the upstream didn't populate it.
+				toolIdx := tc.Index
+				if toolIdx == 0 {
+					toolIdx = ev.Choice.Index
+				}
 				if tc.Name != "" || tc.ID != "" {
-					if err := emitter.onToolCallStart(tc.Index, tc.ID, tc.Name); err != nil {
+					if err := emitter.onToolCallStart(toolIdx, tc.ID, tc.Name); err != nil {
 						return err
 					}
 				}
 				if tc.Arguments != "" {
-					if err := emitter.onToolCallDelta(tc.Index, tc.Arguments); err != nil {
+					if err := emitter.onToolCallDelta(toolIdx, tc.Arguments); err != nil {
 						return err
 					}
 				}
@@ -148,19 +162,20 @@ func StreamConvertIncremental(
 			}
 		}
 
-		// Finish reason.
-		if ev.Choice != nil && ev.Choice.FinishReason != "" {
-			acc.setFinishReason(ev.Choice.FinishReason)
-			if err := emitter.onFinish(ev.Choice.FinishReason); err != nil {
+		// P1-4: process Usage BEFORE Finish so the emitter has the usage
+		// available when onFinish fires (Messages message_delta carries both
+		// stop_reason and output_tokens in the same event).
+		if ev.Response != nil && ev.Response.Usage != nil {
+			mergeUsage(acc, ev.Response.Usage)
+			if err := emitter.onUsage(ev.Response.Usage); err != nil {
 				return err
 			}
 		}
 
-		// Usage (from Response field). Merge into acc and forward to emitter
-		// so the client receives usage information (P1-3).
-		if ev.Response != nil && ev.Response.Usage != nil {
-			mergeUsage(acc, ev.Response.Usage)
-			if err := emitter.onUsage(ev.Response.Usage); err != nil {
+		// Finish reason.
+		if ev.Choice != nil && ev.Choice.FinishReason != "" {
+			acc.setFinishReason(ev.Choice.FinishReason)
+			if err := emitter.onFinish(ev.Choice.FinishReason); err != nil {
 				return err
 			}
 		}
@@ -181,13 +196,14 @@ func StreamConvertIncremental(
 		return nil, fmt.Errorf("stream: unsupported upstream protocol %q", upProto)
 	}
 	if decErr != nil {
-		// P0-3: a decoder error must NOT emit success terminal events.
-		// If no valid target event has been emitted yet (onFirstEvent not
-		// triggered), do NOT call onError either — any bytes written by
-		// onError (e.g. [DONE]) would flow through firstEventWriter and
-		// trigger onFirstEvent, committing HTTP 200 to the client for a
-		// stream that never produced a valid event. Only call onError if
-		// the response is already committed.
+		// P0-1/P0-3: a decoder error (including io.ErrUnexpectedEOF when
+		// upstream closed without a terminal event) must NOT emit success
+		// terminal events. If no valid target event has been emitted yet
+		// (onFirstEvent not triggered), do NOT call onError either — any
+		// bytes written by onError (e.g. [DONE]) would flow through
+		// firstEventWriter and trigger onFirstEvent, committing HTTP 200
+		// to the client for a stream that never produced a valid event.
+		// Only call onError if the response is already committed.
 		if fw, ok := writer.(*firstEventWriter); ok && !fw.triggered {
 			return acc, decErr
 		}
@@ -239,6 +255,61 @@ func extractIDModel(ev *IRStreamEvent) (id, model string) {
 		return ev.Response.ID, ev.Response.Model
 	}
 	return "", ""
+}
+
+// isMeaningfulEvent reports whether ev carries enough semantic content to
+// justify calling onStart (and thus committing HTTP 200 to the client).
+//
+// P0-2: a decoded-but-empty event (e.g. content_block_stop, ping, or a
+// Messages message_delta with no stop_reason/usage) must NOT trigger onStart.
+// The decoders already reject semantically *invalid* events (unknown types,
+// error payloads, empty chunks), so by the time we get here the event is
+// structurally valid — but it may still be a no-op lifecycle event. We only
+// start the emitter when we have actual content to deliver: a text/thinking
+// delta, a tool-call delta, usage, a finish reason, or response metadata
+// (id/model from message_start/response.created).
+func isMeaningfulEvent(ev *IRStreamEvent) bool {
+	if ev == nil {
+		return false
+	}
+	// Response metadata (message_start / response.created) — always
+	// meaningful; it carries id/model and may carry initial usage.
+	if ev.Response != nil && (ev.Response.ID != "" || ev.Response.Model != "" || ev.Response.Usage != nil) {
+		return true
+	}
+	// Content delta (text or thinking).
+	if ev.ContentDelta != "" {
+		return true
+	}
+	// Choice with delta content (text/thinking) or tool calls.
+	if ev.Choice != nil {
+		if ev.Choice.Delta != nil {
+			if ev.Choice.Delta.Text != "" {
+				return true
+			}
+			for _, c := range ev.Choice.Delta.Content {
+				if c.Text != "" {
+					return true
+				}
+			}
+			if len(ev.Choice.Delta.ToolCalls) > 0 {
+				for _, tc := range ev.Choice.Delta.ToolCalls {
+					if tc.Name != "" || tc.ID != "" || tc.Arguments != "" {
+						return true
+					}
+				}
+			}
+		}
+		// Finish reason on its own is meaningful (it ends the stream).
+		if ev.Choice.FinishReason != "" {
+			return true
+		}
+	}
+	// Tool call delta (Messages input_json_delta).
+	if ev.ToolCallDelta != nil && ev.ToolCallDelta.Arguments != "" {
+		return true
+	}
+	return false
 }
 
 // mergeUsage merges usage info into the accumulated response.
@@ -480,11 +551,13 @@ func (e *chatEmitter) onFinish(reason string) error {
 		return nil
 	}
 	e.finished = true
+	// P1-5: map the incoming finish reason to the Chat vocabulary.
+	mapped := mapFinishReasonToChat(reason)
 	return e.emit(&IRStreamEvent{
 		Type: "completion",
 		Choice: &IRChoice{
 			Index:        0,
-			FinishReason: reason,
+			FinishReason: mapped,
 		},
 	})
 }
@@ -501,8 +574,10 @@ func (e *chatEmitter) onUsage(u *IRUsage) error {
 }
 
 func (e *chatEmitter) onComplete(reason string) error {
-	if reason == "" {
-		reason = "stop"
+	// P1-5: map the incoming reason to the Chat vocabulary.
+	mapped := mapFinishReasonToChat(reason)
+	if mapped == "" {
+		mapped = "stop"
 	}
 	if !e.finished {
 		// Emit a finish event with a default reason if none was received.
@@ -510,7 +585,7 @@ func (e *chatEmitter) onComplete(reason string) error {
 			Type: "completion",
 			Choice: &IRChoice{
 				Index:        0,
-				FinishReason: reason,
+				FinishReason: mapped,
 			},
 		}); err != nil {
 			return err
@@ -553,13 +628,16 @@ func (e *chatEmitter) onError(err error) error {
 
 // toolBlockState tracks the Messages content block allocated for one upstream
 // tool call (P1-1). Each upstream tool index maps to its own content block so
-// multiple tool calls do not collide on a single currentType/blockIdx.
+// multiple tool calls do not collide on a single currentType/blockIdx. Blocks
+// stay open until the response completes — interleaved deltas (start0,
+// start1, delta0, delta1) route to the correct block via the map.
 type toolBlockState struct {
 	SourceIndex int    // upstream tool index
 	BlockIndex  int    // Messages content_block index
 	ID          string // tool call id
 	Name        string // tool call name
 	Started     bool   // content_block_start emitted
+	Closed      bool   // content_block_stop emitted
 }
 
 type messagesEmitter struct {
@@ -568,10 +646,10 @@ type messagesEmitter struct {
 	started        bool
 	id             string
 	model          string
-	currentType    string // "text" | "thinking" | "tool" | ""
-	currentToolIdx int    // source index of the currently-open tool block (-1 if none)
-	blockIdx       int    // index of the currently-open block
+	currentType    string // "text" | "thinking" | "" (only non-tool blocks)
+	blockIdx       int    // index of the currently-open NON-tool block
 	toolBlocks     map[int]*toolBlockState
+	nextBlockIdx   int // monotonically increasing content block index
 	finished       bool
 	usage          *IRUsage
 }
@@ -581,7 +659,7 @@ func (e *messagesEmitter) onStart(id, model string) error {
 	e.id = id
 	e.model = model
 	e.toolBlocks = make(map[int]*toolBlockState)
-	e.currentToolIdx = -1
+	e.nextBlockIdx = 0
 	// Emit message_start immediately so the client sees the stream has begun.
 	return e.emit(&IRStreamEvent{
 		Type:     "message_start",
@@ -599,6 +677,9 @@ func (e *messagesEmitter) emit(ev *IRStreamEvent) error {
 	return nil
 }
 
+// closeCurrentBlock closes the currently-open NON-tool block (text/thinking),
+// if any. It does NOT touch tool blocks (P1-1: tool blocks stay open until
+// the response completes so interleaved deltas can route to them).
 func (e *messagesEmitter) closeCurrentBlock() error {
 	if e.currentType == "" {
 		return nil
@@ -611,11 +692,11 @@ func (e *messagesEmitter) closeCurrentBlock() error {
 		return err
 	}
 	e.currentType = ""
-	e.currentToolIdx = -1
-	e.blockIdx++
+	e.nextBlockIdx++
 	return nil
 }
 
+// openBlock allocates and emits a content_block_start for a non-tool block.
 func (e *messagesEmitter) openBlock(blockType string, tcID, tcName string) error {
 	delta := &IRMessage{}
 	if blockType == "tool" {
@@ -623,11 +704,15 @@ func (e *messagesEmitter) openBlock(blockType string, tcID, tcName string) error
 	} else {
 		delta.Content = []IRContent{{Type: blockType}}
 	}
+	idx := e.nextBlockIdx
 	startEv := &IRStreamEvent{
 		Type:   "content_block_start",
-		Choice: &IRChoice{Index: e.blockIdx, Delta: delta},
+		Choice: &IRChoice{Index: idx, Delta: delta},
 	}
-	return e.emit(startEv)
+	if err := e.emit(startEv); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (e *messagesEmitter) onTextDelta(text string) error {
@@ -637,6 +722,7 @@ func (e *messagesEmitter) onTextDelta(text string) error {
 		}
 	}
 	if e.currentType == "" {
+		e.blockIdx = e.nextBlockIdx
 		if err := e.openBlock("text", "", ""); err != nil {
 			return err
 		}
@@ -659,6 +745,7 @@ func (e *messagesEmitter) onThinkingDelta(text string) error {
 		}
 	}
 	if e.currentType == "" {
+		e.blockIdx = e.nextBlockIdx
 		if err := e.openBlock("thinking", "", ""); err != nil {
 			return err
 		}
@@ -675,11 +762,12 @@ func (e *messagesEmitter) onThinkingDelta(text string) error {
 }
 
 func (e *messagesEmitter) onToolCallStart(idx int, id, name string) error {
-	// P1-1: each upstream tool index gets its own Messages content block.
-	// If this tool already has an open block that is currently active, nothing
-	// to do (id/name may already have been emitted on the initial start).
-	if st, ok := e.toolBlocks[idx]; ok && e.currentType == "tool" && e.currentToolIdx == idx {
-		// Update id/name if newly provided (defensive).
+	// P1-1: each upstream tool index gets its own Messages content block, and
+	// blocks stay OPEN so interleaved deltas (start0, start1, delta0, delta1)
+	// can route to the correct block. Only close a non-tool block when
+	// switching to a tool; do NOT close a previous tool block.
+	if st, ok := e.toolBlocks[idx]; ok && st.Started && !st.Closed {
+		// Already started — update id/name if provided (defensive).
 		if id != "" {
 			st.ID = id
 		}
@@ -688,24 +776,32 @@ func (e *messagesEmitter) onToolCallStart(idx int, id, name string) error {
 		}
 		return nil
 	}
-	// Close any open block (text, thinking, or a different tool) before opening
-	// a new tool block.
+	// Close any open non-tool block (text/thinking) before opening a tool
+	// block. We do NOT close other tool blocks (P1-1).
 	if e.currentType != "" {
 		if err := e.closeCurrentBlock(); err != nil {
 			return err
 		}
 	}
-	if err := e.openBlock("tool", id, name); err != nil {
+	blockIdx := e.nextBlockIdx
+	// Emit content_block_start for the tool directly (openBlock writes into
+	// nextBlockIdx, but we want explicit control here so we mirror it).
+	delta := &IRMessage{ToolCalls: []IRToolCall{{ID: id, Name: name}}}
+	startEv := &IRStreamEvent{
+		Type:   "content_block_start",
+		Choice: &IRChoice{Index: blockIdx, Delta: delta},
+	}
+	if err := e.emit(startEv); err != nil {
 		return err
 	}
-	e.currentType = "tool"
-	e.currentToolIdx = idx
+	e.nextBlockIdx++
 	e.toolBlocks[idx] = &toolBlockState{
 		SourceIndex: idx,
-		BlockIndex:  e.blockIdx,
+		BlockIndex:  blockIdx,
 		ID:          id,
 		Name:        name,
 		Started:     true,
+		Closed:      false,
 	}
 	return nil
 }
@@ -713,8 +809,8 @@ func (e *messagesEmitter) onToolCallStart(idx int, id, name string) error {
 func (e *messagesEmitter) onToolCallDelta(idx int, args string) error {
 	// P1-1: route the delta to the correct content block for this tool index.
 	st, ok := e.toolBlocks[idx]
-	if !ok {
-		// No start was emitted for this tool; open one opportunistically so the
+	if !ok || !st.Started || st.Closed {
+		// No open block for this tool; open one opportunistically so the
 		// delta is not lost.
 		if err := e.onToolCallStart(idx, "", ""); err != nil {
 			return err
@@ -733,15 +829,47 @@ func (e *messagesEmitter) onFinish(reason string) error {
 	if e.finished {
 		return nil
 	}
-	// Close any open content block first.
-	if err := e.closeCurrentBlock(); err != nil {
-		return err
-	}
-	e.finished = true
-	finReason := reason
+	// P1-5: map the incoming finish reason to the Messages vocabulary.
+	finReason := mapFinishReasonToMessages(reason)
 	if finReason == "" {
 		finReason = "end_turn"
 	}
+	// Close the open non-tool block (if any) first.
+	if err := e.closeCurrentBlock(); err != nil {
+		return err
+	}
+	// P1-1: close ALL still-open tool blocks in ascending BlockIndex order
+	// so the client sees stops in the same order as starts.
+	type openBlock struct{ blockIdx int }
+	var openBlocks []openBlock
+	for _, st := range e.toolBlocks {
+		if st.Started && !st.Closed {
+			openBlocks = append(openBlocks, openBlock{blockIdx: st.BlockIndex})
+		}
+	}
+	// Simple stable sort by blockIdx (small N).
+	for i := 0; i < len(openBlocks); i++ {
+		for j := i + 1; j < len(openBlocks); j++ {
+			if openBlocks[j].blockIdx < openBlocks[i].blockIdx {
+				openBlocks[i], openBlocks[j] = openBlocks[j], openBlocks[i]
+			}
+		}
+	}
+	for _, ob := range openBlocks {
+		stopEv := &IRStreamEvent{
+			Type:   "content_block_stop",
+			Choice: &IRChoice{Index: ob.blockIdx},
+		}
+		if err := e.emit(stopEv); err != nil {
+			return err
+		}
+	}
+	for _, st := range e.toolBlocks {
+		if st.Started && !st.Closed {
+			st.Closed = true
+		}
+	}
+	e.finished = true
 	deltaMsg := &IRStreamEvent{
 		Type: "message_delta",
 		Choice: &IRChoice{
@@ -768,9 +896,9 @@ func (e *messagesEmitter) onUsage(u *IRUsage) error {
 }
 
 func (e *messagesEmitter) onComplete(reason string) error {
-	if reason == "" {
-		reason = "end_turn"
-	}
+	// P1-5: onFinish maps the incoming reason to the Messages vocabulary, so
+	// pass the raw reason here (do not double-map). A default of "end_turn" is
+	// used only when no reason was ever observed.
 	if !e.finished {
 		if err := e.onFinish(reason); err != nil {
 			return err
@@ -1049,12 +1177,14 @@ func (e *responsesEmitter) onUsage(u *IRUsage) error {
 }
 
 func (e *responsesEmitter) onComplete(reason string) error {
-	_ = reason // responses uses "completed" status implicitly
+	// P1-5: onFinish normalizes the reason internally; pass it raw.
 	if !e.finished {
-		if err := e.onFinish("completed"); err != nil {
+		if err := e.onFinish(reason); err != nil {
 			return err
 		}
 	}
+	mapped := mapFinishReasonToResponses(reason)
+	_ = mapped // status carried by the response.completed event type itself
 	resp := &IRResponse{ID: e.id, Model: e.model}
 	if e.usage != nil {
 		resp.Usage = e.usage
@@ -1082,4 +1212,58 @@ func (e *responsesEmitter) onError(err error) error {
 		e.flush()
 	}
 	return nil
+}
+
+// --------------------------------------------------------------------------
+// Finish reason normalization for streaming (P1-5).
+//
+// Stream emitters previously output the raw upstream finish reason without
+// mapping it to the target protocol's vocabulary. These helpers normalize the
+// reason so that, e.g., a Messages "end_turn" arriving at a Chat client
+// becomes "stop" instead of the Anthropic-specific "end_turn".
+// --------------------------------------------------------------------------
+
+// mapFinishReasonToChat maps any upstream finish reason to the OpenAI Chat
+// Completions vocabulary.
+func mapFinishReasonToChat(reason string) string {
+	switch reason {
+	case "end_turn", "stop_sequence":
+		return "stop"
+	case "tool_use":
+		return "tool_calls"
+	case "max_tokens":
+		return "length"
+	default:
+		return reason
+	}
+}
+
+// mapFinishReasonToMessages maps any upstream finish reason to the Anthropic
+// Messages vocabulary.
+func mapFinishReasonToMessages(reason string) string {
+	switch reason {
+	case "stop":
+		return "end_turn"
+	case "tool_calls":
+		return "tool_use"
+	case "length":
+		return "max_tokens"
+	default:
+		return reason
+	}
+}
+
+// mapFinishReasonToResponses maps any upstream finish reason to the OpenAI
+// Responses vocabulary.
+func mapFinishReasonToResponses(reason string) string {
+	switch reason {
+	case "stop":
+		return "completed"
+	case "length":
+		return "incomplete"
+	case "tool_calls":
+		return "tool_calls"
+	default:
+		return reason
+	}
 }

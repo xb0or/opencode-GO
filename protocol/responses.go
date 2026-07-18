@@ -277,10 +277,25 @@ func EncodeResponsesResponse(ir *IRResponse) ([]byte, error) {
 }
 
 // DecodeResponsesStreamEvent parses a Responses SSE event into an IRStreamEvent.
+//
+// P0-2: unknown/empty event types and {"error":...} payloads are rejected.
+// P1-2: IRToolCall.Index is populated from output_index for function_call
+//   start/delta/done events.
+// P1-3: response.function_call_arguments.done is a finalization event — its
+//   arguments are NOT emitted as a delta (accumulated deltas already carry the
+//   full arguments). The done event only updates the cached id/name so the
+//   target emitter can finalize the item.
 func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
+	// P0-2: detect upstream error payloads first.
+	if msg := streamErrorPayload(data); msg != "" {
+		return nil, fmt.Errorf("responses stream: error payload: %s", msg)
+	}
 	var ev RespStreamEvent
 	if err := json.Unmarshal(data, &ev); err != nil {
 		return nil, fmt.Errorf("responses: decode stream event: %w", err)
+	}
+	if ev.Type == "" {
+		return nil, fmt.Errorf("responses stream: event has empty type")
 	}
 	ir := &IRStreamEvent{Type: ev.Type}
 	switch ev.Type {
@@ -291,6 +306,11 @@ func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
 	case "response.output_item.added":
 		if ev.Item != nil {
 			msg := respOutputToIR(*ev.Item)
+			// P1-2: stamp the upstream output_index onto any tool call so
+			// the target emitter can route later deltas to the right item.
+			for i := range msg.ToolCalls {
+				msg.ToolCalls[i].Index = ev.OutputIndex
+			}
 			ir.Choice = &IRChoice{Index: ev.OutputIndex, Delta: &msg}
 		}
 	case "response.content_part.added":
@@ -314,12 +334,28 @@ func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
 		// Reasoning complete
 	case "response.function_call_arguments.delta":
 		ir.Choice = &IRChoice{Index: ev.OutputIndex, Delta: &IRMessage{Role: "assistant"}}
+		// P1-2: tool index on the delta so normalize passes it through.
 		ir.ToolCallDelta = &IRToolCallDelta{Index: ev.OutputIndex, Arguments: ev.Delta}
 	case "response.function_call_arguments.done":
+		// P1-3: do NOT emit the done arguments as a delta — the accumulated
+		// .delta stream already contains the full arguments, so emitting
+		// them again would double the payload. We still populate the
+		// id/name on the choice so downstream emitters that need a finalize
+		// callback can pick them up, but we set a marker (Choice.Message is
+		// nil) so normalize does not treat this as a tool-call start delta.
 		if ev.Item != nil {
-			ir.Choice = &IRChoice{Index: ev.OutputIndex, Delta: &IRMessage{
-				ToolCalls: []IRToolCall{{ID: ev.Item.CallID, Name: ev.Item.Name, Arguments: ev.Item.Arguments}},
-			}}
+			ir.Choice = &IRChoice{Index: ev.OutputIndex}
+			// Carry the finalized id/name/arguments via the Choice's Message
+			// so the responsesEmitter (when Responses is the TARGET) can
+			// finalize its tool item; cross-protocol emitters ignore it.
+			ir.Choice.Message = &IRMessage{
+				ToolCalls: []IRToolCall{{
+					Index:     ev.OutputIndex,
+					ID:        ev.Item.CallID,
+					Name:      ev.Item.Name,
+					Arguments: ev.Item.Arguments,
+				}},
+			}
 		}
 	case "response.output_item.done":
 		if ev.Item != nil {
@@ -345,6 +381,13 @@ func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
 		}
 	case "response.incomplete":
 		ir.Choice = &IRChoice{Index: 0, FinishReason: "length"}
+	case "response.failed":
+		// Treat as terminal failure so P0-1 marks the stream ended.
+		ir.Choice = &IRChoice{Index: 0, FinishReason: "failed"}
+	default:
+		// P0-2: unknown event type → error rather than silently emitting
+		// an empty IR event that would trigger onStart.
+		return nil, fmt.Errorf("responses stream: unknown event type %q", ev.Type)
 	}
 	return ir, nil
 }

@@ -10,9 +10,15 @@ import (
 // ResponsesStreamDecoder reads an OpenAI Responses API SSE stream and emits
 // IRStreamEvents via the callback.  Responses SSE lines use the same
 // data: <json>\n\n format as other OpenAI protocols.
+//
+// P0-1: tracks whether a terminal event was seen
+// (response.completed/incomplete/failed). If EOF is reached without one, the
+// decoder returns io.ErrUnexpectedEOF so the caller does NOT call onComplete
+// (which would synthesize a fake response.completed).
 func ResponsesStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	terminalSeen := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -26,6 +32,11 @@ func ResponsesStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) err
 			continue
 		}
 		if bytes.Equal(payload, []byte("[DONE]")) {
+			// Responses streams may include a [DONE] sentinel after
+			// response.completed; it is not itself a terminal event for the
+			// purposes of P0-1 (response.completed already marked the stream
+			// complete), but we accept it as a clean terminator if seen.
+			terminalSeen = true
 			return nil
 		}
 		ev, err := DecodeResponsesStreamEvent(payload)
@@ -36,8 +47,20 @@ func ResponsesStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) err
 		if err := onEvent(ev); err != nil {
 			return err
 		}
+		switch ev.Type {
+		case "response.completed", "response.incomplete", "response.failed":
+			terminalSeen = true
+		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	// P0-1: clean EOF without response.completed/incomplete/failed →
+	// unexpected EOF.
+	if !terminalSeen {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 // ResponsesStreamEncoder writes IRStreamEvents as Responses SSE lines.

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -451,6 +452,12 @@ func readFirstSSEEvent(r *bufio.Reader) ([]byte, bool, error) {
 	return nil, false, nil
 }
 
+// errClientWriteAfterCommit is returned by onFirstEvent when HTTP 200 has
+// been committed (WriteHeader) but writing the staging buffer to the client
+// failed (e.g. client disconnect). It is a client-side problem: the caller
+// must NOT markKeyFailure or failover, only return ResponseStarted.
+var errClientWriteAfterCommit = errors.New("client write failed after HTTP headers committed")
+
 // switchWriter writes to a staging buffer until sw.real is set, then writes
 // to real. This supports P0-2: the cross-protocol converter writes its first
 // events to staging; once onFirstEvent commits HTTP 200, sw.real is set and
@@ -594,22 +601,29 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 	sw := &switchWriter{staging: &staging}
 
 	onFirstEvent := func() error {
-		// Commit SSE headers — from this point failover is impossible.
+		// P0-3: mark committed IMMEDIATELY after WriteHeader so the caller
+		// never enters the failover branch after headers are sent, even
+		// if the subsequent staging-buffer write fails (e.g. client
+		// disconnect). A failed write after commit is a client-side
+		// problem, not an upstream problem, so it must NOT trigger
+		// markKeyFailure or failover.
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.WriteHeader(http.StatusOK)
+		committed = true
 		// Flush the staging buffer to the real client.
 		if staging.Len() > 0 {
 			_, werr := c.Writer.Write(staging.Bytes())
 			if werr != nil {
-				return werr
+				// Return a sentinel error so the caller knows the
+				// response was committed but the client is gone.
+				return errClientWriteAfterCommit
 			}
 			c.Writer.Flush()
 		}
 		// Switch subsequent writes to the real writer (with per-write flush).
 		sw.real = newFlushingWriter(c.Writer)
-		committed = true
 		return nil
 	}
 
@@ -633,9 +647,16 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 			}
 		}
 		// P0-3: conversion failed after commit. The client already has a
-		// partial 200 SSE response. Mark the key as failed — the client must
-		// NOT receive success terminal events (handled by onError in the
-		// converter).
+		// partial 200 SSE response. Distinguish:
+		//   - client write failure (errClientWriteAfterCommit): the upstream
+		//     is healthy, do NOT markKeyFailure or failover;
+		//   - upstream decoder error: mark the key as failed — the client
+		//     must NOT receive success terminal events (handled by onError).
+		if errors.Is(convErr, errClientWriteAfterCommit) {
+			markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
+				usageFromIRUsage(acc), "client write failed after commit: "+convErr.Error())
+			return responseResult{ResponseStarted: true}
+		}
 		markKeyFailure(p, key, http.StatusBadGateway, nil)
 		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
 			usageFromIRUsage(acc), "stream convert error: "+convErr.Error())

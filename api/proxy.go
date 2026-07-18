@@ -390,13 +390,16 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			}
 		}
 
-		// Non-retryable 4xx client errors (400/404/409/413/415/422 etc.)
-		// that bypassed shouldRetryWithNextKey/shouldMarkUpstreamFailure.
-		// These must NOT enter the cross-protocol streaming path (which
-		// assumes a 2xx SSE response), and must NOT trigger key/upstream
-		// failover — the request itself is invalid. Preserve the original
-		// status code and error body.
-		if resp.StatusCode >= 400 && isClientErrorNonRetryable(resp.StatusCode) {
+		// P0-4: ALL remaining HTTP >= 400 responses (those not already
+		// handled by shouldRetryWithNextKey/shouldMarkUpstreamFailure, i.e.
+		// 400/404/405/408/409/410/412/413/414/415/416/422/423/424/425/426/
+		// 428/431/451 etc.) must NOT enter the cross-protocol streaming
+		// path (which assumes a 2xx SSE response). Preserve the original
+		// status code and error body. These are non-retryable: the request
+		// itself is invalid or the upstream is in a state where switching
+		// keys/providers will not help. (Retryable errors like 401/402/403/
+		// 429/5xx were already handled above.)
+		if resp.StatusCode >= 400 {
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 			_ = resp.Body.Close()
 			cancel()
