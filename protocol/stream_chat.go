@@ -3,6 +3,7 @@ package protocol
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 )
 
@@ -25,7 +26,12 @@ func ChatStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) error {
 		}
 		ev, err := DecodeChatStreamChunk(payload)
 		if err != nil {
-			continue // skip malformed chunks
+			// P0-2/P0-3: a malformed data: payload is a decoder error, not a
+			// silently-skippable line. Returning the error lets the caller
+			// (StreamConvertIncremental) invoke onError and avoid emitting a
+			// success terminal event, so the client does not mistake a broken
+			// upstream for a completed one.
+			return fmt.Errorf("chat stream: malformed data payload: %w", err)
 		}
 		if err := onEvent(ev); err != nil {
 			return err

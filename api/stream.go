@@ -280,29 +280,64 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 				Retryable: true,
 			}
 		}
-		c.Writer.Header().Set("Content-Type", "text/event-stream")
-		c.Writer.Header().Set("Cache-Control", "no-cache")
-		c.Writer.Header().Set("Connection", "keep-alive")
-		c.Writer.WriteHeader(http.StatusOK)
-		fw := newFlushingWriter(c.Writer)
+		// P0-2: do NOT commit HTTP 200 yet. Run the incremental converter with a
+		// staging buffer and an onFirstEvent hook (see proxyCrossProtocolStream
+		// for the full rationale).
+		committed := false
+		var staging bytes.Buffer
+		sw := &switchWriter{staging: &staging}
+		onFirstEvent := func() error {
+			c.Writer.Header().Set("Content-Type", "text/event-stream")
+			c.Writer.Header().Set("Cache-Control", "no-cache")
+			c.Writer.Header().Set("Connection", "keep-alive")
+			c.Writer.WriteHeader(http.StatusOK)
+			if staging.Len() > 0 {
+				if _, werr := c.Writer.Write(staging.Bytes()); werr != nil {
+					return werr
+				}
+				c.Writer.Flush()
+			}
+			sw.real = newFlushingWriter(c.Writer)
+			committed = true
+			return nil
+		}
 		var restReader io.Reader
 		if rest != nil {
 			restReader = bytes.NewReader(rest)
 		}
 		acc, convErr := protocol.StreamConvertIncremental(
 			string(upstreamProto), string(inbound),
-			firstEvent, restReader, fw, fw.Flush,
+			firstEvent, restReader, sw, nil, onFirstEvent,
 		)
 		if convErr != nil {
+			if !committed {
+				markKeyFailure(p, key, http.StatusBadGateway, nil)
+				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true,
+					usageFromIRUsage(acc), "stream decode failed: "+convErr.Error())
+				return responseResult{
+					Err:       fmt.Errorf("stream decode failed: %w", convErr),
+					Retryable: true,
+				}
+			}
+			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
 				usageFromIRUsage(acc), "stream convert error: "+convErr.Error())
 			return responseResult{ResponseStarted: true}
+		}
+		if !committed {
+			markKeyFailure(p, key, http.StatusBadGateway, nil)
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true,
+				nil, "cross-protocol stream produced no valid target events")
+			return responseResult{
+				Err:       fmt.Errorf("stream produced no valid target events"),
+				Retryable: true,
+			}
 		}
 		p.MarkSuccess(key.ID)
 		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
 			usageFromIRUsage(acc), "")
 		return responseResult{ResponseStarted: true}
-	}
+		}
 
 	// Non-streaming: convert the response.
 	converted, err := protocol.ConvertResponse(upstreamProto, inbound, body)
@@ -414,6 +449,22 @@ func readFirstSSEEvent(r *bufio.Reader) ([]byte, bool, error) {
 		}
 	}
 	return nil, false, nil
+}
+
+// switchWriter writes to a staging buffer until sw.real is set, then writes
+// to real. This supports P0-2: the cross-protocol converter writes its first
+// events to staging; once onFirstEvent commits HTTP 200, sw.real is set and
+// subsequent writes go directly to the client.
+type switchWriter struct {
+	staging *bytes.Buffer
+	real    io.Writer
+}
+
+func (sw *switchWriter) Write(p []byte) (int, error) {
+	if sw.real != nil {
+		return sw.real.Write(p)
+	}
+	return sw.staging.Write(p)
 }
 
 // flushingWriter wraps a gin.ResponseWriter and flushes after every Write so
@@ -530,22 +581,75 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 		}
 	}
 
-	// Commit SSE headers — from this point failover is impossible.
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.Header().Set("Connection", "keep-alive")
-	c.Writer.WriteHeader(http.StatusOK)
+	// P0-2: do NOT commit HTTP 200 yet. Run the incremental converter with a
+	// staging buffer and an onFirstEvent hook. The hook fires after the first
+	// target event is successfully emitted to staging — only then do we commit
+	// HTTP 200 + SSE headers and flush the staging buffer to the client. If the
+	// upstream stream cannot be decoded into at least one valid target event,
+	// onFirstEvent is never called, conversion aborts, and we can failover.
+	committed := false
+	var staging bytes.Buffer
+	// The converter writes to a switchable writer: staging first, then the
+	// real client writer after onFirstEvent commits.
+	sw := &switchWriter{staging: &staging}
 
-	fw := newFlushingWriter(c.Writer)
+	onFirstEvent := func() error {
+		// Commit SSE headers — from this point failover is impossible.
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.WriteHeader(http.StatusOK)
+		// Flush the staging buffer to the real client.
+		if staging.Len() > 0 {
+			_, werr := c.Writer.Write(staging.Bytes())
+			if werr != nil {
+				return werr
+			}
+			c.Writer.Flush()
+		}
+		// Switch subsequent writes to the real writer (with per-write flush).
+		sw.real = newFlushingWriter(c.Writer)
+		committed = true
+		return nil
+	}
+
 	acc, convErr := protocol.StreamConvertIncremental(
 		string(upstreamProto), string(inbound),
-		firstEvent, bufReader, fw, fw.Flush,
+		firstEvent, bufReader, sw, nil, onFirstEvent,
 	)
 	_ = resp.Body.Close()
 	if convErr != nil {
+		if !committed {
+			// P0-2/P0-3: conversion failed before any valid target event was
+			// emitted. The client has received nothing — failover is still
+			// possible. Mark the key as failed (P0-3 requirement).
+			markKeyFailure(p, key, http.StatusBadGateway, nil)
+			errMsg := "cross-protocol stream decode failed: " + convErr.Error()
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true,
+				usageFromIRUsage(acc), errMsg)
+			return responseResult{
+				Err:       fmt.Errorf("stream decode failed: %w", convErr),
+				Retryable: true,
+			}
+		}
+		// P0-3: conversion failed after commit. The client already has a
+		// partial 200 SSE response. Mark the key as failed — the client must
+		// NOT receive success terminal events (handled by onError in the
+		// converter).
+		markKeyFailure(p, key, http.StatusBadGateway, nil)
 		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
 			usageFromIRUsage(acc), "stream convert error: "+convErr.Error())
 		return responseResult{ResponseStarted: true}
+	}
+	if !committed {
+		// No error but also no valid target event — treat as a failed stream.
+		markKeyFailure(p, key, http.StatusBadGateway, nil)
+		markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true,
+			nil, "cross-protocol stream produced no valid target events")
+		return responseResult{
+			Err:       fmt.Errorf("stream produced no valid target events"),
+			Retryable: true,
+		}
 	}
 	p.MarkSuccess(key.ID)
 	markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,

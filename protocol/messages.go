@@ -71,11 +71,11 @@ type MsgResponse struct {
 }
 
 type MsgUsage struct {
-	InputTokens          int `json:"input_tokens"`
-	OutputTokens         int `json:"output_tokens"`
-	CacheReadTokens      int `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationTokens  int `json:"cache_creation_input_tokens,omitempty"`
-	ReasoningTokens      int `json:"reasoning_tokens,omitempty"`
+	InputTokens         int `json:"input_tokens"`
+	OutputTokens        int `json:"output_tokens"`
+	CacheReadTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationTokens int `json:"cache_creation_input_tokens,omitempty"`
+	ReasoningTokens     int `json:"reasoning_tokens,omitempty"`
 }
 
 // MsgStreamEvent is one SSE event for streaming Anthropic Messages.
@@ -314,7 +314,7 @@ func DecodeMessagesStreamEvent(data []byte) (*IRStreamEvent, error) {
 		if ev.Usage != nil {
 			ir.Response = &IRResponse{Usage: &IRUsage{
 				PromptTokens:        ev.Usage.InputTokens,
-				CompletionTokens:   ev.Usage.OutputTokens,
+				CompletionTokens:    ev.Usage.OutputTokens,
 				CacheReadTokens:     ev.Usage.CacheReadTokens,
 				CacheCreationTokens: ev.Usage.CacheCreationTokens,
 				ReasoningTokens:     ev.Usage.ReasoningTokens,

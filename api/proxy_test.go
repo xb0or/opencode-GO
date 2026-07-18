@@ -20,6 +20,7 @@ import (
 	"github.com/xb0or/opencode-GO/config"
 	"github.com/xb0or/opencode-GO/internal/router"
 	"github.com/xb0or/opencode-GO/pool"
+	"github.com/xb0or/opencode-GO/protocol"
 	"github.com/xb0or/opencode-GO/store"
 )
 
@@ -4284,5 +4285,724 @@ func TestP1_1_ConcurrentMaxRequests(t *testing.T) {
 	if refreshed.RequestsUsed > cap {
 		t.Errorf("requests_used = %d, must not exceed cap %d", refreshed.RequestsUsed, cap)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Round-2 audit verification tests.
+//
+// These tests verify the fixes from the second P0/P1 audit pass:
+//   P0-1: Non-retryable 4xx (400/404) from upstream during cross-protocol
+//         streaming must NOT trigger key/upstream failover and must NOT
+//         enter the SSE streaming path — the original status and a JSON
+//         error body are returned to the client.
+//   P0-2: The first cross-protocol SSE event must decode to a valid target
+//         event before HTTP 200 is committed. An undecodable first event
+//         triggers failover (502 when no other key is available). A valid
+//         first event commits 200 and streams normally.
+//   P0-3: A decoder error after the response is committed (200 + SSE) must
+//         NOT emit the success terminal events ([DONE] / message_stop-with-
+//         end_turn / response.completed). Only the stream terminator is
+//         emitted so a failed generation is not mistaken for success.
+//   P1-1/P1-2: Multiple tool calls in a single Chat upstream stream must
+//         each get their own content block (Messages) / output item
+//         (Responses), preserving id, name, and arguments routing.
+//   P1-3: Usage information from the upstream stream must be forwarded to
+//         the client for all three target protocols.
+// ---------------------------------------------------------------------------
+
+// TestR2_P0_1_CrossProtocolStream400DoesNotRetry verifies that when a
+// cross-protocol stream=true request gets an HTTP 400 (JSON, NOT SSE) from
+// the upstream, the proxy:
+//   - does NOT retry with the next key/upstream (single upstream hit)
+//   - returns 400 to the client (not 502)
+//   - returns a JSON error body (Content-Type is NOT text/event-stream)
+func TestR2_P0_1_CrossProtocolStream400DoesNotRetry(t *testing.T) {
+	if err := store.InitForTest("file:r2_p01_400?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	var upstreamHits atomic.Int32
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"bad request","type":"invalid_request_error"}}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	// Inbound Chat → Go upstream speaking Messages (cross-protocol).
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r2-p01-400-model",
+		Name:      "R2 P0-1 400",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolMessages,
+		RealModel: "r2-p01-400-model",
+		Group:     "go",
+	})
+	defer config.RemoveModel("r2-p01-400-model")
+
+	tok, err := pool.CreateToken("r2-p01-400-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	// Two keys in the "go" group — failover must NOT happen for 400.
+	if err := store.DB().Create(&store.Key{
+		Value: "upstream-key-a", Group: "go", Label: "a", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create key a: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "upstream-key-b", Group: "go", Label: "b", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create key b: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewRouter(pool.NewPicker()))
+	defer proxySrv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, proxySrv.URL+"/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"r2-p01-400-model","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		t.Fatalf("status = %d, want 400; body: %s", resp.StatusCode, string(body))
+	}
+	if got := upstreamHits.Load(); got != 1 {
+		t.Errorf("upstream hit count = %d, want 1 (400 must not trigger failover)", got)
+	}
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "text/event-stream") {
+		t.Errorf("Content-Type = %q, must NOT be text/event-stream for a 400 error", ct)
+	}
+}
+
+// TestR2_P0_1_CrossProtocolStream404DoesNotRetry is the 404 variant of the
+// above: a 404 from upstream must not retry and must be returned as-is.
+func TestR2_P0_1_CrossProtocolStream404DoesNotRetry(t *testing.T) {
+	if err := store.InitForTest("file:r2_p01_404?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	var upstreamHits atomic.Int32
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"message":"model not found","type":"not_found"}}`))
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r2-p01-404-model",
+		Name:      "R2 P0-1 404",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolMessages,
+		RealModel: "r2-p01-404-model",
+		Group:     "go",
+	})
+	defer config.RemoveModel("r2-p01-404-model")
+
+	tok, err := pool.CreateToken("r2-p01-404-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "upstream-key-a", Group: "go", Label: "a", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create key a: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "upstream-key-b", Group: "go", Label: "b", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create key b: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewRouter(pool.NewPicker()))
+	defer proxySrv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, proxySrv.URL+"/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"r2-p01-404-model","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		t.Fatalf("status = %d, want 404; body: %s", resp.StatusCode, string(body))
+	}
+	if got := upstreamHits.Load(); got != 1 {
+		t.Errorf("upstream hit count = %d, want 1 (404 must not trigger failover)", got)
+	}
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "text/event-stream") {
+		t.Errorf("Content-Type = %q, must NOT be text/event-stream for a 404 error", ct)
+	}
+}
+
+// TestR2_P0_2_InvalidFirstEventDoesNotCommit200 verifies that when a
+// cross-protocol stream returns HTTP 200 + text/event-stream but the first
+// data line is NOT valid JSON for the protocol (e.g. "data: upstream
+// overloaded"), the proxy does NOT commit 200 to the client. With a single
+// key/upstream, the client receives 502 (BadGateway) and a JSON error body
+// (not SSE).
+func TestR2_P0_2_InvalidFirstEventDoesNotCommit200(t *testing.T) {
+	if err := store.InitForTest("file:r2_p02_invalid?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream ResponseWriter does not support flushing")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// First (and only) data line is NOT valid JSON for the Messages
+		// protocol — it's a plain string, not a JSON object.
+		_, _ = w.Write([]byte("data: upstream overloaded\n\n"))
+		flusher.Flush()
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r2-p02-invalid-model",
+		Name:      "R2 P0-2 Invalid",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolMessages,
+		RealModel: "r2-p02-invalid-model",
+		Group:     "go",
+	})
+	defer config.RemoveModel("r2-p02-invalid-model")
+
+	tok, err := pool.CreateToken("r2-p02-invalid-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	// Single key — no failover target, so the client gets 502.
+	if err := store.DB().Create(&store.Key{
+		Value: "upstream-key", Group: "go", Label: "test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewRouter(pool.NewPicker()))
+	defer proxySrv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, proxySrv.URL+"/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"r2-p02-invalid-model","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		t.Fatalf("status = %d, want 502 (undecodable first event must not commit 200); body: %s",
+			resp.StatusCode, string(body))
+	}
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("status must NOT be 200 — the invalid first event must not commit the stream")
+	}
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "text/event-stream") {
+		t.Errorf("Content-Type = %q, must NOT be text/event-stream (no 200 was committed)", ct)
+	}
+}
+
+// TestR2_P0_2_ValidFirstEventCommits200 verifies that a valid Messages SSE
+// stream (message_start, content_block_start, content_block_delta "hello",
+// pause, then the rest) commits 200 + text/event-stream and the client
+// receives the converted "hello" content. This confirms the P0-2 staging
+// validation does not break valid streams.
+func TestR2_P0_2_ValidFirstEventCommits200(t *testing.T) {
+	if err := store.InitForTest("file:r2_p02_valid?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream ResponseWriter does not support flushing")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"m\"}}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"))
+		flusher.Flush()
+		// Pause — the client must receive the converted "hello" during this gap.
+		time.Sleep(400 * time.Millisecond)
+		_, _ = w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+		flusher.Flush()
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r2-p02-valid-model",
+		Name:      "R2 P0-2 Valid",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolMessages,
+		RealModel: "r2-p02-valid-model",
+		Group:     "go",
+	})
+	defer config.RemoveModel("r2-p02-valid-model")
+
+	tok, err := pool.CreateToken("r2-p02-valid-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "upstream-key", Group: "go", Label: "test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewRouter(pool.NewPicker()))
+	defer proxySrv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, proxySrv.URL+"/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"r2-p02-valid-model","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body preview: %s", resp.StatusCode, previewResponseBody(resp.Body))
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream (valid stream must commit 200+SSE)", ct)
+	}
+
+	// Read the converted stream and confirm "hello" arrives before the pause ends.
+	reader := bufio.NewReader(resp.Body)
+	deadline := time.Now().Add(350 * time.Millisecond)
+	foundHello := false
+	gotChatFormat := false
+loopValid:
+	for time.Now().Before(deadline) {
+		type result struct {
+			event string
+			err   error
+		}
+		ch := make(chan result, 1)
+		go func() {
+			var sb strings.Builder
+			for {
+				line, err := reader.ReadSlice('\n')
+				if len(line) > 0 {
+					sb.Write(line)
+				}
+				if strings.HasSuffix(sb.String(), "\n\n") {
+					ch <- result{event: sb.String(), err: nil}
+					return
+				}
+				if err != nil {
+					ch <- result{event: sb.String(), err: err}
+					return
+				}
+			}
+		}()
+		remaining := time.Until(deadline)
+		if remaining < 0 {
+			remaining = 0
+		}
+		select {
+		case res := <-ch:
+			if res.err != nil {
+				t.Fatalf("read converted event: %v (partial=%q)", res.err, res.event)
+			}
+			if strings.Contains(res.event, "chat.completion.chunk") {
+				gotChatFormat = true
+			}
+			if strings.Contains(res.event, `"hello"`) {
+				foundHello = true
+				break loopValid
+			}
+		case <-time.After(remaining):
+			break loopValid
+		}
+	}
+	if !gotChatFormat {
+		t.Fatal("did not receive any Chat-format events — cross-protocol conversion failed")
+	}
+	if !foundHello {
+		t.Fatal("timed out waiting for converted 'hello' content — valid stream was not committed")
+	}
+}
+
+// TestR2_P0_3_DecoderErrorNoSuccessTerminal verifies that a decoder error
+// AFTER the response is committed (200 + SSE) does NOT emit the success
+// terminal marker. For a Chat target, the success terminal is "data: [DONE]".
+// The upstream sends one valid event (message_start + content_block_start +
+// content_block_delta "hello"), then a corrupt event ("data: {broken json"),
+// then closes. The client must receive 200 + SSE with "hello" but must NOT
+// receive "[DONE]".
+func TestR2_P0_3_DecoderErrorNoSuccessTerminal(t *testing.T) {
+	if err := store.InitForTest("file:r2_p03_decoder?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream ResponseWriter does not support flushing")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// One valid event sequence.
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"m\"}}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n"))
+		flusher.Flush()
+		// Corrupt event — not valid JSON. The decoder will error here.
+		_, _ = w.Write([]byte("data: {broken json\n\n"))
+		flusher.Flush()
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r2-p03-decoder-model",
+		Name:      "R2 P0-3 Decoder",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolMessages,
+		RealModel: "r2-p03-decoder-model",
+		Group:     "go",
+	})
+	defer config.RemoveModel("r2-p03-decoder-model")
+
+	tok, err := pool.CreateToken("r2-p03-decoder-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "upstream-key", Group: "go", Label: "test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewRouter(pool.NewPicker()))
+	defer proxySrv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, proxySrv.URL+"/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"r2-p03-decoder-model","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// The first valid event commits 200 + SSE.
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (first valid event commits the response); body: %s",
+			resp.StatusCode, previewResponseBody(resp.Body))
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream (response was committed)", ct)
+	}
+
+	// Read the entire client-side stream.
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	// The "hello" content must have been delivered before the break.
+	if !strings.Contains(bodyStr, `"hello"`) {
+		t.Errorf("client body missing 'hello' content (should be delivered before decoder error):\n%s", bodyStr)
+	}
+
+	// The success terminal "[DONE]" must NOT be present — a decoder error
+	// triggers onError, not onComplete, so the success terminal is suppressed.
+	if strings.Contains(bodyStr, "[DONE]") {
+		t.Errorf("client body must NOT contain '[DONE]' (decoder error must not emit success terminal):\n%s", bodyStr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Protocol-level tests (no HTTP server). These exercise
+// protocol.StreamConvertIncremental directly to verify multi-tool-call and
+// usage forwarding behavior across all three target protocols.
+// ---------------------------------------------------------------------------
+
+// r2ChatTwoToolCallStream builds an upstream Chat SSE stream with TWO tool
+// calls: tool_calls[0]={id:"call_1",name:"get_weather",arguments:'{"city":"Taipei"}'}
+// and tool_calls[1]={id:"call_2",name:"search",arguments:'{"q":"news"}'}.
+func r2ChatTwoToolCallStream() string {
+	return "data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+		// Tool call 0: start with id + name.
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}]}\n\n" +
+		// Tool call 0: arguments delta.
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Taipei\\\"}\"}}]}}]}\n\n" +
+		// Tool call 1: start with id + name.
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"search\",\"arguments\":\"\"}}]}}]}\n\n" +
+		// Tool call 1: arguments delta.
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"arguments\":\"{\\\"q\\\":\\\"news\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+		"data: [DONE]\n\n"
+}
+
+// r2RunStreamConvertIncremental runs StreamConvertIncremental with the given
+// upstream stream and target protocol, returning the converted output. The
+// whole stream is passed as firstEvent (with a trailing blank line) and an
+// empty reader as rest, so the incremental converter processes it in one go.
+func r2RunStreamConvertIncremental(t *testing.T, upProto, dstProto, stream string) string {
+	t.Helper()
+	var dst bytes.Buffer
+	flush := func() {}
+	rest := bytes.NewReader(nil)
+	_, err := protocol.StreamConvertIncremental(upProto, dstProto,
+		[]byte(stream), rest, &dst, flush, nil)
+	if err != nil {
+		t.Fatalf("StreamConvertIncremental(%s->%s) error: %v", upProto, dstProto, err)
+	}
+	return dst.String()
+}
+
+// TestR2_P1_1_MessagesMultiToolBlocks verifies that two tool calls in a
+// single Chat upstream stream each get their OWN Messages content block
+// (two content_block_start events with type "tool"), with distinct block
+// indices, and that each tool's id/name/arguments are preserved and routed
+// to the correct block.
+func TestR2_P1_1_MessagesMultiToolBlocks(t *testing.T) {
+	out := r2RunStreamConvertIncremental(t, "chat", "messages", r2ChatTwoToolCallStream())
+
+	// There must be exactly two content_block_start events with type "tool".
+	toolBlockStarts := strings.Count(out, `"type":"content_block_start"`+`"content_block":{"type":"tool_use"`)
+	// The encoder may emit content_block_start with content_block field; count
+	// tool_use blocks directly as a robust check.
+	toolUseCount := strings.Count(out, `"type":"tool_use"`)
+	if toolUseCount != 2 {
+		t.Errorf("expected 2 tool_use content blocks, got %d (toolBlockStarts=%d):\n%s",
+			toolUseCount, toolBlockStarts, out)
+	}
+
+	// Both tool names and ids must be present.
+	for _, want := range []string{
+		`"name":"get_weather"`,
+		`"name":"search"`,
+		`"id":"call_1"`,
+		`"id":"call_2"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %s:\n%s", want, out)
+		}
+	}
+
+	// Both tools' arguments must be present and routed to their blocks.
+	if !strings.Contains(out, `"partial_json":"{\"city\":\"Taipei\"}"`) {
+		t.Errorf("output missing get_weather arguments partial_json:\n%s", out)
+	}
+	if !strings.Contains(out, `"partial_json":"{\"q\":\"news\"}"`) {
+		t.Errorf("output missing search arguments partial_json:\n%s", out)
+	}
+
+	// The two tool blocks must have DIFFERENT content_block indices. Collect
+	// the "index" values from content_block_start data lines whose
+	// content_block type is tool_use. Messages SSE emits the event type on
+	// the "event:" line and the JSON payload on the "data:" line, so we scan
+	// for "data:" lines containing both "content_block_start" and "tool_use".
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	var toolBlockIndices []int
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+		if !bytes.Contains(line, []byte("content_block_start")) {
+			continue
+		}
+		if !bytes.Contains(line, []byte("tool_use")) {
+			continue
+		}
+		// Extract the "index" field value.
+		var ev map[string]json.RawMessage
+		if err := json.Unmarshal(bytes.TrimSpace(line[6:]), &ev); err != nil {
+			continue
+		}
+		idxRaw, ok := ev["index"]
+		if !ok {
+			// A missing index defaults to 0 (the first content block).
+			toolBlockIndices = append(toolBlockIndices, 0)
+			continue
+		}
+		var idx int
+		if json.Unmarshal(idxRaw, &idx) == nil {
+			toolBlockIndices = append(toolBlockIndices, idx)
+		}
+	}
+	if len(toolBlockIndices) != 2 {
+		t.Errorf("expected 2 tool_use content_block_start events with index, got %d: %v", len(toolBlockIndices), toolBlockIndices)
+	} else if toolBlockIndices[0] == toolBlockIndices[1] {
+		t.Errorf("the two tool blocks must have DIFFERENT indices, both = %d", toolBlockIndices[0])
+	}
+}
+
+// TestR2_P1_2_ResponsesToolCallPreservesIDName verifies that two tool calls
+// in a Chat upstream stream, converted to the Responses protocol, produce
+// two "response.output_item.added" events each carrying a function_call item
+// with a distinct call_id and function name, and that the
+// "response.function_call_arguments.delta" events use the correct
+// output_index (0 and 1, not all 0).
+func TestR2_P1_2_ResponsesToolCallPreservesIDName(t *testing.T) {
+	out := r2RunStreamConvertIncremental(t, "chat", "responses", r2ChatTwoToolCallStream())
+
+	// Two response.output_item.added events with function_call items.
+	if n := strings.Count(out, `"type":"response.output_item.added"`); n < 2 {
+		t.Errorf("expected at least 2 response.output_item.added events, got %d:\n%s", n, out)
+	}
+	// Distinct call_id and function names preserved.
+	for _, want := range []string{
+		`"type":"function_call"`,
+		`"call_id":"call_1"`,
+		`"call_id":"call_2"`,
+		`"name":"get_weather"`,
+		`"name":"search"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %s:\n%s", want, out)
+		}
+	}
+
+	// The function_call_arguments.delta events must use output_index 0 for
+	// the first tool and 1 for the second. Collect all output_index values
+	// attached to response.function_call_arguments.delta events.
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	var deltaIndices []int
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if !bytes.HasPrefix(line, []byte("data: ")) {
+			continue
+		}
+		payload := bytes.TrimSpace(line[6:])
+		if !bytes.Contains(payload, []byte("response.function_call_arguments.delta")) {
+			continue
+		}
+		var ev map[string]json.RawMessage
+		if err := json.Unmarshal(payload, &ev); err != nil {
+			continue
+		}
+		idxRaw, ok := ev["output_index"]
+		if !ok {
+			continue
+		}
+		var idx int
+		if json.Unmarshal(idxRaw, &idx) == nil {
+			deltaIndices = append(deltaIndices, idx)
+		}
+	}
+	if len(deltaIndices) < 2 {
+		t.Errorf("expected at least 2 function_call_arguments.delta events, got %d: %v", len(deltaIndices), deltaIndices)
+	} else {
+		// At least one delta must use output_index 0 and at least one must
+		// use output_index 1 (the two tools must not share a single index).
+		seen := map[int]bool{}
+		for _, idx := range deltaIndices {
+			seen[idx] = true
+		}
+		if !seen[0] || !seen[1] {
+			t.Errorf("function_call_arguments.delta output_index values = %v, want both 0 and 1 present", deltaIndices)
+		}
+	}
+}
+
+// TestR2_P1_3_UsageForwardedToClient verifies that usage information from an
+// upstream Chat SSE stream (a usage chunk before [DONE]) is forwarded to
+// the client for all three target protocols: chat, messages, and responses.
+func TestR2_P1_3_UsageForwardedToClient(t *testing.T) {
+	// Upstream Chat SSE: a content delta then a usage chunk, then [DONE].
+	stream := "data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\n" +
+		"data: [DONE]\n\n"
+
+	// Target chat: output should contain a chunk with the usage field.
+	t.Run("chat", func(t *testing.T) {
+		out := r2RunStreamConvertIncremental(t, "chat", "chat", stream)
+		if !strings.Contains(out, `"prompt_tokens":10`) {
+			t.Errorf("chat output missing prompt_tokens usage:\n%s", out)
+		}
+		if !strings.Contains(out, `"completion_tokens":20`) {
+			t.Errorf("chat output missing completion_tokens usage:\n%s", out)
+		}
+	})
+
+	// Target messages: message_delta should carry usage / completion tokens.
+	t.Run("messages", func(t *testing.T) {
+		out := r2RunStreamConvertIncremental(t, "chat", "messages", stream)
+		// The message_delta event carries output_tokens (completion tokens).
+		if !strings.Contains(out, `"output_tokens":20`) {
+			t.Errorf("messages output missing output_tokens=20 (completion usage):\n%s", out)
+		}
+	})
+
+	// Target responses: response.completed should include usage.
+	t.Run("responses", func(t *testing.T) {
+		out := r2RunStreamConvertIncremental(t, "chat", "responses", stream)
+		// RespUsage uses input_tokens / output_tokens / total_tokens.
+		if !strings.Contains(out, `"input_tokens":10`) {
+			t.Errorf("responses output missing input_tokens=10 (prompt usage):\n%s", out)
+		}
+		if !strings.Contains(out, `"output_tokens":20`) {
+			t.Errorf("responses output missing output_tokens=20 (completion usage):\n%s", out)
+		}
+	})
 }
 

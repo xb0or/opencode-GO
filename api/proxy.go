@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -385,6 +386,29 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			return attemptResult{
 				Response:  resp,
 				Status:    resp.StatusCode,
+				Retryable: false,
+			}
+		}
+
+		// Non-retryable 4xx client errors (400/404/409/413/415/422 etc.)
+		// that bypassed shouldRetryWithNextKey/shouldMarkUpstreamFailure.
+		// These must NOT enter the cross-protocol streaming path (which
+		// assumes a 2xx SSE response), and must NOT trigger key/upstream
+		// failover — the request itself is invalid. Preserve the original
+		// status code and error body.
+		if resp.StatusCode >= 400 && isClientErrorNonRetryable(resp.StatusCode) {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
+			_ = resp.Body.Close()
+			cancel()
+			if readErr != nil {
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, nil, readErr.Error())
+			} else {
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, nil, summarizeUpstreamError(resp.StatusCode, body))
+			}
+			return attemptResult{
+				Response:  resp,
+				Status:    resp.StatusCode,
+				Err:       fmt.Errorf("upstream returned %d", resp.StatusCode),
 				Retryable: false,
 			}
 		}

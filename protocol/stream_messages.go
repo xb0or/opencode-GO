@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 )
 
@@ -32,7 +33,8 @@ func MessagesStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) erro
 		}
 		ev, err := DecodeMessagesStreamEvent(payload)
 		if err != nil {
-			continue // skip malformed chunks
+			// P0-2/P0-3: a malformed data: payload is a decoder error.
+			return fmt.Errorf("messages stream: malformed data payload: %w", err)
 		}
 		if err := onEvent(ev); err != nil {
 			return err

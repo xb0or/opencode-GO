@@ -3,6 +3,7 @@ package protocol
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 )
 
@@ -24,9 +25,13 @@ func ResponsesStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) err
 		if len(payload) == 0 {
 			continue
 		}
+		if bytes.Equal(payload, []byte("[DONE]")) {
+			return nil
+		}
 		ev, err := DecodeResponsesStreamEvent(payload)
 		if err != nil {
-			continue // skip malformed chunks
+			// P0-2/P0-3: a malformed data: payload is a decoder error.
+			return fmt.Errorf("responses stream: malformed data payload: %w", err)
 		}
 		if err := onEvent(ev); err != nil {
 			return err
@@ -77,18 +82,18 @@ func DecodeResponsesSSE(r io.Reader) (*IRResponse, error) {
 			msg.Content = appendTextContent(msg.Content, ev.ContentDelta)
 		case "response.reasoning_text.delta", "response.reasoning.delta", "response.reasoning_content.delta":
 			msg.Content = appendThinkingContentBlock(msg.Content, ev.ContentDelta)
-case "response.function_call_arguments.delta":
-				idx := 0
-				if ev.ToolCallDelta != nil {
-					idx = ev.ToolCallDelta.Index
-				}
-				for len(toolCalls) <= idx {
-					toolCalls = append(toolCalls, IRToolCall{Index: idx})
-				}
-				if toolCalls[idx].Index == 0 && idx != 0 {
-					toolCalls[idx].Index = idx
-				}
-				toolCalls[idx].Arguments += ev.ContentDelta
+		case "response.function_call_arguments.delta":
+			idx := 0
+			if ev.ToolCallDelta != nil {
+				idx = ev.ToolCallDelta.Index
+			}
+			for len(toolCalls) <= idx {
+				toolCalls = append(toolCalls, IRToolCall{Index: idx})
+			}
+			if toolCalls[idx].Index == 0 && idx != 0 {
+				toolCalls[idx].Index = idx
+			}
+			toolCalls[idx].Arguments += ev.ContentDelta
 		case "response.output_item.done":
 			if ev.Choice != nil && ev.Choice.Message != nil {
 				if text, ok := thinkingTextAndPresence(*ev.Choice.Message); ok {

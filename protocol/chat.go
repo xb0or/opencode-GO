@@ -80,10 +80,10 @@ type ChatChoice struct {
 }
 
 type ChatUsage struct {
-	PromptTokens            int                 `json:"prompt_tokens"`
-	CompletionTokens        int                 `json:"completion_tokens"`
-	TotalTokens             int                 `json:"total_tokens"`
-	PromptTokensDetails     *ChatTokensDetails  `json:"prompt_tokens_details,omitempty"`
+	PromptTokens            int                `json:"prompt_tokens"`
+	CompletionTokens        int                `json:"completion_tokens"`
+	TotalTokens             int                `json:"total_tokens"`
+	PromptTokensDetails     *ChatTokensDetails `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *ChatTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
@@ -233,10 +233,10 @@ func EncodeChatResponse(ir *IRResponse) ([]byte, error) {
 	}
 	if ir.Usage != nil {
 		resp.Usage = &ChatUsage{
-			PromptTokens:     ir.Usage.PromptTokens,
-			CompletionTokens: ir.Usage.CompletionTokens,
-			TotalTokens:      ir.Usage.TotalTokens,
-			PromptTokensDetails: chatUsageDetailsFromIR(ir.Usage, true),
+			PromptTokens:            ir.Usage.PromptTokens,
+			CompletionTokens:        ir.Usage.CompletionTokens,
+			TotalTokens:             ir.Usage.TotalTokens,
+			PromptTokensDetails:     chatUsageDetailsFromIR(ir.Usage, true),
 			CompletionTokensDetails: chatUsageDetailsFromIR(ir.Usage, false),
 		}
 	}
@@ -346,10 +346,10 @@ func EncodeChatStreamChunk(ev *IRStreamEvent) ([]byte, error) {
 		chunk.Model = ev.Response.Model
 		if ev.Response.Usage != nil {
 			chunk.Usage = &ChatUsage{
-				PromptTokens:     ev.Response.Usage.PromptTokens,
-				CompletionTokens: ev.Response.Usage.CompletionTokens,
-				TotalTokens:      ev.Response.Usage.TotalTokens,
-				PromptTokensDetails: chatUsageDetailsFromIR(ev.Response.Usage, true),
+				PromptTokens:            ev.Response.Usage.PromptTokens,
+				CompletionTokens:        ev.Response.Usage.CompletionTokens,
+				TotalTokens:             ev.Response.Usage.TotalTokens,
+				PromptTokensDetails:     chatUsageDetailsFromIR(ev.Response.Usage, true),
 				CompletionTokensDetails: chatUsageDetailsFromIR(ev.Response.Usage, false),
 			}
 		}

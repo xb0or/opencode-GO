@@ -214,6 +214,22 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 		}
 	}
 
+	// Non-retryable 4xx client errors (400/404/409/413/415/422 etc.)
+	// that bypassed shouldRetryWithNextKey/shouldMarkUpstreamFailure.
+	// These must NOT enter the cross-protocol streaming path and must
+	// NOT trigger key/upstream failover. Preserve the original status.
+	if resp.StatusCode >= 400 && isClientErrorNonRetryable(resp.StatusCode) {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
+		_ = resp.Body.Close()
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, summarizeUpstreamError(resp.StatusCode, errBody))
+		return attemptResult{
+			Response:  resp,
+			Status:    resp.StatusCode,
+			Err:       fmt.Errorf("upstream returned %d", resp.StatusCode),
+			Retryable: false,
+		}
+	}
+
 	// Success — read the response body, then convert.
 	if stream {
 		// Cross-protocol SSE streaming: avoid buffering the full upstream

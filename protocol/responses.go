@@ -78,11 +78,11 @@ type RespOutputItem struct {
 }
 
 type RespUsage struct {
-	InputTokens          int `json:"input_tokens"`
-	OutputTokens         int `json:"output_tokens"`
-	TotalTokens          int `json:"total_tokens,omitempty"`
-	InputTokensDetails   *RespTokensDetails `json:"input_tokens_details,omitempty"`
-	OutputTokensDetails  *RespTokensDetails `json:"output_tokens_details,omitempty"`
+	InputTokens         int                `json:"input_tokens"`
+	OutputTokens        int                `json:"output_tokens"`
+	TotalTokens         int                `json:"total_tokens,omitempty"`
+	InputTokensDetails  *RespTokensDetails `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails *RespTokensDetails `json:"output_tokens_details,omitempty"`
 }
 
 // RespTokensDetails carries nested cache/reasoning token counts.
@@ -207,7 +207,7 @@ func DecodeResponsesResponse(data []byte) (*IRResponse, error) {
 		ID:    resp.ID,
 		Model: resp.Model,
 	}
-if resp.Usage != nil {
+	if resp.Usage != nil {
 		ir.Usage = &IRUsage{
 			PromptTokens:     resp.Usage.InputTokens,
 			CompletionTokens: resp.Usage.OutputTokens,
