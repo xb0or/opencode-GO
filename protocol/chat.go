@@ -80,10 +80,10 @@ type ChatChoice struct {
 }
 
 type ChatUsage struct {
-	PromptTokens            int                 `json:"prompt_tokens"`
-	CompletionTokens        int                 `json:"completion_tokens"`
-	TotalTokens             int                 `json:"total_tokens"`
-	PromptTokensDetails     *ChatTokensDetails  `json:"prompt_tokens_details,omitempty"`
+	PromptTokens            int                `json:"prompt_tokens"`
+	CompletionTokens        int                `json:"completion_tokens"`
+	TotalTokens             int                `json:"total_tokens"`
+	PromptTokensDetails     *ChatTokensDetails `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *ChatTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
@@ -233,10 +233,10 @@ func EncodeChatResponse(ir *IRResponse) ([]byte, error) {
 	}
 	if ir.Usage != nil {
 		resp.Usage = &ChatUsage{
-			PromptTokens:     ir.Usage.PromptTokens,
-			CompletionTokens: ir.Usage.CompletionTokens,
-			TotalTokens:      ir.Usage.TotalTokens,
-			PromptTokensDetails: chatUsageDetailsFromIR(ir.Usage, true),
+			PromptTokens:            ir.Usage.PromptTokens,
+			CompletionTokens:        ir.Usage.CompletionTokens,
+			TotalTokens:             ir.Usage.TotalTokens,
+			PromptTokensDetails:     chatUsageDetailsFromIR(ir.Usage, true),
 			CompletionTokensDetails: chatUsageDetailsFromIR(ir.Usage, false),
 		}
 	}
@@ -303,20 +303,38 @@ func normalizeChatFinishReason(reason string) string {
 }
 
 // DecodeChatStreamChunk parses a streaming SSE chunk into an IRStreamEvent.
+//
+// P1-6: ev.Response is ALWAYS populated with ID and Model so the first
+// meaningful event carries them to onStart (previously ID was lost because
+// ev.Response was only created when Usage != nil).
+//
+// P0-2: semantically empty chunks (no choices, no usage, no response ID/model)
+// are rejected with an error so the caller cannot commit HTTP 200 for a
+// meaningless event. {"error":...} payloads are reported as errors with the
+// upstream message.
 func DecodeChatStreamChunk(data []byte) (*IRStreamEvent, error) {
 	var chunk ChatStreamChunk
 	if err := json.Unmarshal(data, &chunk); err != nil {
 		return nil, fmt.Errorf("chat: decode stream chunk: %w", err)
 	}
+	// P0-2: detect upstream error payloads. Some providers return
+	// {"error":{"message":"...","type":"..."}} with HTTP 200 in streaming
+	// mode when the model is overloaded. Surfacing this as a decoder error
+	// prevents the gateway from emitting a fake-success terminal event.
+	if errPayload := streamErrorPayload(data); errPayload != "" {
+		return nil, fmt.Errorf("chat stream: error payload: %s", errPayload)
+	}
 	ev := &IRStreamEvent{Type: "completion"}
+	// P1-6: always populate Response so ID+Model survive to onStart.
+	ev.Response = &IRResponse{ID: chunk.ID, Model: chunk.Model}
 	if chunk.Usage != nil {
-		ev.Response = &IRResponse{Model: chunk.Model, Usage: &IRUsage{
+		ev.Response.Usage = &IRUsage{
 			PromptTokens:     chunk.Usage.PromptTokens,
 			CompletionTokens: chunk.Usage.CompletionTokens,
 			TotalTokens:      chunk.Usage.TotalTokens,
 			CacheReadTokens:  chatCacheReadTokens(chunk.Usage),
 			ReasoningTokens:  chatReasoningTokens(chunk.Usage),
-		}}
+		}
 	}
 	for _, ch := range chunk.Choices {
 		msg := chatMsgToIR(ch.Delta)
@@ -331,8 +349,19 @@ func DecodeChatStreamChunk(data []byte) (*IRStreamEvent, error) {
 		}
 		break // chat completions always have 1 choice in streaming
 	}
+	// P0-2: a chunk with no choices, no usage, and no identifying ID/model
+	// is semantically empty — reject it so the gateway doesn't commit 200
+	// on a no-op event. (Some providers emit keep-alive chunks like
+	// {"id":"","object":"chat.completion.chunk","choices":[]} between real
+	// deltas; we still reject them because the gateway should wait for a
+	// real first event before committing the response.)
+	if ev.Choice == nil && ev.Response.Usage == nil && ev.Response.ID == "" && ev.Response.Model == "" {
+		return nil, fmt.Errorf("chat stream: empty chunk (no choices, usage, or metadata)")
+	}
 	return ev, nil
 }
+
+// (chatStreamErrorPayload removed — use shared streamErrorPayload.)
 
 // EncodeChatStreamChunk serializes an IR stream event into a Chat SSE chunk.
 func EncodeChatStreamChunk(ev *IRStreamEvent) ([]byte, error) {
@@ -346,10 +375,10 @@ func EncodeChatStreamChunk(ev *IRStreamEvent) ([]byte, error) {
 		chunk.Model = ev.Response.Model
 		if ev.Response.Usage != nil {
 			chunk.Usage = &ChatUsage{
-				PromptTokens:     ev.Response.Usage.PromptTokens,
-				CompletionTokens: ev.Response.Usage.CompletionTokens,
-				TotalTokens:      ev.Response.Usage.TotalTokens,
-				PromptTokensDetails: chatUsageDetailsFromIR(ev.Response.Usage, true),
+				PromptTokens:            ev.Response.Usage.PromptTokens,
+				CompletionTokens:        ev.Response.Usage.CompletionTokens,
+				TotalTokens:             ev.Response.Usage.TotalTokens,
+				PromptTokensDetails:     chatUsageDetailsFromIR(ev.Response.Usage, true),
 				CompletionTokensDetails: chatUsageDetailsFromIR(ev.Response.Usage, false),
 			}
 		}
@@ -357,7 +386,7 @@ func EncodeChatStreamChunk(ev *IRStreamEvent) ([]byte, error) {
 	if ev.Choice != nil {
 		delta := ChatMessage{}
 		if ev.Choice.Delta != nil {
-			delta = irMsgToChat(*ev.Choice.Delta)
+			delta = irMsgToChatDelta(*ev.Choice.Delta)
 		}
 		sc := ChatStreamChoice{Index: ev.Choice.Index, Delta: delta}
 		if ev.Choice.FinishReason != "" {
@@ -479,6 +508,35 @@ func irMsgToChatWithReasoning(m IRMessage, includeEmptyReasoning bool) ChatMessa
 	for idx, tc := range cleanIRToolCalls(m.ToolCalls) {
 		cm.ToolCalls = append(cm.ToolCalls, ChatToolCall{
 			Index: idx,
+			ID:    tc.ID,
+			Type:  "function",
+			Function: ChatToolCallFunc{
+				Name:      tc.Name,
+				Arguments: tc.Arguments,
+			},
+		})
+	}
+	return cm
+}
+
+// irMsgToChatDelta converts an IRMessage streaming delta to a ChatMessage for
+// SSE emission. Unlike irMsgToChat (which is used for full, finalized
+// messages), it preserves ALL tool calls — including those with an empty
+// Name — so that partial argument-only deltas are not stripped. It also uses
+// each tool call's own Index field (not a sequential loop index) so that
+// interleaved tool-call deltas route to the correct upstream tool index.
+//
+// Rationale: cleanIRToolCalls filters tool calls with invalid/empty names,
+// which is desirable for finalized messages but destructive for streaming
+// deltas where a chunk may carry only {Index, Arguments} (the Name was sent
+// in an earlier start chunk). Without this, tool-call argument deltas are
+// silently dropped from the chat output.
+func irMsgToChatDelta(m IRMessage) ChatMessage {
+	cm := irMsgToChatWithReasoning(m, false)
+	cm.ToolCalls = nil
+	for _, tc := range m.ToolCalls {
+		cm.ToolCalls = append(cm.ToolCalls, ChatToolCall{
+			Index: tc.Index,
 			ID:    tc.ID,
 			Type:  "function",
 			Function: ChatToolCallFunc{

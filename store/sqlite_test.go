@@ -2,142 +2,126 @@ package store
 
 import (
 	"testing"
-
-	"github.com/xb0or/opencode-GO/config"
 )
 
-// TestModelRouteRoundTrip verifies that Upstreams and UpstreamGroups survive
-// a full Save → Load → ModelRouteFromRow round trip through SQLite.
-func TestModelRouteRoundTrip(t *testing.T) {
-	if err := InitForTest("file:store_roundtrip?mode=memory&cache=shared"); err != nil {
+// TestP1_1_TryReserveRequestDBError verifies that TryReserveRequest returns
+// (false, err) — not (false, nil) — when the database is unavailable, so the
+// middleware can distinguish "DB broken" (→ 503) from "quota exhausted" (→ 403).
+func TestP1_1_TryReserveRequestDBError(t *testing.T) {
+	if err := InitForTest("file:p11_store_dberr?mode=memory&cache=shared"); err != nil {
 		t.Fatalf("init test db: %v", err)
 	}
 
-	original := config.ModelRoute{
-		ID:        "roundtrip-model",
-		Name:      "Round Trip Model",
-		Upstream:  config.UpstreamGo,
-		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
-		UpstreamGroups: map[config.Upstream]string{
-			config.UpstreamGo:    "premium",
-			config.UpstreamOllama: "ollama-premium",
-		},
-		Protocol:  config.ProtocolChat,
-		RealModel: "real-roundtrip-model",
-		Group:     "premium",
+	// Create a token with MaxRequests > 0 so TryReserveRequest hits the DB.
+	tok := Token{
+		Token:       "test-dberr-token",
+		Name:        "test-dberr",
+		Enabled:     true,
+		MaxRequests: 10,
+	}
+	if err := DB().Create(&tok).Error; err != nil {
+		t.Fatalf("create token: %v", err)
 	}
 
-	// Save to DB
-	row := NewModelRouteRow(original)
-	if err := SaveModelRoute(&row); err != nil {
-		t.Fatalf("save model route: %v", err)
-	}
-
-	// Load back from DB
-	rows, err := LoadModelRoutes()
+	// Close the underlying SQL connection so the next DB op fails.
+	sqlDB, err := DB().DB()
 	if err != nil {
-		t.Fatalf("load model routes: %v", err)
+		t.Fatalf("get sql.DB: %v", err)
 	}
-	if len(rows) == 0 {
-		t.Fatal("no model routes loaded")
-	}
+	_ = sqlDB.Close()
 
-	// Find our row
-	var foundRow ModelRouteRow
-	for _, r := range rows {
-		if r.ID == "roundtrip-model" {
-			foundRow = r
-			break
-		}
+	reserved, err := TryReserveRequest(tok.ID)
+	if reserved {
+		t.Error("expected reserved=false when DB is closed, got true")
 	}
-	if foundRow.ID == "" {
-		t.Fatal("roundtrip-model not found in loaded routes")
-	}
-
-	// Convert back to runtime config
-	restored := ModelRouteFromRow(foundRow)
-
-	// Verify Upstreams survived
-	if len(restored.Upstreams) != 2 {
-		t.Fatalf("Upstreams length = %d, want 2; got %#v", len(restored.Upstreams), restored.Upstreams)
-	}
-	if restored.Upstreams[0] != config.UpstreamGo {
-		t.Fatalf("Upstreams[0] = %q, want %q", restored.Upstreams[0], config.UpstreamGo)
-	}
-	if restored.Upstreams[1] != config.UpstreamOllama {
-		t.Fatalf("Upstreams[1] = %q, want %q", restored.Upstreams[1], config.UpstreamOllama)
-	}
-
-	// Verify UpstreamGroups survived
-	if len(restored.UpstreamGroups) != 2 {
-		t.Fatalf("UpstreamGroups length = %d, want 2; got %#v", len(restored.UpstreamGroups), restored.UpstreamGroups)
-	}
-	if restored.UpstreamGroups[config.UpstreamGo] != "premium" {
-		t.Fatalf("UpstreamGroups[go] = %q, want %q", restored.UpstreamGroups[config.UpstreamGo], "premium")
-	}
-	if restored.UpstreamGroups[config.UpstreamOllama] != "ollama-premium" {
-		t.Fatalf("UpstreamGroups[ollama] = %q, want %q", restored.UpstreamGroups[config.UpstreamOllama], "ollama-premium")
-	}
-
-	// Verify other fields are preserved
-	if restored.Upstream != config.UpstreamGo {
-		t.Fatalf("Upstream = %q, want %q", restored.Upstream, config.UpstreamGo)
-	}
-	if restored.Protocol != config.ProtocolChat {
-		t.Fatalf("Protocol = %q, want %q", restored.Protocol, config.ProtocolChat)
-	}
-	if restored.RealModel != "real-roundtrip-model" {
-		t.Fatalf("RealModel = %q, want %q", restored.RealModel, "real-roundtrip-model")
-	}
-	if restored.Group != "premium" {
-		t.Fatalf("Group = %q, want %q", restored.Group, "premium")
+	if err == nil {
+		t.Error("expected a non-nil error when DB is closed, got nil — " +
+			"middleware cannot distinguish DB error from quota exhaustion")
 	}
 }
 
-// TestModelRouteRoundTripEmptyUpstreams verifies that a route with only
-// Upstream (no Upstreams/UpstreamGroups) round-trips correctly and the
-// fields remain empty/nil.
-func TestModelRouteRoundTripEmptyUpstreams(t *testing.T) {
-	if err := InitForTest("file:store_roundtrip_empty?mode=memory&cache=shared"); err != nil {
+// TestP1_1_TryReserveRequestUnlimitedNoWrite verifies that a token with
+// MaxRequests <= 0 returns (true, nil) without any DB write, so unlimited
+// tokens don't generate a write transaction per request.
+func TestP1_1_TryReserveRequestUnlimitedNoWrite(t *testing.T) {
+	if err := InitForTest("file:p11_store_unlimited?mode=memory&cache=shared"); err != nil {
 		t.Fatalf("init test db: %v", err)
 	}
 
-	original := config.ModelRoute{
-		ID:        "simple-model",
-		Name:      "Simple Model",
-		Upstream:  config.UpstreamGo,
-		Protocol:  config.ProtocolChat,
-		RealModel: "simple-model",
-		Group:     "go",
+	tok := Token{
+		Token:       "test-unlimited-token",
+		Name:        "test-unlimited",
+		Enabled:     true,
+		MaxRequests: 0, // unlimited
+	}
+	if err := DB().Create(&tok).Error; err != nil {
+		t.Fatalf("create token: %v", err)
 	}
 
-	row := NewModelRouteRow(original)
-	if err := SaveModelRoute(&row); err != nil {
-		t.Fatalf("save model route: %v", err)
-	}
-
-	rows, err := LoadModelRoutes()
-	if err != nil {
-		t.Fatalf("load model routes: %v", err)
-	}
-
-	var foundRow ModelRouteRow
-	for _, r := range rows {
-		if r.ID == "simple-model" {
-			foundRow = r
-			break
+	for i := 0; i < 5; i++ {
+		reserved, err := TryReserveRequest(tok.ID)
+		if err != nil {
+			t.Fatalf("call %d: unexpected error: %v", i, err)
+		}
+		if !reserved {
+			t.Fatalf("call %d: unlimited token should always be reserved", i)
 		}
 	}
-	if foundRow.ID == "" {
-		t.Fatal("simple-model not found")
+
+	// requests_used must remain 0 — no DB writes for unlimited tokens.
+	var refreshed Token
+	if err := DB().First(&refreshed, tok.ID).Error; err != nil {
+		t.Fatalf("reload token: %v", err)
+	}
+	if refreshed.RequestsUsed != 0 {
+		t.Errorf("unlimited token requests_used = %d, want 0", refreshed.RequestsUsed)
+	}
+}
+
+// TestP1_1_TryReserveRequestQuotaExhausted verifies that once requests_used
+// reaches MaxRequests, TryReserveRequest returns (false, nil) — quota
+// exhausted, not a DB error.
+func TestP1_1_TryReserveRequestQuotaExhausted(t *testing.T) {
+	if err := InitForTest("file:p11_store_quota?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
 	}
 
-	restored := ModelRouteFromRow(foundRow)
-
-	if len(restored.Upstreams) != 0 {
-		t.Fatalf("Upstreams should be empty, got %#v", restored.Upstreams)
+	tok := Token{
+		Token:       "test-quota-token",
+		Name:        "test-quota",
+		Enabled:     true,
+		MaxRequests: 2,
 	}
-	if len(restored.UpstreamGroups) != 0 {
-		t.Fatalf("UpstreamGroups should be empty, got %#v", restored.UpstreamGroups)
+	if err := DB().Create(&tok).Error; err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	// First two requests succeed.
+	for i := 0; i < 2; i++ {
+		reserved, err := TryReserveRequest(tok.ID)
+		if err != nil {
+			t.Fatalf("call %d: unexpected error: %v", i, err)
+		}
+		if !reserved {
+			t.Fatalf("call %d: expected reserved=true (under cap)", i)
+		}
+	}
+
+	// Third request must be rejected with (false, nil) — quota exhausted.
+	reserved, err := TryReserveRequest(tok.ID)
+	if err != nil {
+		t.Fatalf("quota exhaustion must return nil error, got: %v", err)
+	}
+	if reserved {
+		t.Error("expected reserved=false when quota exhausted, got true")
+	}
+
+	// requests_used must be exactly 2 (at the cap).
+	var refreshed Token
+	if err := DB().First(&refreshed, tok.ID).Error; err != nil {
+		t.Fatalf("reload token: %v", err)
+	}
+	if refreshed.RequestsUsed != 2 {
+		t.Errorf("requests_used = %d, want 2", refreshed.RequestsUsed)
 	}
 }

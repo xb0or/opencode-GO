@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -103,6 +105,15 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	// starting point for per-upstream conversion.
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
+		// http.MaxBytesReader (set in bodyLimitMiddleware) returns a
+		// *http.MaxBytesError when the body exceeds the limit; that must
+		// be reported as 413, not 400.
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeOpenAIError(c, http.StatusRequestEntityTooLarge,
+				"request_too_large", "request body exceeds the maximum allowed size")
+			return
+		}
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request_error", "failed to read request body")
 		return
 	}
@@ -112,6 +123,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	originalBody := head.Body
 
 	resolution := router.Resolve(head.Model, inbound)
+	if resolution.NotFound {
+		writeOpenAIError(c, http.StatusNotFound, "model_not_found",
+			"model not found: "+head.Model)
+		return
+	}
 	route := resolution.Route
 	routed := !resolution.IsPassthrough
 	if routed && !route.IsEnabled() {
@@ -121,12 +137,9 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	}
 
 	// Stash the route's original group for logging/debugging.
-	// The actual group used per-upstream is resolved inside the failover loop.
+	// The actual group used per-upstream is resolved inside the failover loop
+	// via ResolveUpstreamGroup (G1).
 	c.Set("group", route.Group)
-
-	// Save the original route before the failover loop so we can fall back
-	// to the original Group when no explicit UpstreamGroups mapping exists.
-	baseRoute := route
 
 	// -----------------------------------------------------------------------
 	// Multi-upstream failover loop
@@ -143,14 +156,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	var attemptedAny bool
 
 	for ui, currentUpstream := range upstreamsToTry {
-		// Resolve the key-pool group for this upstream.
-		// When no explicit UpstreamGroups mapping exists and this upstream
-		// is the original primary upstream, fall back to baseRoute.Group
-		// for backward compatibility with old {Group: "premium"} configs.
-		upstreamGroup := route.UpstreamGroup(currentUpstream)
-		if upstreamGroup == string(currentUpstream) && currentUpstream == baseRoute.Upstream && baseRoute.Group != "" {
-			upstreamGroup = baseRoute.Group
-		}
+		// G1: Resolve the key-pool group for this upstream using the single
+		// authoritative resolver. The result is passed to every downstream
+		// consumer (token permission, PickAttempts, Go/Ollama handlers,
+		// usage log) so they all use the same group.
+		upstreamGroup := route.ResolveUpstreamGroup(currentUpstream)
 
 		// Check token permission for this upstream's resolved group.
 		// Each upstream may map to a different group via UpstreamGroups,
@@ -173,7 +183,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			}
 		}
 		attemptedAny = true
-		route.Group = upstreamGroup
+		// P1-1: do NOT mutate the original route — create a per-iteration
+		// copy so the resolved group for one upstream does not leak into
+		// the next iteration's ResolveUpstreamGroup call.
+		routeCopy := route
+		routeCopy.Group = upstreamGroup
 
 		// --------------- Ollama upstream ---------------
 		if currentUpstream == config.UpstreamOllama {
@@ -181,13 +195,14 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			// conversion internally. Do NOT call buildUpstreamBody here
 			// to avoid double conversion (the outer loop would convert
 			// to Chat, then the helper would try to convert again).
-			result := proxyOllamaRequest(c, p, route, inbound, originalBody, head, start)
+			// G1: upstreamGroup is pre-resolved by the outer loop and passed
+			// in so Ollama does NOT re-resolve via TargetGroup.
+			result := proxyOllamaRequest(c, p, routeCopy, inbound, originalBody, head, start, upstreamGroup)
 			if result.Terminal {
 				// Client disconnected — stop immediately.
 				return
 			}
 			if result.Handled {
-				incrementRequestsUsed(c)
 				return
 			}
 			lastResult = result
@@ -198,12 +213,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		}
 
 		// --------------- Go upstream ---------------
-		result := proxyGoUpstream(c, p, route, inbound, head, originalBody, start, upstreamPath, currentUpstream, ui, upstreamsToTry, upstreamGroup)
+		result := proxyGoUpstream(c, p, routeCopy, inbound, head, originalBody, start, upstreamPath, currentUpstream, ui, upstreamsToTry, upstreamGroup)
 		if result.Terminal {
 			return
 		}
 		if result.Handled {
-			incrementRequestsUsed(c)
 			return
 		}
 		lastResult = result
@@ -333,7 +347,7 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		}
 
 		if shouldRetryWithNextKey(resp.StatusCode) && i+1 < len(attempts) {
-			body, readErr := io.ReadAll(resp.Body)
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 			_ = resp.Body.Close()
 			cancel()
 			if readErr != nil {
@@ -350,7 +364,7 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		// of the key loop and try the next upstream. On the last upstream,
 		// preserve the status and headers but use a generic error message.
 		if shouldMarkUpstreamFailure(resp.StatusCode) {
-			body, readErr := io.ReadAll(resp.Body)
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 			_ = resp.Body.Close()
 			cancel()
 			if readErr != nil {
@@ -376,35 +390,99 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			}
 		}
 
-		// Success — pre-read the response body and delegate to the response
-		// handler. The handler returns a responseResult that tells us whether
-		// the response was committed (ResponseStarted) or whether we should
-		// try the next upstream (Retryable).
-		responseBody, readErr := io.ReadAll(resp.Body)
-		_ = resp.Body.Close()
-		cancel()
-		if readErr != nil {
-			markKeyFailure(p, key, http.StatusBadGateway, nil)
-			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
-			if i+1 < len(attempts) {
-				continue
+		// P0-4 + P1-3: ALL remaining HTTP >= 400 responses must NOT enter
+		// the cross-protocol streaming path. But we distinguish two retry
+		// strategies:
+		//   - 408 Request Timeout: the upstream timed out. Switching to the
+		//     NEXT upstream may help, but do NOT retry the same key.
+		//   - All other 4xx (400/404/405/409/410/412/413/414/415/416/422/
+		//     423/424/425/426/428/431/451 etc.): non-retryable. The request
+		//     itself is invalid or the upstream state won't change by
+		//     switching keys/providers.
+		// (Retryable errors like 401/402/403/429/5xx were already handled
+		// above by shouldRetryWithNextKey/shouldMarkUpstreamFailure.)
+		if resp.StatusCode >= 400 {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
+			_ = resp.Body.Close()
+			cancel()
+			if readErr != nil {
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, nil, readErr.Error())
+			} else {
+				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, nil, summarizeUpstreamError(resp.StatusCode, body))
 			}
+			// P1-3: 408 is upstream-retryable (try the next upstream) but
+			// not key-retryable (don't re-use the same key).
+			retryable := resp.StatusCode == http.StatusRequestTimeout && ui+1 < len(upstreamsToTry)
 			return attemptResult{
-				Status:    http.StatusBadGateway,
-				Err:       readErr,
-				Retryable: ui+1 < len(upstreamsToTry),
+				Response:  resp,
+				Status:    resp.StatusCode,
+				Err:       fmt.Errorf("upstream returned %d", resp.StatusCode),
+				Retryable: retryable,
 			}
 		}
 
+		// Success — delegate to the response handler. For same-protocol SSE,
+		// the handler streams directly from resp.Body without buffering.
+		// For cross-protocol or non-streaming, the handler reads resp.Body.
+		// IMPORTANT: do NOT cancel() before the response handler reads
+		// resp.Body — cancelling the context will abort an in-flight body
+		// read. The handler closes resp.Body when done; cancel() is called
+		// after the handler returns.
 		var rr responseResult
 		if crossProtocol(route, inbound, head, currentUpstream) {
-			rr = proxyCrossProtocolResponse(c, resp, head.Stream, inbound, upstreamProto, p, key, route, start, responseBody)
+			if head.Stream {
+				// Cross-protocol SSE streaming: do NOT buffer the full
+				// upstream body. Pre-read the first SSE event for
+				// validation / failover, commit headers, then run the
+				// incremental Decoder → IR → Encoder → Flush pipeline
+				// over the remaining resp.Body. This avoids the old
+				// buffer-then-re-emit pattern that delayed the entire
+				// response until the upstream finished.
+				rr = proxyCrossProtocolStream(c, resp, inbound, upstreamProto, p, key, route, start)
+				cancel()
+			} else {
+				// Cross-protocol non-streaming: buffer full response.
+				responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxNonStreamBodyRead))
+				_ = resp.Body.Close()
+				cancel()
+				if readErr != nil {
+					markKeyFailure(p, key, http.StatusBadGateway, nil)
+					markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
+					if i+1 < len(attempts) {
+						continue
+					}
+					return attemptResult{
+						Status:    http.StatusBadGateway,
+						Err:       readErr,
+						Retryable: ui+1 < len(upstreamsToTry),
+					}
+				}
+				rr = proxyCrossProtocolResponse(c, resp, head.Stream, inbound, upstreamProto, p, key, route, start, responseBody)
+			}
 		} else {
-			rr = proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start, responseBody)
+			// Same-protocol: pass resp with body still open for live streaming.
+			// proxySameProtocolResponse will close resp.Body and we cancel
+			// the context after it returns.
+			rr = proxySameProtocolResponse(c, resp, head.Stream, p, key, route, inbound, start, nil)
+			cancel()
 		}
 
 		if rr.ResponseStarted {
 			return attemptResult{Handled: true}
+		}
+		// Respect the response handler's retry classification. A non-retryable
+		// client error (400/404/409/413/415/422) must NOT switch keys or
+		// upstreams — the same request will fail the same way elsewhere,
+		// and switching providers can cause semantic drift. Preserve the
+		// original upstream status code so the client sees the real error
+		// (e.g. 400) instead of a synthetic 502.
+		if !rr.Retryable {
+			return attemptResult{
+				Response:  resp,
+				Status:    resp.StatusCode,
+				Err:       rr.Err,
+				Retryable: false,
+			}
 		}
 		// Response not started — can try next key or upstream.
 		if i+1 < len(attempts) {

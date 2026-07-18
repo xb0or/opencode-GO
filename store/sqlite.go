@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,7 +135,8 @@ var (
 func Init() error {
 	cfg := config.Get()
 	if dir := filepath.Dir(cfg.DBPath); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		// Use 0700 (owner-only) to protect credential-bearing database.
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return fmt.Errorf("create db dir: %w", err)
 		}
 	}
@@ -148,6 +150,13 @@ func Init() error {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	db = gdb
+
+	// Restrict database file permissions to owner-only (0600).
+	// This protects API keys, cookies, and gateway tokens stored in the DB.
+	if err := os.Chmod(cfg.DBPath, 0o600); err != nil && !os.IsNotExist(err) {
+		// Non-fatal: log a warning but continue.
+		log.Printf("warning: failed to set db file permissions: %v", err)
+	}
 	return nil
 }
 
@@ -157,6 +166,62 @@ func DB() *gorm.DB {
 		panic("store.Init() not called")
 	}
 	return db
+}
+
+// TryReserveRequest atomically increments requests_used for a token and
+// checks whether the MaxRequests cap would be exceeded. It returns true if
+// the reservation succeeded (the request may proceed) or false if the
+// token has reached its request limit.
+//
+// The SQL uses a conditional UPDATE so the increment and the limit check
+// happen in a single atomic statement, preventing concurrent requests
+// from all passing the check before any of them increment.
+//
+// TryReserveRequest atomically increments requests_used for a token if the
+// limit has not been reached, returning (true, nil) on success. If the token
+// has MaxRequests <= 0 (unlimited), the function is a no-op and returns
+// (true, nil) without touching the database — this avoids a write transaction
+// on every request for unlimited tokens.
+//
+// Returns (false, nil) when the limit is reached (quota exhausted → 403).
+// Returns (false, err) when the database operation fails (→ 503), so the
+// caller can distinguish "out of quota" from "database broken".
+//
+// The SQL uses a conditional UPDATE so the increment and the limit check
+// happen in a single atomic statement, preventing concurrent requests
+// from all passing the check before any of them increment.
+func TryReserveRequest(tokenID uint) (bool, error) {
+	var tok Token
+	if err := DB().Select("max_requests").Where("id = ?", tokenID).First(&tok).Error; err != nil {
+		return false, err
+	}
+	// Unlimited tokens (MaxRequests <= 0) skip the write entirely.
+	if tok.MaxRequests <= 0 {
+		return true, nil
+	}
+	result := DB().Model(&Token{}).
+		Where("id = ? AND enabled = 1", tokenID).
+		Where("requests_used < max_requests").
+		UpdateColumn("requests_used", gormExpr("requests_used + 1"))
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
+// ReleaseRequest atomically decrements requests_used for a token, used to
+// roll back a reservation when a request fails and should not count
+// against the limit. This is a best-effort operation — it never goes below 0.
+func ReleaseRequest(tokenID uint) {
+	DB().Model(&Token{}).
+		Where("id = ? AND requests_used > 0", tokenID).
+		UpdateColumn("requests_used", gormExpr("requests_used - 1"))
+}
+
+// gormExpr is a thin wrapper around gorm.Expr to avoid importing gorm in
+// every file that uses these helpers.
+func gormExpr(sql string, args ...any) any {
+	return gorm.Expr(sql, args...)
 }
 
 // LoadModelRoutes loads all model routes from the database.

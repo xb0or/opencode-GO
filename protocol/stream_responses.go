@@ -3,15 +3,22 @@ package protocol
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 )
 
 // ResponsesStreamDecoder reads an OpenAI Responses API SSE stream and emits
 // IRStreamEvents via the callback.  Responses SSE lines use the same
 // data: <json>\n\n format as other OpenAI protocols.
+//
+// P0-1: tracks whether a terminal event was seen
+// (response.completed/incomplete/failed). If EOF is reached without one, the
+// decoder returns io.ErrUnexpectedEOF so the caller does NOT call onComplete
+// (which would synthesize a fake response.completed).
 func ResponsesStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	terminalSeen := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -24,15 +31,40 @@ func ResponsesStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) err
 		if len(payload) == 0 {
 			continue
 		}
+		if bytes.Equal(payload, []byte("[DONE]")) {
+			// P0-1 (round-6): [DONE] is a clean terminator ONLY when a real
+			// terminal event (response.completed/incomplete/failed) was
+			// already seen. If [DONE] arrives without a preceding terminal
+			// event, the upstream stream was truncated — return
+			// io.ErrUnexpectedEOF so the caller does NOT synthesize a fake
+			// success completion.
+			if !terminalSeen {
+				return io.ErrUnexpectedEOF
+			}
+			return nil
+		}
 		ev, err := DecodeResponsesStreamEvent(payload)
 		if err != nil {
-			continue // skip malformed chunks
+			// P0-2/P0-3: a malformed data: payload is a decoder error.
+			return fmt.Errorf("responses stream: malformed data payload: %w", err)
 		}
 		if err := onEvent(ev); err != nil {
 			return err
 		}
+		switch ev.Type {
+		case "response.completed", "response.incomplete", "response.failed":
+			terminalSeen = true
+		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	// P0-1: clean EOF without response.completed/incomplete/failed →
+	// unexpected EOF.
+	if !terminalSeen {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
 }
 
 // ResponsesStreamEncoder writes IRStreamEvents as Responses SSE lines.
@@ -77,18 +109,18 @@ func DecodeResponsesSSE(r io.Reader) (*IRResponse, error) {
 			msg.Content = appendTextContent(msg.Content, ev.ContentDelta)
 		case "response.reasoning_text.delta", "response.reasoning.delta", "response.reasoning_content.delta":
 			msg.Content = appendThinkingContentBlock(msg.Content, ev.ContentDelta)
-case "response.function_call_arguments.delta":
-				idx := 0
-				if ev.ToolCallDelta != nil {
-					idx = ev.ToolCallDelta.Index
-				}
-				for len(toolCalls) <= idx {
-					toolCalls = append(toolCalls, IRToolCall{Index: idx})
-				}
-				if toolCalls[idx].Index == 0 && idx != 0 {
-					toolCalls[idx].Index = idx
-				}
-				toolCalls[idx].Arguments += ev.ContentDelta
+		case "response.function_call_arguments.delta":
+			idx := 0
+			if ev.ToolCallDelta != nil {
+				idx = ev.ToolCallDelta.Index
+			}
+			for len(toolCalls) <= idx {
+				toolCalls = append(toolCalls, IRToolCall{Index: idx})
+			}
+			if toolCalls[idx].Index == 0 && idx != 0 {
+				toolCalls[idx].Index = idx
+			}
+			toolCalls[idx].Arguments += ev.ContentDelta
 		case "response.output_item.done":
 			if ev.Choice != nil && ev.Choice.Message != nil {
 				if text, ok := thinkingTextAndPresence(*ev.Choice.Message); ok {

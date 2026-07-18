@@ -2,7 +2,9 @@ package admin
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -104,9 +106,19 @@ func login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
 		return
 	}
+	now := time.Now()
+	jti, err := randomTokenID()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "generate jti: " + err.Error()})
+		return
+	}
 	claims := jwt.MapClaims{
 		"role": "admin",
-		"exp":  time.Now().Add(12 * time.Hour).Unix(),
+		"iss":  "opencode-go",
+		"aud":  "admin",
+		"iat":  now.Unix(),
+		"jti":  jti,
+		"exp":  now.Add(12 * time.Hour).Unix(),
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := tok.SignedString([]byte(config.Get().JWTSecret))
@@ -127,11 +139,29 @@ func adminAuth() gin.HandlerFunc {
 		}
 		raw := strings.TrimSpace(h[7:])
 		claims := jwt.MapClaims{}
-		_, err := jwt.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
+		// Strict validation: only HS256 is accepted (rejects HS384, HS512,
+		// RS256, "none", etc.), and iss/aud/exp are all enforced.
+		token, err := jwt.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
 			return []byte(config.Get().JWTSecret), nil
-		})
+		},
+			jwt.WithValidMethods([]string{"HS256"}),
+			jwt.WithIssuer("opencode-go"),
+			jwt.WithAudience("admin"),
+			jwt.WithExpirationRequired(),
+			jwt.WithIssuedAt(),
+		)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+		if !token.Valid {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+		// jwt.WithIssuedAt only validates iat if present; enforce that iat
+		// is actually present.
+		if _, ok := claims["iat"]; !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing iat"})
 			return
 		}
 		if role, _ := claims["role"].(string); role != "admin" {
@@ -1719,4 +1749,13 @@ func maskSecret(s string) string {
 // subtleEqual is a constant-time string compare for the admin password.
 func subtleEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// randomTokenID generates a random JWT ID (jti) for token traceability.
+func randomTokenID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }

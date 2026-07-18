@@ -44,8 +44,29 @@ func shouldMarkUpstreamFailure(status int) bool {
 
 // shouldRetryWithNextKey reports whether a failed upstream response should be
 // retried with another available key before returning it to the client.
+// Only key-level failures (auth, rate limit, 5xx) are retried with a different key.
 func shouldRetryWithNextKey(status int) bool {
 	return shouldMarkUpstreamFailure(status)
+}
+
+// isClientErrorNonRetryable reports whether the HTTP status represents a
+// client-side error (4xx) that should NOT trigger a key retry or upstream
+// failover. These errors indicate the request itself is invalid and
+// switching keys or providers will not help — the same error will likely
+// recur, or worse, a different provider might accept the request with
+// different semantics, producing incorrect results.
+//
+// Examples: 400 (bad request), 404 (model not found), 409 (conflict),
+// 413 (payload too large), 415 (unsupported media type), 422 (unprocessable).
+func isClientErrorNonRetryable(status int) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict,
+		http.StatusRequestEntityTooLarge, http.StatusUnsupportedMediaType,
+		http.StatusUnprocessableEntity, http.StatusMethodNotAllowed:
+		return true
+	default:
+		return false
+	}
 }
 
 // upstreamErrorType maps an upstream HTTP status to an OpenAI-style error type

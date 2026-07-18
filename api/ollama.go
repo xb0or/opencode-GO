@@ -23,28 +23,37 @@ import (
 // the entire Ollama request lifecycle and must not rely on any work already
 // done by proxyRequest for the Go path.
 //
-// Ollama Cloud (https://ollama.com) exposes an OpenAI-compatible
-// /v1/chat/completions endpoint with Bearer auth, identical wire format to
-// the Go upstream. This means same-protocol (Chat→Chat) is a pure transparent
-// reverse proxy — no body conversion needed.
+// Ollama Cloud (https://ollama.com) exposes OpenAI-compatible endpoints
+// (/v1/chat/completions, /v1/responses, /v1/messages) with Bearer auth.
+// The target protocol is determined by route.TargetProtocol(ollama), which
+// defaults to Chat if no per-upstream Target is configured.
 //
 // Flow:
-//  1. Rewrite the model field to the real Ollama Cloud model id.
-//  2. Cross-protocol conversion: when inbound != Chat (e.g. Messages or
-//     Responses), convert the request body from the inbound protocol to Chat.
-//  3. Enable stream_options.include_usage for Chat streaming.
-//  4. Pick a key from the Ollama pool (each key is an Ollama API key).
-//  5. Same-protocol (Chat→Chat): use httputil.ReverseProxy for zero-buffer
-//     transparent SSE passthrough — SSE data blocks flush direct to client.
-//  6. Cross-protocol (Messages/Responses → Chat): read full response, convert
-//     back to inbound protocol, relay to client.
-//  7. Bookkeeping: mark key success/failure, write usage log.
+//  1. Determine the upstream protocol via TargetProtocol.
+//  2. Rewrite the model field to the real Ollama Cloud model id.
+//  3. Cross-protocol conversion: when inbound != upstreamProto, convert the
+//     request body from the inbound protocol to upstreamProto.
+//  4. Enable stream_options.include_usage for Chat streaming.
+//  5. Pick a key from the Ollama pool (each key is an Ollama API key).
+//  6. Same-protocol: transparent reverse proxy with live SSE streaming.
+//  7. Cross-protocol: read full response, convert back to inbound protocol.
+//  8. Bookkeeping: mark key success/failure, write usage log.
 //
 // IMPORTANT: This function does NOT write to the client directly. It returns
 // an attemptResult that the outer loop uses to decide what to do. The outer
 // loop is the sole writer of client responses.
 func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
-	inbound config.Protocol, upstreamBody []byte, head requestHead, start time.Time) attemptResult {
+	inbound config.Protocol, upstreamBody []byte, head requestHead, start time.Time,
+	resolvedGroup string) attemptResult {
+
+	// G1: Use the group pre-resolved by the outer failover loop. Do NOT
+	// re-resolve via route.TargetGroup — that would use a different priority
+	// chain and could select a different group than the one used for token
+	// permission and usage logging.
+	_ = resolvedGroup // used below in PickAttempts
+
+	// Determine the upstream protocol — respects TargetProtocol override.
+	upstreamProto := route.TargetProtocol(config.UpstreamOllama)
 
 	// Rewrite model to the real upstream model id (e.g. gpt-oss:120b).
 	realModel := route.TargetRealModel(config.UpstreamOllama)
@@ -53,17 +62,18 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		upstreamBody = rewritten
 	}
 
-	// Cross-protocol: Ollama speaks Chat natively. Any inbound protocol that
-	// is not Chat must be converted to Chat before forwarding.
-	crossProtocol := inbound != config.ProtocolChat
+	// Cross-protocol: when the inbound protocol differs from the upstream
+	// protocol, convert the request body before forwarding.
+	crossProto := head.HasModel && inbound != upstreamProto
 
-	if crossProtocol {
-		converted, convErr := protocol.ConvertRequest(inbound, config.ProtocolChat, upstreamBody)
+	if crossProto {
+		converted, convErr := protocol.ConvertRequest(inbound, upstreamProto, upstreamBody)
 		if convErr != nil {
 			return attemptResult{
 				Status:    http.StatusBadRequest,
-				Err:       fmt.Errorf("failed to convert request from %s to chat: %w", inbound, convErr),
-				Retryable: true,
+				Err:       fmt.Errorf("failed to convert request from %s to %s: %w", inbound, upstreamProto, convErr),
+				ErrorType: "conversion_error",
+				Retryable: false,
 			}
 		}
 		upstreamBody = converted
@@ -77,24 +87,24 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 	stream := parsedBody.Stream
 
 	// Enable stream_options.include_usage for Chat streaming so we get usage
-	// in the final SSE chunk (best-effort — transparent proxy may not parse it).
-	if rewritten, ok := router.EnableRequestStreamUsage(upstreamBody, config.ProtocolChat, stream); ok {
+	// in the final SSE chunk.
+	if rewritten, ok := router.EnableRequestStreamUsage(upstreamBody, upstreamProto, stream); ok {
 		upstreamBody = rewritten
 	}
 
-	// Pick key from the Ollama pool.
-	attempts, err := p.PickAttempts(route.TargetGroup(config.UpstreamOllama))
+	// Pick key from the Ollama pool using the pre-resolved group (G1).
+	attempts, err := p.PickAttempts(resolvedGroup)
 	if err != nil {
 		return attemptResult{
 			Status:    http.StatusServiceUnavailable,
-			Err:       fmt.Errorf("no available upstream key for group %s: %w", route.TargetGroup(config.UpstreamOllama), err),
+			Err:       fmt.Errorf("no available upstream key for group %s: %w", resolvedGroup, err),
 			Retryable: true,
 		}
 	}
 
 	baseURL := config.BaseURLFor(config.UpstreamOllama)
-	// Ollama Cloud speaks Chat protocol — always send to /v1/chat/completions.
-	target := baseURL + "/v1/chat/completions"
+	// Use the correct endpoint path for the target protocol.
+	target := baseURL + upstreamPathFor(upstreamProto)
 
 	for i := range attempts {
 		key := &attempts[i]
@@ -127,8 +137,8 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 
 			upstreamClient := upstream.NewClientForProxy(key.ProxyURL)
 
-			if crossProtocol {
-				return proxyOllamaCrossProtocolKey(c, p, key, route, inbound, stream, start,
+			if crossProto {
+				return proxyOllamaCrossProtocolKey(c, p, key, route, inbound, upstreamProto, stream, start,
 					upstreamClient, req, i, attempts)
 			}
 			return proxyOllamaSameProtocolKey(c, p, key, route, inbound, stream, start,
@@ -153,10 +163,11 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 }
 
 // proxyOllamaCrossProtocolKey handles a single key attempt for cross-protocol
-// (Messages/Responses → Chat) Ollama requests. It does NOT call cancel() —
-// the caller is responsible for canceling the context.
+// Ollama requests (e.g. Messages → Chat, or Responses → Chat). It does NOT
+// call cancel() — the caller is responsible for canceling the context.
 func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
-	route config.ModelRoute, inbound config.Protocol, stream bool, start time.Time,
+	route config.ModelRoute, inbound config.Protocol, upstreamProto config.Protocol,
+	stream bool, start time.Time,
 	upstreamClient *http.Client, req *http.Request, i int, attempts []store.Key) attemptResult {
 
 	resp, doErr := upstreamClient.Do(req)
@@ -192,14 +203,14 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 	// here because the for loop would accumulate deferred calls until
 	// the function returns, leaking connections on multi-key retries.
 	if shouldRetryWithNextKey(resp.StatusCode) && i+1 < len(attempts) {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		_ = resp.Body.Close()
 		markKeyFailure(p, key, resp.StatusCode, errBody)
 		return attemptResult{Retryable: true}
 	}
 
 	if shouldMarkUpstreamFailure(resp.StatusCode) {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		_ = resp.Body.Close()
 		markKeyFailure(p, key, resp.StatusCode, errBody)
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, summarizeUpstreamError(resp.StatusCode, errBody))
@@ -210,8 +221,47 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 		}
 	}
 
+	// P0-4 + P1-3: ALL remaining HTTP >= 400 must NOT enter the streaming
+	// path. 408 is upstream-retryable (next upstream), other 4xx are not.
+	if resp.StatusCode >= 400 {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
+		_ = resp.Body.Close()
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, summarizeUpstreamError(resp.StatusCode, errBody))
+		retryable := resp.StatusCode == http.StatusRequestTimeout
+		return attemptResult{
+			Response:  resp,
+			Status:    resp.StatusCode,
+			Err:       fmt.Errorf("upstream returned %d", resp.StatusCode),
+			Retryable: retryable,
+		}
+	}
+
 	// Success — read the response body, then convert.
-	responseBody, readErr := io.ReadAll(resp.Body)
+	if stream {
+		// Cross-protocol SSE streaming: avoid buffering the full upstream
+		// body. Use the incremental Decoder → IR → Encoder → Flush pipeline.
+		rr := proxyCrossProtocolStream(c, resp, inbound, upstreamProto, p, key, route, start)
+		if rr.ResponseStarted {
+			return attemptResult{Handled: true}
+		}
+		if !rr.Retryable {
+			return attemptResult{
+				Response:  resp,
+				Status:    resp.StatusCode,
+				Err:       rr.Err,
+				Retryable: false,
+			}
+		}
+		if i+1 < len(attempts) {
+			return attemptResult{Retryable: true}
+		}
+		return attemptResult{
+			Status:    http.StatusBadGateway,
+			Err:       rr.Err,
+			Retryable: true,
+		}
+	}
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxNonStreamBodyRead))
 	_ = resp.Body.Close()
 	if readErr != nil {
 		markKeyFailure(p, key, http.StatusBadGateway, nil)
@@ -225,9 +275,21 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 			Retryable: true,
 		}
 	}
-	rr := proxyCrossProtocolResponse(c, resp, stream, inbound, config.ProtocolChat, p, key, route, start, responseBody)
+	rr := proxyCrossProtocolResponse(c, resp, stream, inbound, upstreamProto, p, key, route, start, responseBody)
 	if rr.ResponseStarted {
 		return attemptResult{Handled: true}
+	}
+	// Respect the response handler's retry classification. A non-retryable
+	// client error (400/404/409/413/415/422) must NOT switch keys or
+	// upstreams. Preserve the original status code so the client sees
+	// the real error instead of a synthetic 502.
+	if !rr.Retryable {
+		return attemptResult{
+			Response:  resp,
+			Status:    resp.StatusCode,
+			Err:       rr.Err,
+			Retryable: false,
+		}
 	}
 	if i+1 < len(attempts) {
 		return attemptResult{Retryable: true}
@@ -279,14 +341,14 @@ func proxyOllamaSameProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 	// here because the for loop would accumulate deferred calls until
 	// the function returns, leaking connections on multi-key retries.
 	if shouldRetryWithNextKey(resp.StatusCode) && i+1 < len(attempts) {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		_ = resp.Body.Close()
 		markKeyFailure(p, key, resp.StatusCode, errBody)
 		return attemptResult{Retryable: true}
 	}
 
 	if shouldMarkUpstreamFailure(resp.StatusCode) {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		_ = resp.Body.Close()
 		markKeyFailure(p, key, resp.StatusCode, errBody)
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, summarizeUpstreamError(resp.StatusCode, errBody))
@@ -297,24 +359,26 @@ func proxyOllamaSameProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 		}
 	}
 
-	// Success — pre-read response body and delegate to handler.
-	responseBody, readErr := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if readErr != nil {
-		markKeyFailure(p, key, http.StatusBadGateway, nil)
-		markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, readErr.Error())
-		if i+1 < len(attempts) {
-			return attemptResult{Retryable: true}
-		}
-		return attemptResult{
-			Status:    http.StatusBadGateway,
-			Err:       readErr,
-			Retryable: true,
-		}
-	}
-	rr := proxySameProtocolResponse(c, resp, stream, p, key, route, inbound, start, responseBody)
+	// Success — delegate to response handler.
+	// For same-protocol, pass resp with body still open for live streaming.
+	// proxySameProtocolResponse will close resp.Body. The deferred cancel()
+	// in the caller's lambda fires after this function returns, which is
+	// safe because resp.Body is already closed by the handler.
+	rr := proxySameProtocolResponse(c, resp, stream, p, key, route, inbound, start, nil)
 	if rr.ResponseStarted {
 		return attemptResult{Handled: true}
+	}
+	// Respect the response handler's retry classification. A non-retryable
+	// client error (400/404/409/413/415/422) must NOT switch keys or
+	// upstreams. Preserve the original status code so the client sees
+	// the real error instead of a synthetic 502.
+	if !rr.Retryable {
+		return attemptResult{
+			Response:  resp,
+			Status:    resp.StatusCode,
+			Err:       rr.Err,
+			Retryable: false,
+		}
 	}
 	if i+1 < len(attempts) {
 		return attemptResult{Retryable: true}

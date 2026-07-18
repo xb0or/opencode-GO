@@ -36,6 +36,7 @@ type Result struct {
 	MatchedCount    int      `json:"matched_count"`
 	CreatedCount    int      `json:"created_count"`
 	UpdatedCount    int      `json:"updated_count"`
+	DisabledCount   int      `json:"disabled_count"`
 	TotalCount      int      `json:"total_count"`
 	Warnings        []string `json:"warnings,omitempty"`
 }
@@ -65,10 +66,15 @@ type openRouterPayload struct {
 
 // sourceModel is a unified representation of a model from any upstream source.
 type sourceModel struct {
-	ID       string
-	Name     string
-	Upstream config.Upstream
+	ID        string
+	Name      string
+	Upstream  config.Upstream
 	Upstreams []config.Upstream
+	// perUpstreamTargets records the per-upstream target (real_model +
+	// protocol + group) for each upstream that serves this model. This
+	// allows buildMergedRoute to populate the Targets map so that Go and
+	// Ollama can use different real_model IDs and protocols.
+	perUpstreamTargets map[config.Upstream]config.UpstreamTarget
 }
 
 // Sync fetches models from both the OpenCode Go and Ollama Cloud APIs, merges
@@ -81,10 +87,11 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 
 	// --- Fetch all upstream sources concurrently ---
 	type fetchResult struct {
-		source  string
-		models  []sourceModel
-		success bool
-		warning string
+		source           string
+		models           []sourceModel
+		openRouterModels []config.OpenRouterModel
+		success          bool
+		warning          string
 	}
 
 	results := make(chan fetchResult, 3)
@@ -97,7 +104,18 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		}
 		out := make([]sourceModel, 0, len(models))
 		for _, m := range models {
-			out = append(out, sourceModel{ID: m.ID, Name: m.Name, Upstream: config.UpstreamGo})
+			out = append(out, sourceModel{
+				ID:      m.ID,
+				Name:    m.Name,
+				Upstream: config.UpstreamGo,
+				perUpstreamTargets: map[config.Upstream]config.UpstreamTarget{
+					config.UpstreamGo: {
+						RealModel: m.ID,
+						Protocol:  inferProtocol(m.ID, nil),
+						Group:     string(config.UpstreamGo),
+					},
+				},
+			})
 		}
 		results <- fetchResult{source: "go", success: true, models: out}
 	}()
@@ -111,25 +129,35 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		}
 		out := make([]sourceModel, 0, len(models))
 		for _, m := range models {
-			out = append(out, sourceModel{ID: m.Name, Name: m.Name, Upstream: config.UpstreamOllama})
+			out = append(out, sourceModel{
+				ID:      m.Name,
+				Name:    m.Name,
+				Upstream: config.UpstreamOllama,
+				perUpstreamTargets: map[config.Upstream]config.UpstreamTarget{
+					config.UpstreamOllama: {
+						RealModel: m.Name,
+						Protocol:  config.ProtocolChat,
+						Group:     string(config.UpstreamOllama),
+					},
+				},
+			})
 		}
 		results <- fetchResult{source: "ollama", success: true, models: out}
 	}()
 
 	// OpenRouter (for metadata enrichment, non-blocking)
-	var openrouterModels []config.OpenRouterModel
 	go func() {
 		orm, err := fetchOpenRouterModels(ctx, client, opts.OpenRouterModelsURL)
 		if err != nil {
 			results <- fetchResult{source: "openrouter", success: false, warning: "openrouter: " + err.Error()}
 			return
 		}
-		results <- fetchResult{source: "openrouter", success: true, models: nil}
-		openrouterModels = orm
+		results <- fetchResult{source: "openrouter", success: true, openRouterModels: orm}
 	}()
 
 	// Collect results
 	var goModels, ollamaModels []sourceModel
+	var openrouterModels []config.OpenRouterModel
 	var goFetched, ollamaFetched bool
 	result := Result{}
 	for i := 0; i < 3; i++ {
@@ -155,6 +183,7 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 			if !r.success {
 				result.Warnings = append(result.Warnings, r.warning)
 			} else {
+				openrouterModels = r.openRouterModels
 				result.OpenRouterCount = len(openrouterModels)
 			}
 		}
@@ -162,6 +191,18 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 
 	// --- Merge by model ID ---
 	merged := mergeModels(goModels, ollamaModels)
+
+	// Build catalog ID sets for authoritative reconciliation (G2).
+	// These sets let us determine, for models that exist in DB but are NOT
+	// in the merged catalog this run, whether each provider still serves them.
+	goCatalogIDs := make(map[string]bool)
+	for _, m := range goModels {
+		goCatalogIDs[strings.TrimSpace(m.ID)] = true
+	}
+	ollamaCatalogIDs := make(map[string]bool)
+	for _, m := range ollamaModels {
+		ollamaCatalogIDs[strings.TrimSpace(m.ID)] = true
+	}
 
 	// --- Load existing DB rows ---
 	existingRows, err := store.LoadModelRoutes()
@@ -205,6 +246,61 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
+	// G2: Reconcile models that exist in DB but are NOT in the merged catalog.
+	// These are models that may have been decommissioned from all providers.
+	// Per-provider: if the provider's fetch succeeded and the model is not in
+	// its catalog, remove that provider. If all providers are removed, disable
+	// the route. Admin-customized upstreams/status are preserved.
+	for id, row := range existingByID {
+		if seen[id] {
+			continue // still in catalog, already handled above
+		}
+		route := store.ModelRouteFromRow(row)
+		upstreamsCustomized := config.IsModelFieldCustomized(route, "upstreams")
+		statusCustomized := config.IsModelFieldCustomized(route, "status")
+		// Skip entirely if admin customized both fields.
+		if upstreamsCustomized && statusCustomized {
+			continue
+		}
+		if !upstreamsCustomized {
+			var finalUpstreams []config.Upstream
+			for _, u := range route.Upstreams {
+				switch u {
+				case config.UpstreamGo:
+					// Keep Go unless its fetch succeeded and the model is
+					// absent from the Go catalog (authoritative removal).
+					if !goFetched || goCatalogIDs[id] {
+						finalUpstreams = append(finalUpstreams, u)
+					}
+				case config.UpstreamOllama:
+					if !ollamaFetched || ollamaCatalogIDs[id] {
+						finalUpstreams = append(finalUpstreams, u)
+					}
+				default:
+					// Unknown upstreams are preserved as-is.
+					finalUpstreams = append(finalUpstreams, u)
+				}
+			}
+			route.Upstreams = finalUpstreams
+		}
+		// Disable if no upstreams remain and status is not admin-customized.
+		if !statusCustomized && len(route.Upstreams) == 0 {
+			route.Status = config.ModelStatusPtr(config.ModelStatusDisabled)
+		}
+		nextRow := store.NewModelRouteRow(route)
+		nextRow.LastSyncedAt = &now
+		nextRow.CreatedAt = row.CreatedAt
+		if rowChanged(row, nextRow) {
+			if err := store.SaveModelRoute(&nextRow); err != nil {
+				return result, fmt.Errorf("save model route %s: %w", id, err)
+			}
+			if route.Status != nil && *route.Status == config.ModelStatusDisabled &&
+				!(row.Status == config.ModelStatusDisabled) {
+				result.DisabledCount++
+			}
+		}
+	}
+
 	if err := ReloadRuntimeFromStore(); err != nil {
 		return result, err
 	}
@@ -213,7 +309,8 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 }
 
 // mergeModels combines Go and Ollama model lists by ID, producing a single
-// deduplicated list where overlapping models carry both upstreams.
+// deduplicated list where overlapping models carry both upstreams and a
+// per-upstream protocol map.
 func mergeModels(goModels, ollamaModels []sourceModel) []sourceModel {
 	byID := make(map[string]sourceModel)
 	order := []string{}
@@ -227,6 +324,13 @@ func mergeModels(goModels, ollamaModels []sourceModel) []sourceModel {
 		}
 		// Merge: add this upstream to the existing entry
 		existing.Upstreams = appendUniqueUpstream(existing.Upstreams, sm.Upstream)
+		// Merge per-upstream targets (real_model + protocol + group)
+		if existing.perUpstreamTargets == nil {
+			existing.perUpstreamTargets = make(map[config.Upstream]config.UpstreamTarget)
+		}
+		for u, t := range sm.perUpstreamTargets {
+			existing.perUpstreamTargets[u] = t
+		}
 		byID[sm.ID] = existing
 	}
 
@@ -237,8 +341,14 @@ func mergeModels(goModels, ollamaModels []sourceModel) []sourceModel {
 	for _, m := range ollamaModels {
 		existing, ok := byID[m.ID]
 		if ok {
-			// Overlap: merge upstreams
+			// Overlap: merge upstreams and targets
 			existing.Upstreams = appendUniqueUpstream(existing.Upstreams, config.UpstreamOllama)
+			if existing.perUpstreamTargets == nil {
+				existing.perUpstreamTargets = make(map[config.Upstream]config.UpstreamTarget)
+			}
+			for u, t := range m.perUpstreamTargets {
+				existing.perUpstreamTargets[u] = t
+			}
 			byID[m.ID] = existing
 		} else {
 			m.Upstreams = []config.Upstream{config.UpstreamOllama}
@@ -300,6 +410,41 @@ func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed b
 	}
 	if fallback.Name == "" {
 		fallback.Name = sm.ID
+	}
+
+	// Build per-upstream Targets from the source model's perUpstreamTargets.
+	// This allows Go and Ollama to use different real_model IDs and/or
+	// protocols for the same gateway model ID. Only populate Targets when
+	// upstreams differ in real_model or protocol — a single upstream or
+	// identical configurations don't need Targets.
+	if len(sm.Upstreams) > 1 && sm.perUpstreamTargets != nil {
+		targets := make(map[config.Upstream]config.UpstreamTarget)
+		defaultProto := fallback.Protocol
+		defaultRealModel := fallback.RealModel
+		needTargets := false
+		for _, u := range sm.Upstreams {
+			t, ok := sm.perUpstreamTargets[u]
+			if !ok {
+				t = config.UpstreamTarget{
+					RealModel: defaultRealModel,
+					Protocol:  defaultProto,
+					Group:     string(u),
+				}
+			}
+			// Ensure Group is always set (fallback to the upstream name).
+			if t.Group == "" {
+				t.Group = string(u)
+			}
+			targets[u] = t
+			// Need Targets if any upstream's real_model or protocol
+			// differs from the route-level default.
+			if t.RealModel != defaultRealModel || t.Protocol != defaultProto {
+				needTargets = true
+			}
+		}
+		if needTargets {
+			fallback.Targets = targets
+		}
 	}
 
 	if !existed {
@@ -390,6 +535,17 @@ func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed b
 	}
 	if !config.IsModelFieldCustomized(route, "upstream_groups") {
 		route.UpstreamGroups = nil
+	}
+	// Sync Targets from the source model's perUpstreamProto, unless the
+	// admin has customized the targets field. This enables automatic
+	// discovery of per-upstream protocol differences (e.g. Go uses Messages
+	// while Ollama uses Chat for the same model ID).
+	if !config.IsModelFieldCustomized(route, "targets") {
+		if fallback.Targets != nil {
+			route.Targets = fallback.Targets
+		} else {
+			route.Targets = nil
+		}
 	}
 	if route.Status == nil {
 		route.Status = config.ModelStatusPtr(config.ModelStatusEnabled)
@@ -548,6 +704,19 @@ func fallbackTags(route config.ModelRoute) []string {
 		tags = append(tags, "vision")
 	}
 	return config.NormalizeModelTags(tags)
+}
+
+// rowChanged reports whether the reconciled row differs from the existing row
+// in a way that requires a DB write. Only Status and UpstreamsJSON are compared
+// because the G2 reconciliation loop only modifies those fields.
+func rowChanged(old, new store.ModelRouteRow) bool {
+	if old.Status != new.Status {
+		return true
+	}
+	if old.UpstreamsJSON != new.UpstreamsJSON {
+		return true
+	}
+	return false
 }
 
 // upstreamFetchFailed returns true when the given upstream's catalog fetch

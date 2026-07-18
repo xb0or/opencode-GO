@@ -71,3 +71,74 @@ func TestParseGroupMultipliers(t *testing.T) {
 		t.Fatalf("unexpected list multipliers: %#v", listMultipliers)
 	}
 }
+
+// TestR4_G1_ResolveUpstreamGroup_TargetsPriority verifies that
+// Targets[upstream].Group takes the highest priority and overrides both
+// UpstreamGroups and the legacy route-level Group.
+func TestR4_G1_ResolveUpstreamGroup_TargetsPriority(t *testing.T) {
+	route := ModelRoute{
+		ID:       "priority-model",
+		Upstream: UpstreamOllama,
+		Group:    "legacy",
+		UpstreamGroups: map[Upstream]string{
+			UpstreamOllama: "standard",
+		},
+		Targets: map[Upstream]UpstreamTarget{
+			UpstreamOllama: {Group: "premium"},
+		},
+	}
+	if got := route.ResolveUpstreamGroup(UpstreamOllama); got != "premium" {
+		t.Fatalf("ResolveUpstreamGroup(ollama) = %q, want %q (Targets priority)", got, "premium")
+	}
+}
+
+// TestR4_G1_ResolveUpstreamGroup_UpstreamGroupsFallback verifies that when
+// no Targets entry exists for the upstream, UpstreamGroups is used instead
+// of the legacy route-level Group.
+func TestR4_G1_ResolveUpstreamGroup_UpstreamGroupsFallback(t *testing.T) {
+	route := ModelRoute{
+		ID:       "fallback-model",
+		Upstream: UpstreamOllama,
+		Group:    "legacy",
+		UpstreamGroups: map[Upstream]string{
+			UpstreamOllama: "standard",
+		},
+		// no Targets
+	}
+	if got := route.ResolveUpstreamGroup(UpstreamOllama); got != "standard" {
+		t.Fatalf("ResolveUpstreamGroup(ollama) = %q, want %q (UpstreamGroups fallback)", got, "standard")
+	}
+}
+
+// TestR4_G1_ResolveUpstreamGroup_LegacyGroupFallback verifies that the
+// route-level Group is used only when the upstream matches route.Upstream
+// (legacy backward-compat). For a non-matching upstream, the default is used.
+func TestR4_G1_ResolveUpstreamGroup_LegacyGroupFallback(t *testing.T) {
+	route := ModelRoute{
+		ID:       "legacy-model",
+		Upstream: UpstreamOllama,
+		Group:    "premium",
+		// no Targets, no UpstreamGroups
+	}
+	if got := route.ResolveUpstreamGroup(UpstreamOllama); got != "premium" {
+		t.Fatalf("ResolveUpstreamGroup(ollama) = %q, want %q (legacy Group, upstream matches)", got, "premium")
+	}
+	// go != route.Upstream (ollama), so legacy Group must NOT apply.
+	if got := route.ResolveUpstreamGroup(UpstreamGo); got != "go" {
+		t.Fatalf("ResolveUpstreamGroup(go) = %q, want %q (default, upstream mismatch)", got, "go")
+	}
+}
+
+// TestR4_G1_ResolveUpstreamGroup_Default verifies that when no Targets,
+// no UpstreamGroups, and no route-level Group are set, the upstream name
+// itself is used as the group.
+func TestR4_G1_ResolveUpstreamGroup_Default(t *testing.T) {
+	route := ModelRoute{
+		ID:       "default-model",
+		Upstream: UpstreamOllama,
+		// no Targets, no UpstreamGroups, Group intentionally empty
+	}
+	if got := route.ResolveUpstreamGroup(UpstreamOllama); got != "ollama" {
+		t.Fatalf("ResolveUpstreamGroup(ollama) = %q, want %q (default)", got, "ollama")
+	}
+}

@@ -78,11 +78,11 @@ type RespOutputItem struct {
 }
 
 type RespUsage struct {
-	InputTokens          int `json:"input_tokens"`
-	OutputTokens         int `json:"output_tokens"`
-	TotalTokens          int `json:"total_tokens,omitempty"`
-	InputTokensDetails   *RespTokensDetails `json:"input_tokens_details,omitempty"`
-	OutputTokensDetails  *RespTokensDetails `json:"output_tokens_details,omitempty"`
+	InputTokens         int                `json:"input_tokens"`
+	OutputTokens        int                `json:"output_tokens"`
+	TotalTokens         int                `json:"total_tokens,omitempty"`
+	InputTokensDetails  *RespTokensDetails `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails *RespTokensDetails `json:"output_tokens_details,omitempty"`
 }
 
 // RespTokensDetails carries nested cache/reasoning token counts.
@@ -207,7 +207,7 @@ func DecodeResponsesResponse(data []byte) (*IRResponse, error) {
 		ID:    resp.ID,
 		Model: resp.Model,
 	}
-if resp.Usage != nil {
+	if resp.Usage != nil {
 		ir.Usage = &IRUsage{
 			PromptTokens:     resp.Usage.InputTokens,
 			CompletionTokens: resp.Usage.OutputTokens,
@@ -277,10 +277,25 @@ func EncodeResponsesResponse(ir *IRResponse) ([]byte, error) {
 }
 
 // DecodeResponsesStreamEvent parses a Responses SSE event into an IRStreamEvent.
+//
+// P0-2: unknown/empty event types and {"error":...} payloads are rejected.
+// P1-2: IRToolCall.Index is populated from output_index for function_call
+//   start/delta/done events.
+// P1-3: response.function_call_arguments.done is a finalization event — its
+//   arguments are NOT emitted as a delta (accumulated deltas already carry the
+//   full arguments). The done event only updates the cached id/name so the
+//   target emitter can finalize the item.
 func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
+	// P0-2: detect upstream error payloads first.
+	if msg := streamErrorPayload(data); msg != "" {
+		return nil, fmt.Errorf("responses stream: error payload: %s", msg)
+	}
 	var ev RespStreamEvent
 	if err := json.Unmarshal(data, &ev); err != nil {
 		return nil, fmt.Errorf("responses: decode stream event: %w", err)
+	}
+	if ev.Type == "" {
+		return nil, fmt.Errorf("responses stream: event has empty type")
 	}
 	ir := &IRStreamEvent{Type: ev.Type}
 	switch ev.Type {
@@ -291,6 +306,11 @@ func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
 	case "response.output_item.added":
 		if ev.Item != nil {
 			msg := respOutputToIR(*ev.Item)
+			// P1-2: stamp the upstream output_index onto any tool call so
+			// the target emitter can route later deltas to the right item.
+			for i := range msg.ToolCalls {
+				msg.ToolCalls[i].Index = ev.OutputIndex
+			}
 			ir.Choice = &IRChoice{Index: ev.OutputIndex, Delta: &msg}
 		}
 	case "response.content_part.added":
@@ -314,12 +334,28 @@ func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
 		// Reasoning complete
 	case "response.function_call_arguments.delta":
 		ir.Choice = &IRChoice{Index: ev.OutputIndex, Delta: &IRMessage{Role: "assistant"}}
+		// P1-2: tool index on the delta so normalize passes it through.
 		ir.ToolCallDelta = &IRToolCallDelta{Index: ev.OutputIndex, Arguments: ev.Delta}
 	case "response.function_call_arguments.done":
+		// P1-3: do NOT emit the done arguments as a delta — the accumulated
+		// .delta stream already contains the full arguments, so emitting
+		// them again would double the payload. We still populate the
+		// id/name on the choice so downstream emitters that need a finalize
+		// callback can pick them up, but we set a marker (Choice.Message is
+		// nil) so normalize does not treat this as a tool-call start delta.
 		if ev.Item != nil {
-			ir.Choice = &IRChoice{Index: ev.OutputIndex, Delta: &IRMessage{
-				ToolCalls: []IRToolCall{{ID: ev.Item.CallID, Name: ev.Item.Name, Arguments: ev.Item.Arguments}},
-			}}
+			ir.Choice = &IRChoice{Index: ev.OutputIndex}
+			// Carry the finalized id/name/arguments via the Choice's Message
+			// so the responsesEmitter (when Responses is the TARGET) can
+			// finalize its tool item; cross-protocol emitters ignore it.
+			ir.Choice.Message = &IRMessage{
+				ToolCalls: []IRToolCall{{
+					Index:     ev.OutputIndex,
+					ID:        ev.Item.CallID,
+					Name:      ev.Item.Name,
+					Arguments: ev.Item.Arguments,
+				}},
+			}
 		}
 	case "response.output_item.done":
 		if ev.Item != nil {
@@ -345,6 +381,49 @@ func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
 		}
 	case "response.incomplete":
 		ir.Choice = &IRChoice{Index: 0, FinishReason: "length"}
+	case "response.failed":
+		// Treat as terminal failure so P0-1 marks the stream ended.
+		ir.Choice = &IRChoice{Index: 0, FinishReason: "failed"}
+	default:
+		// P0-2: The Responses API has many legitimate lifecycle events that
+		// the converter does not need to handle explicitly but must NOT
+		// cause a fatal decoder error. Examples:
+		//   response.in_progress, response.queued,
+		//   response.output_item.added (for non-text items like
+		//     annotations, refusals, etc. — text items are handled above),
+		//   response.output_text.done, response.reasoning_text.done,
+		//   response.reasoning.done / response.reasoning_content.done,
+		//   response.content_part.added / response.content_part.done,
+		//   response.code_interpreter_call_code / _outputs,
+		//   response.file_search_call_completed,
+		//   response.web_search_call_completed,
+		//   response.mcp_call_*, response.annotation.*,
+		//   response.refusal.*, response.custom_tool_call.*,
+		//   response.ocr.*, etc.
+		//
+		// Return an IRStreamEvent with the type set but no meaningful
+		// content (no Choice delta, no ContentDelta, no FinishReason).
+		// isMeaningfulEvent returns false so onStart is NOT triggered, and
+		// normalize sees no content/delta/finish so it is a no-op.
+		//
+		// Truly unknown error-shaped payloads ({"error":...}) are already
+		// caught earlier by streamErrorPayload, and malformed JSON is
+		// caught by the unmarshal, so the default case is safe to pass
+		// through. Still extract Response metadata if present — some
+		// lifecycle events (e.g. response.in_progress) carry the response
+		// object with usage/id/model that may be useful.
+		if ev.Response != nil {
+			ir.Response = &IRResponse{ID: ev.Response.ID, Model: ev.Response.Model}
+			if ev.Response.Usage != nil {
+				ir.Response.Usage = &IRUsage{
+					PromptTokens:     ev.Response.Usage.InputTokens,
+					CompletionTokens: ev.Response.Usage.OutputTokens,
+					TotalTokens:      ev.Response.Usage.TotalTokens,
+					CacheReadTokens:  respCacheReadTokens(ev.Response.Usage),
+					ReasoningTokens:  respReasoningTokens(ev.Response.Usage),
+				}
+			}
+		}
 	}
 	return ir, nil
 }
@@ -525,7 +604,30 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 		return json.Marshal(RespStreamEvent{Type: "response.completed", Response: resp})
 
 	case "response.incomplete":
-		return json.Marshal(RespStreamEvent{Type: "response.incomplete"})
+		// P0-1: carry the response object (id/model/usage) so the client
+		// receives final metadata with the incomplete terminal event.
+		var resp *RespResponse
+		if ev.Response != nil {
+			resp = &RespResponse{ID: ev.Response.ID, Object: "response", Model: ev.Response.Model, Status: "incomplete"}
+			if ev.Response.Usage != nil {
+				resp.Usage = &RespUsage{
+					InputTokens:         ev.Response.Usage.PromptTokens,
+					OutputTokens:        ev.Response.Usage.CompletionTokens,
+					TotalTokens:         ev.Response.Usage.TotalTokens,
+					InputTokensDetails:  respUsageDetailsFromIR(ev.Response.Usage, true),
+					OutputTokensDetails: respUsageDetailsFromIR(ev.Response.Usage, false),
+				}
+			}
+		}
+		return json.Marshal(RespStreamEvent{Type: "response.incomplete", Response: resp})
+	case "response.failed":
+		// P0-1: defensive — failed is normally routed to onError, but if
+		// it reaches the encoder carry the response metadata.
+		var resp *RespResponse
+		if ev.Response != nil {
+			resp = &RespResponse{ID: ev.Response.ID, Object: "response", Model: ev.Response.Model}
+		}
+		return json.Marshal(RespStreamEvent{Type: "response.failed", Response: resp})
 	}
 	return json.Marshal(RespStreamEvent{Type: ev.Type})
 }

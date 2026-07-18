@@ -6,7 +6,9 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,11 +18,17 @@ import (
 	"github.com/xb0or/opencode-GO/modelsync"
 	"github.com/xb0or/opencode-GO/pool"
 	"github.com/xb0or/opencode-GO/store"
+	"github.com/xb0or/opencode-GO/upstream"
 	"github.com/xb0or/opencode-GO/web"
 )
 
 func main() {
 	cfg := config.Load()
+
+	// Production security check: refuse to start with insecure defaults.
+	if err := config.ValidateSecurity(); err != nil {
+		log.Fatalf("SECURITY CHECK FAILED: %v\nSet ADMIN_PASSWORD and JWT_SECRET environment variables to secure values.", err)
+	}
 
 	// Open DB and ensure a bootstrap gateway token exists for first-time use.
 	if err := store.Init(); err != nil {
@@ -75,9 +83,37 @@ func main() {
 	log.Printf("  ollama cloud: %s", cfg.OllamaBaseURL)
 	log.Printf("  models       : %d registered", len(config.AllModels()))
 	log.Printf("  mappings     : %d configured", len(config.AllModelMappings()))
-	if err := root.Run(addr); err != nil {
-		log.Fatalf("server failed: %v", err)
+
+	// Use an explicit http.Server with sensible timeouts and graceful shutdown.
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           root,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MiB header limit
+		// WriteTimeout is intentionally NOT set: SSE streams can run for minutes.
+		// Per-request timeouts are handled in upstreamRequestContext.
 	}
+
+	// Start server in a goroutine so we can handle shutdown signals.
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server failed: %v", err)
+		}
+	}()
+
+	// Graceful shutdown on SIGINT/SIGTERM.
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Printf("shutting down server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("server forced shutdown: %v", err)
+	}
+	upstream.CloseIdleConnections()
+	log.Printf("server exited")
 }
 
 // loadModelMappings loads persisted model rewrite rules, then overlays optional

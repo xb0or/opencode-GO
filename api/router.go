@@ -9,18 +9,34 @@ import (
 	"github.com/xb0or/opencode-GO/pool"
 )
 
+// maxRequestBodyBytes limits the total request body size (default 32 MiB to
+// accommodate large JSON with base64-encoded images). Requests exceeding this
+// are rejected with 413.
+const maxRequestBodyBytes = 32 << 20 // 32 MiB
+
+// bodyLimitMiddleware wraps the request body in a MaxBytesReader to enforce
+// a hard limit on incoming payload size, preventing memory exhaustion from
+// oversized or never-ending request bodies.
+func bodyLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxRequestBodyBytes)
+		c.Next()
+	}
+}
+
 // NewRouter builds the public API router: health + the four universal endpoints.
 //
-//   GET  /health
-//   GET  /v1/models                 (public)
-//   POST /v1/chat/completions       (auth)
-//   POST /v1/messages               (auth)
-//   POST /v1/responses              (auth)
+//	GET  /health
+//	GET  /v1/models                 (public)
+//	POST /v1/chat/completions       (auth)
+//	POST /v1/messages               (auth)
+//	POST /v1/responses              (auth)
 func NewRouter(p *pool.Picker) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
 	r.Use(corsMiddleware())
+	r.Use(bodyLimitMiddleware())
 
 	r.GET("/health", health)
 	r.GET("/", health)
