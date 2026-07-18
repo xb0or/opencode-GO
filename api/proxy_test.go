@@ -5607,21 +5607,20 @@ func TestR5_P1_3_HTTP408TriggersUpstreamFailover(t *testing.T) {
 // TestR6_P0_2_ResponseFailedTriggersFailover verifies that when the Go
 // upstream returns a Responses stream containing response.failed (not
 // response.completed), the gateway marks the key as failed and fails over
-// to the second upstream (Ollama). The client must NOT receive a 200 with
-// finish_reason:"failed".
+// to the second upstream (Ollama). The client must receive a 200 with the
+// successful Ollama response, NOT finish_reason:"failed".
 func TestR6_P0_2_ResponseFailedTriggersFailover(t *testing.T) {
 	if err := store.InitForTest("file:r6_p0_2_response_failed_failover?mode=memory&cache=shared"); err != nil {
 		t.Fatalf("init test db: %v", err)
 	}
 	gin.SetMode(gin.TestMode)
 
-	// Go upstream — returns 200 with SSE stream containing response.failed
+	// Go upstream — returns 200 with SSE stream: created → failed (no content)
 	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		fl := w.(http.Flusher)
 		fl.Flush()
-		// response.created then response.failed — NO response.completed
 		fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\"}}\n\n")
 		fl.Flush()
 		fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"error\":{\"message\":\"overloaded\"}}}\n\n")
@@ -5629,12 +5628,20 @@ func TestR6_P0_2_ResponseFailedTriggersFailover(t *testing.T) {
 	}))
 	defer goSrv.Close()
 
-	// Ollama upstream — succeeds with a normal Chat completion
+	// Ollama upstream — returns a valid Responses SSE stream with completed
 	ollamaHit := false
 	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ollamaHit = true
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_2\",\"model\":\"m\"}}\n\n")
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_2\",\"status\":\"completed\"}}\n\n")
+		fl.Flush()
 	}))
 	defer ollamaSrv.Close()
 
@@ -5676,7 +5683,6 @@ func TestR6_P0_2_ResponseFailedTriggersFailover(t *testing.T) {
 	}
 
 	r := NewRouter(pool.NewPicker())
-	// Non-streaming request (stream=false) to force full body read
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
 		bytes.NewBufferString(`{"model":"r6-p0-2-model","input":"hi","stream":true}`))
 	req.Header.Set("Authorization", "Bearer "+tok.Token)
@@ -5687,13 +5693,293 @@ func TestR6_P0_2_ResponseFailedTriggersFailover(t *testing.T) {
 
 	body := w.Body.String()
 
-	// Ollama must have been hit (failover occurred)
+	// Must failover to Ollama and return 200
 	if !ollamaHit {
 		t.Errorf("R6 P0-2 FAIL: Ollama was not hit — response.failed did not trigger failover. Status=%d, body=%s", w.Code, body)
 	}
+	if w.Code != http.StatusOK {
+		t.Errorf("R6 P0-2 FAIL: status = %d, want 200 (Ollama should succeed); body=%s", w.Code, body)
+	}
+	// Must contain the successful Ollama response.completed
+	if !strings.Contains(body, `"type":"response.completed"`) {
+		t.Errorf("R6 P0-2 FAIL: body should contain response.completed from Ollama:\n%s", body)
+	}
+	// Must NOT contain response.failed from the Go upstream
+	if strings.Contains(body, `"type":"response.failed"`) {
+		t.Errorf("R6 P0-2 FAIL: client received response.failed in body:\n%s", body)
+	}
 
-	// The client must NOT receive finish_reason:"failed"
-	if strings.Contains(body, "finish_reason") && strings.Contains(body, "failed") {
-		t.Errorf("R6 P0-2 FAIL: client received finish_reason=failed in body:\n%s", body)
+	// Go key should have its FailCount incremented; Ollama key should be clean
+	var goKey, ollamaKey store.Key
+	store.DB().Where("value = ?", "go-key").First(&goKey)
+	store.DB().Where("value = ?", "ollama-key").First(&ollamaKey)
+	if goKey.FailCount == 0 {
+		t.Errorf("R6 P0-2 FAIL: go-key FailCount = 0, want > 0 (key should be marked as failed)")
+	}
+	if ollamaKey.FailCount != 0 {
+		t.Errorf("R6 P0-2 FAIL: ollama-key FailCount = %d, want 0 (should be marked success)", ollamaKey.FailCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Round-8 audit verification tests (responsesSSETracker terminal-state).
+// ---------------------------------------------------------------------------
+
+// TestR8_P0_2_DeltaThenFailedNoMarkSuccess verifies that a Responses stream
+// with content followed by response.failed (already committed) does NOT
+// call MarkSuccess — the key's FailCount must be incremented.
+func TestR8_P0_2_DeltaThenFailedNoMarkSuccess(t *testing.T) {
+	if err := store.InitForTest("file:r8_delta_then_failed?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	// Single Go upstream — returns created → delta → failed (committed)
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\"}}\n\n")
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"error\":{\"message\":\"overloaded\"}}}\n\n")
+		fl.Flush()
+	}))
+	defer goSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r8-delta-failed-model",
+		Name:      "R8 Delta Failed",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo},
+		Protocol:  config.ProtocolResponses,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("r8-delta-failed-model")
+
+	tok, err := pool.CreateToken("r8-delta-failed-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "go-key", Group: "go", Label: "go-test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		bytes.NewBufferString(`{"model":"r8-delta-failed-model","input":"hi","stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	w := newCloseNotifyRecorder()
+	r.ServeHTTP(w, req)
+
+	// Stream was committed (delta sent) — 200 is expected
+	if w.Code != http.StatusOK {
+		t.Errorf("R8 FAIL: status = %d, want 200 (committed)", w.Code)
+	}
+
+	// Key FailCount must be > 0 (NOT MarkSuccess)
+	var goKey store.Key
+	store.DB().Where("value = ?", "go-key").First(&goKey)
+	if goKey.FailCount == 0 {
+		t.Errorf("R8 FAIL: go-key FailCount = 0, want > 0 (MarkSuccess should NOT have been called for response.failed)")
+	}
+
+	// Usage log must record an error
+	var logs []store.UsageLog
+	store.DB().Find(&logs)
+	hasError := false
+	for _, l := range logs {
+		if l.Error != "" {
+			hasError = true
+			break
+		}
+	}
+	if !hasError {
+		t.Errorf("R8 FAIL: no usage log with non-empty error field (should record upstream failure)")
+	}
+}
+
+// TestR8_P0_2_DeltaThenEOFNoMarkSuccess verifies that a Responses stream
+// with content followed by EOF (no terminal event) does NOT call MarkSuccess.
+func TestR8_P0_2_DeltaThenEOFNoMarkSuccess(t *testing.T) {
+	if err := store.InitForTest("file:r8_delta_then_eof?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	// Single Go upstream — created → delta → EOF (no terminal)
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\"}}\n\n")
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+		fl.Flush()
+		// Stream ends here — no response.completed/incomplete/failed
+	}))
+	defer goSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r8-delta-eof-model",
+		Name:      "R8 Delta EOF",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo},
+		Protocol:  config.ProtocolResponses,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("r8-delta-eof-model")
+
+	tok, err := pool.CreateToken("r8-delta-eof-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "go-key", Group: "go", Label: "go-test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		bytes.NewBufferString(`{"model":"r8-delta-eof-model","input":"hi","stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	w := newCloseNotifyRecorder()
+	r.ServeHTTP(w, req)
+
+	// Key FailCount must be > 0 (no terminal → not MarkSuccess)
+	var goKey store.Key
+	store.DB().Where("value = ?", "go-key").First(&goKey)
+	if goKey.FailCount == 0 {
+		t.Errorf("R8 EOF FAIL: go-key FailCount = 0, want > 0 (MarkSuccess should NOT be called without terminal)")
+	}
+}
+
+// TestR8_P0_2_DeltaThenCompletedMarkSuccess verifies that a valid Responses
+// stream (created → delta → completed) DOES call MarkSuccess and clears
+// the key's FailCount.
+func TestR8_P0_2_DeltaThenCompletedMarkSuccess(t *testing.T) {
+	if err := store.InitForTest("file:r8_delta_then_completed?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\"}}\n\n")
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\"}}\n\n")
+		fl.Flush()
+	}))
+	defer goSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r8-completed-model",
+		Name:      "R8 Completed",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo},
+		Protocol:  config.ProtocolResponses,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("r8-completed-model")
+
+	tok, err := pool.CreateToken("r8-completed-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	// Create key with pre-existing FailCount to verify it gets reset
+	if err := store.DB().Create(&store.Key{
+		Value: "go-key", Group: "go", Label: "go-test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+	store.DB().Model(&store.Key{}).Where("value = ?", "go-key").Update("fail_count", 3)
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		bytes.NewBufferString(`{"model":"r8-completed-model","input":"hi","stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	w := newCloseNotifyRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("R8 FAIL: status = %d, want 200", w.Code)
+	}
+
+	// MarkSuccess should have been called → FailCount reset to 0
+	var goKey store.Key
+	store.DB().Where("value = ?", "go-key").First(&goKey)
+	if goKey.FailCount != 0 {
+		t.Errorf("R8 FAIL: go-key FailCount = %d, want 0 (MarkSuccess should reset)", goKey.FailCount)
+	}
+}
+
+// TestR8_TrackerSplitChunks verifies that the responsesSSETracker correctly
+// identifies response.failed even when the JSON is split across multiple
+// Write() calls (simulating fragmented TCP delivery).
+func TestR8_TrackerSplitChunks(t *testing.T) {
+	tracker := &responsesSSETracker{}
+
+	// Split the response.failed event across multiple writes
+	event := "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"status\":\"failed\"}}\n\n"
+	mid := len(event) / 2
+
+	_, _ = tracker.Write([]byte(event[:mid]))
+	_, _ = tracker.Write([]byte(event[mid:]))
+
+	err := tracker.Finalize()
+	if err == nil {
+		t.Fatal("R8 tracker FAIL: expected error for split response.failed, got nil")
+	}
+}
+
+// TestR8_TrackerCompletedThenFailed verifies that response.failed has the
+// highest priority — even if response.completed was seen earlier, the
+// final verdict is failure.
+func TestR8_TrackerCompletedThenFailed(t *testing.T) {
+	tracker := &responsesSSETracker{}
+
+	_, _ = tracker.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\"}}\n\n"))
+	_, _ = tracker.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n"))
+	_, _ = tracker.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\"}}\n\n"))
+	_, _ = tracker.Write([]byte("data: {\"type\":\"response.failed\",\"response\":{\"id\":\"r\",\"status\":\"failed\"}}\n\n"))
+
+	err := tracker.Finalize()
+	if err == nil {
+		t.Fatal("R8 tracker FAIL: expected error for completed-then-failed, got nil")
 	}
 }

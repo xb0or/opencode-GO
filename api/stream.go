@@ -126,6 +126,26 @@ func proxySameProtocolSSEBuffered(c *gin.Context, resp *http.Response,
 			Retryable: true,
 		}
 	}
+
+	// P0-2 (round-8): For Responses protocol, parse the terminal state of
+	// the entire buffered body BEFORE writing anything to the client. If
+	// the stream contains response.failed or lacks a valid terminal, the
+	// response has not been committed yet — failover is still possible.
+	if inbound == config.ProtocolResponses {
+		tracker := &responsesSSETracker{}
+		_, _ = tracker.Write(body)
+		terminalErr := tracker.Finalize()
+		if terminalErr != nil {
+			markKeyFailure(p, key, http.StatusBadGateway, body)
+			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true,
+				nil, "responses stream terminal check failed: "+terminalErr.Error())
+			return responseResult{
+				Err:       terminalErr,
+				Retryable: true,
+			}
+		}
+	}
+
 	copyResponseHeaders(c, resp)
 	c.Writer.WriteHeader(resp.StatusCode)
 	_, writeErr := c.Writer.Write(body)
@@ -189,6 +209,17 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	}
 	c.Writer.Flush()
 
+	// P0-2 (round-8): For Responses protocol, track the SSE terminal state
+	// as we forward the stream. Only response.completed/incomplete permits
+	// MarkSuccess. A response.failed (even after content was committed)
+	// must mark the key as failed.
+	var tracker *responsesSSETracker
+	if inbound == config.ProtocolResponses {
+		tracker = &responsesSSETracker{}
+		// Feed the already-pre-read first event to the tracker.
+		_, _ = tracker.Write(firstEvent)
+	}
+
 	// Pipe the remaining response body to the client while capturing the
 	// tail for usage extraction. We keep the last 64 KB of output so we can
 	// find the final usage event without buffering the entire response.
@@ -200,7 +231,15 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	// real-time streaming for small events.
 	tail := newTailBuffer(64 << 10)
 	fw := &flushingWriter{ResponseWriter: c.Writer}
-	mw := io.MultiWriter(fw, tail)
+	var writers []io.Writer
+	if tracker != nil {
+		// Tracker goes FIRST so it sees the chunk even if the client write
+		// fails (ensuring we record a failure terminal in the same chunk).
+		writers = []io.Writer{tracker, fw, tail}
+	} else {
+		writers = []io.Writer{fw, tail}
+	}
+	mw := io.MultiWriter(writers...)
 	_, copyErr := io.Copy(mw, bufReader)
 	_ = resp.Body.Close()
 
@@ -209,6 +248,37 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	if usage == nil {
 		usage = usageFromSSEBuffer(inbound, firstEvent) // best-effort partial
 	}
+
+	// P0-2 (round-8): evaluate terminal state BEFORE deciding MarkSuccess.
+	if tracker != nil {
+		terminalErr := tracker.Finalize()
+		switch {
+		case tracker.terminal == responsesTerminalFailed:
+			// Upstream reported failure — mark key as failed, do NOT MarkSuccess.
+			markKeyFailure(p, key, http.StatusBadGateway, nil)
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true,
+				usage, "upstream responses stream failed after commit")
+			return responseResult{ResponseStarted: true}
+		case copyErr != nil:
+			// Client write error (e.g. disconnect) — don't punish the key.
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true,
+				usage, "stream copy error: "+copyErr.Error())
+			return responseResult{ResponseStarted: true}
+		case terminalErr != nil:
+			// No valid terminal event (ErrUnexpectedEOF or parse error).
+			markKeyFailure(p, key, http.StatusBadGateway, nil)
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true,
+				usage, "invalid responses stream terminal: "+terminalErr.Error())
+			return responseResult{ResponseStarted: true}
+		default:
+			// response.completed or response.incomplete — healthy terminal.
+			p.MarkSuccess(key.ID)
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "")
+			return responseResult{ResponseStarted: true}
+		}
+	}
+
+	// Non-Responses protocols: original logic.
 	if copyErr != nil {
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "stream copy error: "+copyErr.Error())
 	} else {
