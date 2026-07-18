@@ -153,7 +153,12 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	start time.Time) responseResult {
 
 	// Pre-read the first valid SSE event with a bounded reader.
-	bufReader := bufio.NewReader(resp.Body)
+	// Size the bufio.Reader to maxSSERead so ReadSlice inside
+	// readFirstSSEEvent can return single lines up to the limit without
+	// hitting ErrBufferFull prematurely. Bytes read ahead but not returned
+	// by readFirstSSEEvent stay in this bufReader for the subsequent
+	// io.Copy — no data is lost.
+	bufReader := bufio.NewReaderSize(resp.Body, maxSSERead)
 	firstEvent, valid, preReadErr := readFirstSSEEvent(bufReader)
 	if !valid {
 		_ = resp.Body.Close()
@@ -172,7 +177,9 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	// First valid event found — commit response headers and first event.
 	copyResponseHeaders(c, resp)
 	c.Writer.WriteHeader(resp.StatusCode)
-	// Write the pre-read first event immediately and flush.
+	// Write the pre-read first event immediately and flush. Because
+	// readFirstSSEEvent now returns the complete event (including the
+	// terminating blank line), the client can dispatch it immediately.
 	_, writeErr := c.Writer.Write(firstEvent)
 	if writeErr != nil {
 		_ = resp.Body.Close()
@@ -184,8 +191,15 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	// Pipe the remaining response body to the client while capturing the
 	// tail for usage extraction. We keep the last 64 KB of output so we can
 	// find the final usage event without buffering the entire response.
+	//
+	// The writer is wrapped in a flushingWriter so every Write is
+	// immediately flushed to the underlying HTTP connection. Without this,
+	// gin.ResponseWriter.Write buffers small writes and SSE events would
+	// only depart when the buffer fills or the stream ends — defeating
+	// real-time streaming for small events.
 	tail := newTailBuffer(64 << 10)
-	mw := io.MultiWriter(c.Writer, tail)
+	fw := &flushingWriter{ResponseWriter: c.Writer}
+	mw := io.MultiWriter(fw, tail)
 	_, copyErr := io.Copy(mw, bufReader)
 	_ = resp.Body.Close()
 
@@ -252,36 +266,41 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 	}
 
 	if stream {
-		// Decode the upstream stream. If it fails, return error without
-		// committing to the client — caller can try next upstream.
-		streamResp, convErr := protocol.DecodeStreamBuffer(upstreamProto, body)
-		if convErr != nil {
+		// Incremental cross-protocol streaming — see proxyCrossProtocolStream.
+		// This branch is reached only when the caller could NOT pass an open
+		// resp.Body (e.g. body was pre-read for error handling). We fall back
+		// to the incremental converter fed from the pre-read buffer.
+		firstEvent, rest := splitFirstSSEEvent(body)
+		if len(firstEvent) == 0 {
 			markKeyFailure(p, key, http.StatusBadGateway, body)
-			errMsg := fmt.Sprintf("upstream %s stream response could not be decoded: %v; body: %s",
-				upstreamProto, convErr, previewBody(body))
+			errMsg := "upstream cross-protocol stream produced no SSE data"
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, errMsg)
 			return responseResult{
-				Err:       fmt.Errorf("stream decode failed: %w", convErr),
+				Err:       fmt.Errorf("%s", errMsg),
 				Retryable: true,
 			}
 		}
-
-		// Valid — commit SSE headers and emit converted stream.
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.WriteHeader(http.StatusOK)
-		usage := usageFromSSEBuffer(upstreamProto, body)
-		if usage == nil {
-			usage = usageFromIRUsage(streamResp)
+		fw := newFlushingWriter(c.Writer)
+		var restReader io.Reader
+		if rest != nil {
+			restReader = bytes.NewReader(rest)
 		}
-		if emitErr := protocol.EmitStreamResponse(c.Writer, inbound, streamResp); emitErr != nil {
-			markAndLog(c, p, key, route, inbound, http.StatusOK, start, true, usage,
-				"stream emit error: "+emitErr.Error())
+		acc, convErr := protocol.StreamConvertIncremental(
+			string(upstreamProto), string(inbound),
+			firstEvent, restReader, fw, fw.Flush,
+		)
+		if convErr != nil {
+			markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
+				usageFromIRUsage(acc), "stream convert error: "+convErr.Error())
 			return responseResult{ResponseStarted: true}
 		}
 		p.MarkSuccess(key.ID)
-		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true, usage, "")
+		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
+			usageFromIRUsage(acc), "")
 		return responseResult{ResponseStarted: true}
 	}
 
@@ -336,35 +355,91 @@ const (
 	maxSSERead = 1 << 20 // 1 MiB
 )
 
-// readFirstSSEEvent reads from a bufio.Reader until it finds the first valid
-// SSE data event (a line starting with "data:" with non-empty, non-[DONE]
-// content). It reads at most maxSSERead bytes. Returns the raw bytes of the
-// first event (including any preceding lines/blank lines) so the caller can
-// write them to the client without data loss.
+// readFirstSSEEvent reads from a bufio.Reader until it finds AND completes the
+// first valid SSE data event. An SSE event is terminated by a blank line
+// (an empty line or a line containing only whitespace) per the SSE spec.
+// Returning only the data: line without the terminating blank line would
+// cause the client to wait for more data before dispatching the event.
+//
+// The caller MUST size the bufio.Reader to at least maxSSERead (via
+// bufio.NewReaderSize) so ReadSlice can return lines up to the limit. Bytes
+// read ahead but not returned remain in the caller's bufio.Reader and are
+// available for subsequent io.Copy — readFirstSSEEvent does NOT wrap the
+// reader in its own buffer, so no data is lost.
+//
+// It enforces a hard cap of maxSSERead bytes total: a malicious upstream
+// that sends a huge line with no newline cannot exhaust memory. Returns the
+// raw bytes of the first event (including the terminating blank line) so
+// the caller can write them to the client without data loss.
 func readFirstSSEEvent(r *bufio.Reader) ([]byte, bool, error) {
 	var buf bytes.Buffer
+	foundData := false
 	for {
-		line, err := r.ReadBytes('\n')
-		if err != nil && err != io.EOF {
+		line, err := r.ReadSlice('\n')
+		if err != nil && err != bufio.ErrBufferFull && err != io.EOF {
 			return nil, false, err
+		}
+		// Enforce the hard cap regardless of how the line was read.
+		if buf.Len()+len(line) > maxSSERead {
+			return nil, false, fmt.Errorf("no valid SSE event found within %d bytes", maxSSERead)
 		}
 		buf.Write(line)
 		trimmed := bytes.TrimSpace(line)
-		if bytes.HasPrefix(trimmed, []byte("data:")) {
-			data := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
-			if len(data) > 0 && !bytes.Equal(data, []byte("[DONE]")) {
-				// Found the first valid event. Return everything read so far.
-				return buf.Bytes(), true, nil
+
+		if !foundData {
+			if bytes.HasPrefix(trimmed, []byte("data:")) {
+				data := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
+				if len(data) > 0 && !bytes.Equal(data, []byte("[DONE]")) {
+					foundData = true
+				}
 			}
 		}
+
+		if foundData && len(trimmed) == 0 {
+			// Blank line terminates the event — return everything including it.
+			return buf.Bytes(), true, nil
+		}
+
 		if err == io.EOF {
+			// Stream ended. If we found a data line but no terminating blank
+			// line, return what we have so the client isn't stalled.
+			if foundData {
+				return buf.Bytes(), true, nil
+			}
 			break
 		}
-		if buf.Len() > maxSSERead {
+		if err == bufio.ErrBufferFull {
+			// A single line exceeded maxSSERead — bail out.
 			return nil, false, fmt.Errorf("no valid SSE event found within %d bytes", maxSSERead)
 		}
 	}
 	return nil, false, nil
+}
+
+// flushingWriter wraps a gin.ResponseWriter and flushes after every Write so
+// SSE events are pushed to the client immediately instead of accumulating
+// in the HTTP buffer. This is critical for real-time streaming: without
+// per-write flushing, small SSE events batch up and only depart when the
+// buffer fills or the stream ends. gin.ResponseWriter implements Flush().
+type flushingWriter struct {
+	gin.ResponseWriter
+}
+
+func newFlushingWriter(w gin.ResponseWriter) *flushingWriter {
+	return &flushingWriter{ResponseWriter: w}
+}
+
+func (fw *flushingWriter) Write(p []byte) (int, error) {
+	n, err := fw.ResponseWriter.Write(p)
+	if n > 0 {
+		fw.ResponseWriter.Flush()
+	}
+	return n, err
+}
+
+// Flush triggers an explicit flush of the underlying response writer.
+func (fw *flushingWriter) Flush() {
+	fw.ResponseWriter.Flush()
 }
 
 // isValidJSONForProtocol checks whether the body is valid JSON suitable
@@ -414,4 +489,87 @@ func findFirstValidSSEData(body []byte) (int, bool, error) {
 		offset += len(line) + 1 // +1 for the \n
 	}
 	return 0, false, nil
+}
+
+// ---------------------------------------------------------------------------
+// Incremental cross-protocol streaming (open resp.Body path)
+// ---------------------------------------------------------------------------
+
+// proxyCrossProtocolStream handles cross-protocol SSE streaming WITHOUT
+// buffering the full upstream response. It pre-reads only the first SSE event
+// (for validation / failover), commits headers, then runs the incremental
+// Decoder → IR → Encoder → Flush pipeline over the remaining resp.Body.
+//
+// resp.Body is closed by this function.
+func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
+	inbound, upstreamProto config.Protocol,
+	p *pool.Picker, key *store.Key, route config.ModelRoute, start time.Time) responseResult {
+
+	bufReader := bufio.NewReaderSize(resp.Body, maxSSERead)
+	firstEvent, found, readErr := readFirstSSEEvent(bufReader)
+	if readErr != nil || !found {
+		errBody, _ := io.ReadAll(io.LimitReader(bufReader, maxErrorBodyRead))
+		_ = resp.Body.Close()
+		markKeyFailure(p, key, http.StatusBadGateway, errBody)
+		errMsg := fmt.Sprintf("upstream cross-protocol stream could not be read: %v; body: %s",
+			readErr, previewBody(errBody))
+		markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, errMsg)
+		return responseResult{
+			Err:       fmt.Errorf("stream pre-read failed: %w", readErr),
+			Retryable: true,
+		}
+	}
+	if len(firstEvent) == 0 {
+		_ = resp.Body.Close()
+		markKeyFailure(p, key, http.StatusBadGateway, nil)
+		errMsg := "upstream cross-protocol stream produced no SSE data"
+		markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, errMsg)
+		return responseResult{
+			Err:       fmt.Errorf("%s", errMsg),
+			Retryable: true,
+		}
+	}
+
+	// Commit SSE headers — from this point failover is impossible.
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.WriteHeader(http.StatusOK)
+
+	fw := newFlushingWriter(c.Writer)
+	acc, convErr := protocol.StreamConvertIncremental(
+		string(upstreamProto), string(inbound),
+		firstEvent, bufReader, fw, fw.Flush,
+	)
+	_ = resp.Body.Close()
+	if convErr != nil {
+		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
+			usageFromIRUsage(acc), "stream convert error: "+convErr.Error())
+		return responseResult{ResponseStarted: true}
+	}
+	p.MarkSuccess(key.ID)
+	markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
+		usageFromIRUsage(acc), "")
+	return responseResult{ResponseStarted: true}
+}
+
+// splitFirstSSEEvent splits a pre-read SSE buffer into the first complete
+// SSE event (including its terminating blank line) and the remaining bytes.
+// If no complete event is found, returns (nil, body).
+func splitFirstSSEEvent(body []byte) (firstEvent, rest []byte) {
+	// An SSE event is terminated by a blank line (\n\n or \r\n\r\n).
+	idx := bytes.Index(body, []byte("\n\n"))
+	if idx >= 0 {
+		return body[:idx+2], body[idx+2:]
+	}
+	idx = bytes.Index(body, []byte("\r\n\r\n"))
+	if idx >= 0 {
+		return body[:idx+4], body[idx+4:]
+	}
+	// No terminating blank line — treat the whole buffer as one event if it
+	// contains a data: line.
+	if bytes.Contains(body, []byte("data:")) {
+		return body, nil
+	}
+	return nil, body
 }

@@ -177,13 +177,36 @@ func DB() *gorm.DB {
 // happen in a single atomic statement, preventing concurrent requests
 // from all passing the check before any of them increment.
 //
-// If MaxRequests is 0 (unlimited), the increment always succeeds.
-func TryReserveRequest(tokenID uint) bool {
+// TryReserveRequest atomically increments requests_used for a token if the
+// limit has not been reached, returning (true, nil) on success. If the token
+// has MaxRequests <= 0 (unlimited), the function is a no-op and returns
+// (true, nil) without touching the database — this avoids a write transaction
+// on every request for unlimited tokens.
+//
+// Returns (false, nil) when the limit is reached (quota exhausted → 403).
+// Returns (false, err) when the database operation fails (→ 503), so the
+// caller can distinguish "out of quota" from "database broken".
+//
+// The SQL uses a conditional UPDATE so the increment and the limit check
+// happen in a single atomic statement, preventing concurrent requests
+// from all passing the check before any of them increment.
+func TryReserveRequest(tokenID uint) (bool, error) {
+	var tok Token
+	if err := DB().Select("max_requests").Where("id = ?", tokenID).First(&tok).Error; err != nil {
+		return false, err
+	}
+	// Unlimited tokens (MaxRequests <= 0) skip the write entirely.
+	if tok.MaxRequests <= 0 {
+		return true, nil
+	}
 	result := DB().Model(&Token{}).
 		Where("id = ? AND enabled = 1", tokenID).
-		Where("max_requests = 0 OR requests_used < max_requests").
+		Where("requests_used < max_requests").
 		UpdateColumn("requests_used", gormExpr("requests_used + 1"))
-	return result.RowsAffected > 0
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }
 
 // ReleaseRequest atomically decrements requests_used for a token, used to

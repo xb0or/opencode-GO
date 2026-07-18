@@ -196,14 +196,14 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 	// here because the for loop would accumulate deferred calls until
 	// the function returns, leaking connections on multi-key retries.
 	if shouldRetryWithNextKey(resp.StatusCode) && i+1 < len(attempts) {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		_ = resp.Body.Close()
 		markKeyFailure(p, key, resp.StatusCode, errBody)
 		return attemptResult{Retryable: true}
 	}
 
 	if shouldMarkUpstreamFailure(resp.StatusCode) {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		_ = resp.Body.Close()
 		markKeyFailure(p, key, resp.StatusCode, errBody)
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, summarizeUpstreamError(resp.StatusCode, errBody))
@@ -215,7 +215,31 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 	}
 
 	// Success — read the response body, then convert.
-	responseBody, readErr := io.ReadAll(resp.Body)
+	if stream {
+		// Cross-protocol SSE streaming: avoid buffering the full upstream
+		// body. Use the incremental Decoder → IR → Encoder → Flush pipeline.
+		rr := proxyCrossProtocolStream(c, resp, inbound, upstreamProto, p, key, route, start)
+		if rr.ResponseStarted {
+			return attemptResult{Handled: true}
+		}
+		if !rr.Retryable {
+			return attemptResult{
+				Response:  resp,
+				Status:    resp.StatusCode,
+				Err:       rr.Err,
+				Retryable: false,
+			}
+		}
+		if i+1 < len(attempts) {
+			return attemptResult{Retryable: true}
+		}
+		return attemptResult{
+			Status:    http.StatusBadGateway,
+			Err:       rr.Err,
+			Retryable: true,
+		}
+	}
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxNonStreamBodyRead))
 	_ = resp.Body.Close()
 	if readErr != nil {
 		markKeyFailure(p, key, http.StatusBadGateway, nil)
@@ -232,6 +256,18 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 	rr := proxyCrossProtocolResponse(c, resp, stream, inbound, upstreamProto, p, key, route, start, responseBody)
 	if rr.ResponseStarted {
 		return attemptResult{Handled: true}
+	}
+	// Respect the response handler's retry classification. A non-retryable
+	// client error (400/404/409/413/415/422) must NOT switch keys or
+	// upstreams. Preserve the original status code so the client sees
+	// the real error instead of a synthetic 502.
+	if !rr.Retryable {
+		return attemptResult{
+			Response:  resp,
+			Status:    resp.StatusCode,
+			Err:       rr.Err,
+			Retryable: false,
+		}
 	}
 	if i+1 < len(attempts) {
 		return attemptResult{Retryable: true}
@@ -283,14 +319,14 @@ func proxyOllamaSameProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 	// here because the for loop would accumulate deferred calls until
 	// the function returns, leaking connections on multi-key retries.
 	if shouldRetryWithNextKey(resp.StatusCode) && i+1 < len(attempts) {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		_ = resp.Body.Close()
 		markKeyFailure(p, key, resp.StatusCode, errBody)
 		return attemptResult{Retryable: true}
 	}
 
 	if shouldMarkUpstreamFailure(resp.StatusCode) {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		_ = resp.Body.Close()
 		markKeyFailure(p, key, resp.StatusCode, errBody)
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, summarizeUpstreamError(resp.StatusCode, errBody))
@@ -309,6 +345,18 @@ func proxyOllamaSameProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 	rr := proxySameProtocolResponse(c, resp, stream, p, key, route, inbound, start, nil)
 	if rr.ResponseStarted {
 		return attemptResult{Handled: true}
+	}
+	// Respect the response handler's retry classification. A non-retryable
+	// client error (400/404/409/413/415/422) must NOT switch keys or
+	// upstreams. Preserve the original status code so the client sees
+	// the real error instead of a synthetic 502.
+	if !rr.Retryable {
+		return attemptResult{
+			Response:  resp,
+			Status:    resp.StatusCode,
+			Err:       rr.Err,
+			Retryable: false,
+		}
 	}
 	if i+1 < len(attempts) {
 		return attemptResult{Retryable: true}

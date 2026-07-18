@@ -449,9 +449,13 @@ func assertJSONFloat(t *testing.T, payload map[string]any, key string, want floa
 
 func signedAdminToken(t *testing.T) string {
 	t.Helper()
+	now := time.Now()
 	claims := jwt.MapClaims{
 		"role": "admin",
-		"exp":  time.Now().Add(time.Hour).Unix(),
+		"iss":  "opencode-go",
+		"aud":  "admin",
+		"iat":  now.Unix(),
+		"exp":  now.Add(time.Hour).Unix(),
 	}
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := tok.SignedString([]byte(config.Get().JWTSecret))
@@ -665,5 +669,132 @@ func TestAdminPatchedUpstreamConfigSurvivesSync(t *testing.T) {
 	}
 	if len(got.Upstreams) != 2 || got.Upstreams[0] != config.UpstreamOllama || got.Upstreams[1] != config.UpstreamGo {
 		t.Fatalf("Upstreams overwritten after patch: got %v, want [ollama go]", got.Upstreams)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P1-2: JWT strict validation.
+//   1. HS384 is rejected (only HS256 accepted).
+//   2. Wrong issuer is rejected.
+//   3. Wrong audience is rejected.
+//   4. Missing iat is rejected.
+//   5. Missing exp is rejected.
+// ---------------------------------------------------------------------------
+
+// signTokenWithClaimsAndAlg builds a JWT with the given claims and signing
+// algorithm, signed with the configured JWTSecret. Returns the compact token.
+func signTokenWithClaimsAndAlg(t *testing.T, alg jwt.SigningMethod, claims jwt.MapClaims) string {
+	t.Helper()
+	tok := jwt.NewWithClaims(alg, claims)
+	signed, err := tok.SignedString([]byte(config.Get().JWTSecret))
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	return signed
+}
+
+// validAdminClaims returns a complete, valid set of admin JWT claims.
+func validAdminClaims() jwt.MapClaims {
+	now := time.Now()
+	return jwt.MapClaims{
+		"role": "admin",
+		"iss":  "opencode-go",
+		"aud":  "admin",
+		"iat":  now.Unix(),
+		"exp":  now.Add(time.Hour).Unix(),
+	}
+}
+
+// assertTokenRejected performs a request to /admin/health with the given JWT
+// and asserts the response is 401 (invalid token).
+func assertTokenRejected(t *testing.T, token string, label string) {
+	t.Helper()
+	if err := store.InitForTest("file:p12_"+label+"?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	MountWithPicker(r.Group("/admin"), pool.NewPicker())
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("%s: status = %d, want 401; body=%s", label, w.Code, w.Body.String())
+	}
+}
+
+// TestP1_2_HS384Rejected verifies that a token signed with HS384 is rejected
+// (only HS256 is accepted).
+func TestP1_2_HS384Rejected(t *testing.T) {
+	claims := validAdminClaims()
+	token := signTokenWithClaimsAndAlg(t, jwt.SigningMethodHS384, claims)
+	assertTokenRejected(t, token, "hs384")
+}
+
+// TestP1_2_HS512Rejected verifies that a token signed with HS512 is rejected.
+func TestP1_2_HS512Rejected(t *testing.T) {
+	claims := validAdminClaims()
+	token := signTokenWithClaimsAndAlg(t, jwt.SigningMethodHS512, claims)
+	assertTokenRejected(t, token, "hs512")
+}
+
+// TestP1_2_WrongIssuerRejected verifies that a token with an incorrect iss
+// claim is rejected.
+func TestP1_2_WrongIssuerRejected(t *testing.T) {
+	claims := validAdminClaims()
+	claims["iss"] = "evil-issuer"
+	token := signTokenWithClaimsAndAlg(t, jwt.SigningMethodHS256, claims)
+	assertTokenRejected(t, token, "badiss")
+}
+
+// TestP1_2_WrongAudienceRejected verifies that a token with an incorrect aud
+// claim is rejected.
+func TestP1_2_WrongAudienceRejected(t *testing.T) {
+	claims := validAdminClaims()
+	claims["aud"] = "not-admin"
+	token := signTokenWithClaimsAndAlg(t, jwt.SigningMethodHS256, claims)
+	assertTokenRejected(t, token, "badaud")
+}
+
+// TestP1_2_MissingIATRejected verifies that a token without iat is rejected.
+func TestP1_2_MissingIATRejected(t *testing.T) {
+	claims := validAdminClaims()
+	delete(claims, "iat")
+	token := signTokenWithClaimsAndAlg(t, jwt.SigningMethodHS256, claims)
+	assertTokenRejected(t, token, "noiat")
+}
+
+// TestP1_2_MissingExpRejected verifies that a token without exp is rejected.
+func TestP1_2_MissingExpRejected(t *testing.T) {
+	claims := validAdminClaims()
+	delete(claims, "exp")
+	token := signTokenWithClaimsAndAlg(t, jwt.SigningMethodHS256, claims)
+	assertTokenRejected(t, token, "noexp")
+}
+
+// TestP1_2_ValidTokenAccepted verifies that a well-formed token with all
+// required claims (iss, aud, iat, exp, role=admin) signed with HS256 is
+// accepted (positive control).
+func TestP1_2_ValidTokenAccepted(t *testing.T) {
+	if err := store.InitForTest("file:p12_valid?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	MountWithPicker(r.Group("/admin"), pool.NewPicker())
+
+	token := signTokenWithClaimsAndAlg(t, jwt.SigningMethodHS256, validAdminClaims())
+	req := httptest.NewRequest(http.MethodGet, "/admin/health", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("valid token: status = %d, want 200; body=%s", w.Code, w.Body.String())
 	}
 }

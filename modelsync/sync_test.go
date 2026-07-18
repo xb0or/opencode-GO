@@ -711,3 +711,224 @@ func TestSyncSuccessfulEmptySourceRemovesMembership(t *testing.T) {
 		t.Fatalf("expected only go upstream after authoritative empty result, got %v", got.Upstreams)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// P1-3: sourceModel stores full per-Upstream Targets (RealModel + Protocol +
+// Group), not just Protocol. buildMergedRoute must use the per-upstream
+// RealModel from perUpstreamTargets instead of hardcoding sm.ID.
+// ---------------------------------------------------------------------------
+
+// TestP1_3_BuildMergedRouteUsesPerUpstreamRealModel verifies that when two
+// upstreams serve the same gateway model ID with DIFFERENT real_model names
+// and protocols, buildMergedRoute produces Targets carrying each upstream's
+// own real_model and protocol.
+func TestP1_3_BuildMergedRouteUsesPerUpstreamRealModel(t *testing.T) {
+	sm := sourceModel{
+		ID:       "qwen-x",
+		Name:     "qwen-x",
+		Upstream: config.UpstreamGo,
+		Upstreams: []config.Upstream{
+			config.UpstreamGo,
+			config.UpstreamOllama,
+		},
+		perUpstreamTargets: map[config.Upstream]config.UpstreamTarget{
+			config.UpstreamGo: {
+				RealModel: "qwen-x",
+				Protocol:  config.ProtocolMessages,
+				Group:     string(config.UpstreamGo),
+			},
+			config.UpstreamOllama: {
+				RealModel: "qwen-x:cloud",
+				Protocol:  config.ProtocolChat,
+				Group:     string(config.UpstreamOllama),
+			},
+		},
+	}
+
+	route := buildMergedRoute(sm, store.ModelRouteRow{}, false, true, true)
+
+	if len(route.Targets) != 2 {
+		t.Fatalf("expected 2 Targets, got %d (%v)", len(route.Targets), route.Targets)
+	}
+	goTarget, ok := route.Targets[config.UpstreamGo]
+	if !ok {
+		t.Fatal("missing Go target")
+	}
+	if goTarget.RealModel != "qwen-x" {
+		t.Errorf("Go RealModel = %q, want %q", goTarget.RealModel, "qwen-x")
+	}
+	if goTarget.Protocol != config.ProtocolMessages {
+		t.Errorf("Go Protocol = %q, want %q", goTarget.Protocol, config.ProtocolMessages)
+	}
+	ollamaTarget, ok := route.Targets[config.UpstreamOllama]
+	if !ok {
+		t.Fatal("missing Ollama target")
+	}
+	if ollamaTarget.RealModel != "qwen-x:cloud" {
+		t.Errorf("Ollama RealModel = %q, want %q", ollamaTarget.RealModel, "qwen-x:cloud")
+	}
+	if ollamaTarget.Protocol != config.ProtocolChat {
+		t.Errorf("Ollama Protocol = %q, want %q", ollamaTarget.Protocol, config.ProtocolChat)
+	}
+}
+
+// TestP1_3_SyncGeneratesPerUpstreamTargetsForDifferentProtocols verifies
+// through the full Sync flow that when Go and Ollama both report the same
+// model ID but with different native protocols, the resulting route has
+// Targets with each upstream's real_model and protocol.
+func TestP1_3_SyncGeneratesPerUpstreamTargetsForDifferentProtocols(t *testing.T) {
+	if err := store.InitForTest("file:p13_sync_targets?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	// Go reports a model with id "qwen-x" — inferProtocol maps "qwen*"
+	// prefixes to Messages, guaranteeing protocol divergence from
+	// Ollama's Chat.
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"qwen-x","name":"Qwen X"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"qwen-x"}]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("qwen-x")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	if len(got.Upstreams) != 2 {
+		t.Fatalf("expected 2 upstreams, got %v", got.Upstreams)
+	}
+	// Targets must be populated because Go and Ollama use different protocols
+	// (Go infers messages for qwen*; Ollama is always chat).
+	if len(got.Targets) != 2 {
+		t.Fatalf("expected 2 Targets (protocols differ), got %d", len(got.Targets))
+	}
+	goT, ok := got.Targets[config.UpstreamGo]
+	if !ok {
+		t.Fatal("missing Go target")
+	}
+	if goT.RealModel != "qwen-x" {
+		t.Errorf("Go RealModel = %q, want %q", goT.RealModel, "qwen-x")
+	}
+	ollamaT, ok := got.Targets[config.UpstreamOllama]
+	if !ok {
+		t.Fatal("missing Ollama target")
+	}
+	if ollamaT.RealModel != "qwen-x" {
+		t.Errorf("Ollama RealModel = %q, want %q", ollamaT.RealModel, "qwen-x")
+	}
+	if ollamaT.Protocol != config.ProtocolChat {
+		t.Errorf("Ollama Protocol = %q, want %q", ollamaT.Protocol, config.ProtocolChat)
+	}
+	// The two upstreams must have different protocols (otherwise Targets
+	// wouldn't be needed).
+	if goT.Protocol == ollamaT.Protocol {
+		t.Fatalf("expected different protocols, both = %q", goT.Protocol)
+	}
+}
+
+// TestP1_3_SyncPreservesExistingPerUpstreamTargets verifies that when an
+// admin has customized per-upstream Targets (e.g. different real_model for
+// Ollama), a subsequent sync does NOT overwrite the customized real_model
+// back to sm.ID.
+func TestP1_3_SyncPreservesExistingPerUpstreamTargets(t *testing.T) {
+	if err := store.InitForTest("file:p13_preserve?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	// Pre-existing route with admin-customized per-upstream Targets where
+	// Ollama uses a different real_model than the gateway ID.
+	existing := config.ModelRoute{
+		ID:        "shared-model",
+		Name:      "Shared Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolMessages,
+		RealModel: "shared-model",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+		Targets: map[config.Upstream]config.UpstreamTarget{
+			config.UpstreamGo: {
+				RealModel: "shared-model",
+				Protocol:  config.ProtocolMessages,
+				Group:     "go",
+			},
+			config.UpstreamOllama: {
+				RealModel: "shared-model:cloud",
+				Protocol:  config.ProtocolChat,
+				Group:     "ollama",
+			},
+		},
+		CustomizedFields: []string{"targets"},
+		IsCustomized:     true,
+	}
+	row := store.NewModelRouteRow(existing)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("save existing row: %v", err)
+	}
+
+	opencodeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"shared-model","name":"Shared Model"}]}`))
+	}))
+	defer opencodeSrv.Close()
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"shared-model"}]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	openrouterSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer openrouterSrv.Close()
+
+	_, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("shared-model")
+	if !ok {
+		t.Fatal("model missing after sync")
+	}
+	ollamaT, ok := got.Targets[config.UpstreamOllama]
+	if !ok {
+		t.Fatal("missing Ollama target after sync")
+	}
+	// The admin-customized real_model "shared-model:cloud" must be preserved,
+	// not overwritten to "shared-model" by the sync.
+	if ollamaT.RealModel != "shared-model:cloud" {
+		t.Errorf("Ollama RealModel = %q, want preserved %q", ollamaT.RealModel, "shared-model:cloud")
+	}
+}

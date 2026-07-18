@@ -95,10 +95,28 @@ func RequestLimitMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		// Unlimited tokens (MaxRequests <= 0) skip the DB write entirely,
+		// avoiding a write transaction on every request.
+		if tok.MaxRequests <= 0 {
+			c.Next()
+			return
+		}
 		// Atomic pre-reserve: increment + limit-check in one SQL statement.
 		// This prevents concurrent requests from all passing the check
 		// when only one slot remains.
-		if !store.TryReserveRequest(tok.ID) {
+		reserved, err := store.TryReserveRequest(tok.ID)
+		if err != nil {
+			// Database error — return 503, NOT 403. A SQLite busy/error
+			// must not masquerade as "quota exhausted".
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+				"error": gin.H{
+					"type":    "service_unavailable",
+					"message": "request limit service temporarily unavailable",
+				},
+			})
+			return
+		}
+		if !reserved {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error": gin.H{
 					"type":    "request_limit_exceeded",

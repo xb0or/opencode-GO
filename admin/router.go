@@ -107,7 +107,11 @@ func login(c *gin.Context) {
 		return
 	}
 	now := time.Now()
-	jti, _ := randomTokenID()
+	jti, err := randomTokenID()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "generate jti: " + err.Error()})
+		return
+	}
 	claims := jwt.MapClaims{
 		"role": "admin",
 		"iss":  "opencode-go",
@@ -135,19 +139,29 @@ func adminAuth() gin.HandlerFunc {
 		}
 		raw := strings.TrimSpace(h[7:])
 		claims := jwt.MapClaims{}
+		// Strict validation: only HS256 is accepted (rejects HS384, HS512,
+		// RS256, "none", etc.), and iss/aud/exp are all enforced.
 		token, err := jwt.ParseWithClaims(raw, claims, func(t *jwt.Token) (any, error) {
-			// Reject any non-HS256 token to prevent algorithm confusion attacks.
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-			}
 			return []byte(config.Get().JWTSecret), nil
-		})
+		},
+			jwt.WithValidMethods([]string{"HS256"}),
+			jwt.WithIssuer("opencode-go"),
+			jwt.WithAudience("admin"),
+			jwt.WithExpirationRequired(),
+			jwt.WithIssuedAt(),
+		)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
 		}
 		if !token.Valid {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+			return
+		}
+		// jwt.WithIssuedAt only validates iat if present; enforce that iat
+		// is actually present.
+		if _, ok := claims["iat"]; !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing iat"})
 			return
 		}
 		if role, _ := claims["role"].(string); role != "admin" {
