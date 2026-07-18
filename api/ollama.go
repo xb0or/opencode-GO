@@ -43,7 +43,14 @@ import (
 // an attemptResult that the outer loop uses to decide what to do. The outer
 // loop is the sole writer of client responses.
 func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
-	inbound config.Protocol, upstreamBody []byte, head requestHead, start time.Time) attemptResult {
+	inbound config.Protocol, upstreamBody []byte, head requestHead, start time.Time,
+	resolvedGroup string) attemptResult {
+
+	// G1: Use the group pre-resolved by the outer failover loop. Do NOT
+	// re-resolve via route.TargetGroup — that would use a different priority
+	// chain and could select a different group than the one used for token
+	// permission and usage logging.
+	_ = resolvedGroup // used below in PickAttempts
 
 	// Determine the upstream protocol — respects TargetProtocol override.
 	upstreamProto := route.TargetProtocol(config.UpstreamOllama)
@@ -85,12 +92,12 @@ func proxyOllamaRequest(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		upstreamBody = rewritten
 	}
 
-	// Pick key from the Ollama pool.
-	attempts, err := p.PickAttempts(route.TargetGroup(config.UpstreamOllama))
+	// Pick key from the Ollama pool using the pre-resolved group (G1).
+	attempts, err := p.PickAttempts(resolvedGroup)
 	if err != nil {
 		return attemptResult{
 			Status:    http.StatusServiceUnavailable,
-			Err:       fmt.Errorf("no available upstream key for group %s: %w", route.TargetGroup(config.UpstreamOllama), err),
+			Err:       fmt.Errorf("no available upstream key for group %s: %w", resolvedGroup, err),
 			Retryable: true,
 		}
 	}

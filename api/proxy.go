@@ -137,12 +137,9 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	}
 
 	// Stash the route's original group for logging/debugging.
-	// The actual group used per-upstream is resolved inside the failover loop.
+	// The actual group used per-upstream is resolved inside the failover loop
+	// via ResolveUpstreamGroup (G1).
 	c.Set("group", route.Group)
-
-	// Save the original route before the failover loop so we can fall back
-	// to the original Group when no explicit UpstreamGroups mapping exists.
-	baseRoute := route
 
 	// -----------------------------------------------------------------------
 	// Multi-upstream failover loop
@@ -159,14 +156,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	var attemptedAny bool
 
 	for ui, currentUpstream := range upstreamsToTry {
-		// Resolve the key-pool group for this upstream.
-		// When no explicit UpstreamGroups mapping exists and this upstream
-		// is the original primary upstream, fall back to baseRoute.Group
-		// for backward compatibility with old {Group: "premium"} configs.
-		upstreamGroup := route.UpstreamGroup(currentUpstream)
-		if upstreamGroup == string(currentUpstream) && currentUpstream == baseRoute.Upstream && baseRoute.Group != "" {
-			upstreamGroup = baseRoute.Group
-		}
+		// G1: Resolve the key-pool group for this upstream using the single
+		// authoritative resolver. The result is passed to every downstream
+		// consumer (token permission, PickAttempts, Go/Ollama handlers,
+		// usage log) so they all use the same group.
+		upstreamGroup := route.ResolveUpstreamGroup(currentUpstream)
 
 		// Check token permission for this upstream's resolved group.
 		// Each upstream may map to a different group via UpstreamGroups,
@@ -197,7 +191,9 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			// conversion internally. Do NOT call buildUpstreamBody here
 			// to avoid double conversion (the outer loop would convert
 			// to Chat, then the helper would try to convert again).
-			result := proxyOllamaRequest(c, p, route, inbound, originalBody, head, start)
+			// G1: upstreamGroup is pre-resolved by the outer loop and passed
+			// in so Ollama does NOT re-resolve via TargetGroup.
+			result := proxyOllamaRequest(c, p, route, inbound, originalBody, head, start, upstreamGroup)
 			if result.Terminal {
 				// Client disconnected — stop immediately.
 				return

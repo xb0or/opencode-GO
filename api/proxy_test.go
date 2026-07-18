@@ -5320,3 +5320,130 @@ func TestR3_P0_3_CommitBeforeStagingWrite(t *testing.T) {
 	}
 }
 
+// TestR4_G1_OllamaUsesPreResolvedGroup verifies that the Ollama upstream uses
+// the group pre-resolved by ResolveUpstreamGroup in the outer failover loop,
+// NOT a re-resolved group. The scenario:
+//   - Model has Upstream=ollama, Group="premium" (legacy style, no
+//     UpstreamGroups, no Targets).
+//   - DB has a key in the "premium" pool only — there is NO "ollama" pool key.
+//
+// Without the G1 fix, proxyOllamaRequest would re-resolve the group via
+// TargetGroup/UpstreamGroup and fall back to "ollama" (the upstream name),
+// find no keys, and skip/failover. With the G1 fix, the pre-resolved
+// "premium" group is used, the premium key is picked, Ollama succeeds, and
+// there is NO failover to Go.
+func TestR4_G1_OllamaUsesPreResolvedGroup(t *testing.T) {
+	if err := store.InitForTest("file:r4_g1_ollama_preresolved_group?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	var ollamaHits atomic.Int32
+	var goHits atomic.Int32
+	var ollamaAuth string
+
+	// Ollama upstream — succeeds and records the Authorization header it
+	// received so we can prove the premium-pool key was used.
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ollamaHits.Add(1)
+		ollamaAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-ollama","model":"m","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer ollamaSrv.Close()
+
+	// Go upstream — should NEVER be hit because Ollama succeeds. If it is,
+	// that means Ollama was skipped (e.g. because of wrong group resolution).
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		goHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-go","model":"m","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer goSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	oldOllamaURL := cfg.OllamaBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	cfg.OllamaBaseURL = ollamaSrv.URL
+	defer func() {
+		cfg.GoBaseURL = oldGoURL
+		cfg.OllamaBaseURL = oldOllamaURL
+	}()
+
+	// Legacy-style config: Upstream=ollama, Group="premium", no
+	// UpstreamGroups, no Targets. ResolveUpstreamGroup(ollama) must return
+	// "premium" via the legacy fallback (upstream == route.Upstream).
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r4-g1-ollama-premium",
+		Name:      "R4 G1 Ollama Premium",
+		Upstream:  config.UpstreamOllama,
+		Upstreams: []config.Upstream{config.UpstreamOllama, config.UpstreamGo},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "premium",
+	})
+	defer config.RemoveModel("r4-g1-ollama-premium")
+
+	// Unrestricted token so permission checks pass for any group.
+	tok, err := pool.CreateToken("r4-g1-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+
+	// ONLY a "premium" pool key exists. There is NO "ollama" pool key. If
+	// Ollama re-resolved the group to "ollama", PickAttempts("ollama") would
+	// fail and the request would failover to Go.
+	premiumKey := &store.Key{
+		Value:   "premium-ollama-key",
+		Group:   "premium",
+		Label:   "premium-test",
+		Enabled: true,
+		Weight:  1,
+	}
+	if err := store.DB().Create(premiumKey).Error; err != nil {
+		t.Fatalf("create premium key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"r4-g1-ollama-premium","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := newCloseNotifyRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+
+	// Ollama must have been reached — not skipped due to "no keys for ollama".
+	if ollamaHits.Load() != 1 {
+		t.Fatalf("ollamaHits = %d, want 1 (Ollama must be reached via premium group)", ollamaHits.Load())
+	}
+
+	// Go must NOT have been hit — no failover when Ollama succeeds.
+	if goHits.Load() != 0 {
+		t.Fatalf("goHits = %d, want 0 (no failover to Go when Ollama succeeds)", goHits.Load())
+	}
+
+	// The key used must come from the "premium" pool, not an "ollama" pool.
+	wantAuth := "Bearer premium-ollama-key"
+	if ollamaAuth != wantAuth {
+		t.Fatalf("Ollama Authorization = %q, want %q (premium-pool key must be used)", ollamaAuth, wantAuth)
+	}
+
+	// Cross-check via the usage log: the recorded KeyID must be the premium
+	// key's ID and the recorded group must be "premium".
+	var logRow store.UsageLog
+	if err := store.DB().First(&logRow).Error; err != nil {
+		t.Fatalf("load usage log: %v", err)
+	}
+	if logRow.KeyID != premiumKey.ID {
+		t.Fatalf("usage log KeyID = %d, want %d (premium key)", logRow.KeyID, premiumKey.ID)
+	}
+	if logRow.Group != "premium" {
+		t.Fatalf("usage log group = %q, want %q", logRow.Group, "premium")
+	}
+}
+

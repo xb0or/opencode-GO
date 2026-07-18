@@ -932,3 +932,407 @@ func TestP1_3_SyncPreservesExistingPerUpstreamTargets(t *testing.T) {
 		t.Errorf("Ollama RealModel = %q, want preserved %q", ollamaT.RealModel, "shared-model:cloud")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// G2: Sync model reconciliation — disable models removed from all providers.
+// ---------------------------------------------------------------------------
+
+// seedRouteForG2 saves a model route row to the test DB and returns a cleanup
+// helper. Used by the G2 reconciliation tests.
+func seedRouteForG2(t *testing.T, route config.ModelRoute) {
+	t.Helper()
+	row := store.NewModelRouteRow(route)
+	if err := store.SaveModelRoute(&row); err != nil {
+		t.Fatalf("seed route %s: %v", route.ID, err)
+	}
+}
+
+// emptyOpenRouterServer returns an httptest server that returns an empty
+// OpenRouter model list.
+func emptyOpenRouterServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+}
+
+// failingServer returns an httptest server that always responds HTTP 502,
+// simulating a failed catalog fetch.
+func failingServer() *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+}
+
+// jsonServer returns an httptest server that responds with the given body.
+func jsonServer(body string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+// TestR4_G2_BothProvidersModelRemoved_Disabled verifies that a DB model not
+// present in either the Go or Ollama catalog (both fetches succeeding) is
+// disabled and its upstreams cleared.
+func TestR4_G2_BothProvidersModelRemoved_Disabled(t *testing.T) {
+	if err := store.InitForTest("file:g2_both_removed?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	seedRouteForG2(t, config.ModelRoute{
+		ID:        "legacy-model",
+		Name:      "Legacy Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "legacy-model",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	})
+
+	// Both providers succeed but return only other models, not legacy-model.
+	opencodeSrv := jsonServer(`{"object":"list","data":[{"id":"other-go"}]}`)
+	defer opencodeSrv.Close()
+	ollamaSrv := jsonServer(`{"models":[{"name":"other-ollama"}]}`)
+	defer ollamaSrv.Close()
+	orSrv := emptyOpenRouterServer()
+	defer orSrv.Close()
+
+	result, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: orSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if result.DisabledCount != 1 {
+		t.Fatalf("expected DisabledCount=1, got %d (%#v)", result.DisabledCount, result)
+	}
+
+	got, ok := config.LookupModel("legacy-model")
+	if !ok {
+		t.Fatal("legacy model missing from runtime config")
+	}
+	if got.IsEnabled() {
+		t.Fatalf("legacy model should be disabled, status=%v", got.Status)
+	}
+	// Verify the DB row has empty upstreams (the runtime layer re-populates
+	// Upstreams from Upstream via applyLocalModelDefaults, so we check the
+	// persisted row directly).
+	rows, err := store.LoadModelRoutes()
+	if err != nil {
+		t.Fatalf("load rows: %v", err)
+	}
+	for _, r := range rows {
+		if r.ID == "legacy-model" {
+			if r.UpstreamsJSON != "" {
+				t.Fatalf("legacy model DB upstreams should be empty, got %q", r.UpstreamsJSON)
+			}
+			if r.Status != config.ModelStatusDisabled {
+				t.Fatalf("legacy model DB status should be disabled(0), got %d", r.Status)
+			}
+		}
+	}
+}
+
+// TestR4_G2_GoFetchFails_PreserveOllama verifies that when the Go fetch fails,
+// Go membership is preserved even though the model is not in any catalog; only
+// Ollama (which succeeded but doesn't list the model) is removed.
+func TestR4_G2_GoFetchFails_PreserveOllama(t *testing.T) {
+	if err := store.InitForTest("file:g2_go_fail?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	seedRouteForG2(t, config.ModelRoute{
+		ID:        "legacy-model",
+		Name:      "Legacy Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "legacy-model",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	})
+
+	// Go fetch fails; Ollama succeeds but doesn't list legacy-model.
+	opencodeSrv := failingServer()
+	defer opencodeSrv.Close()
+	ollamaSrv := jsonServer(`{"models":[{"name":"other-ollama"}]}`)
+	defer ollamaSrv.Close()
+	orSrv := emptyOpenRouterServer()
+	defer orSrv.Close()
+
+	_, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: orSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	got, ok := config.LookupModel("legacy-model")
+	if !ok {
+		t.Fatal("legacy model missing from runtime config")
+	}
+	// Go preserved (fetch failed), Ollama removed → upstreams=[go].
+	if len(got.Upstreams) != 1 || got.Upstreams[0] != config.UpstreamGo {
+		t.Fatalf("expected upstreams=[go], got %v", got.Upstreams)
+	}
+	// Still enabled because at least one upstream remains.
+	if !got.IsEnabled() {
+		t.Fatalf("legacy model should remain enabled, status=%v", got.Status)
+	}
+}
+
+// TestR4_G2_BothFetchFail_PreserveAll verifies that when both fetches fail, an
+// absent-from-catalog model is left entirely untouched.
+func TestR4_G2_BothFetchFail_PreserveAll(t *testing.T) {
+	if err := store.InitForTest("file:g2_both_fail?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	seedRouteForG2(t, config.ModelRoute{
+		ID:        "legacy-model",
+		Name:      "Legacy Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "legacy-model",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	})
+
+	opencodeSrv := failingServer()
+	defer opencodeSrv.Close()
+	ollamaSrv := failingServer()
+	defer ollamaSrv.Close()
+	orSrv := emptyOpenRouterServer()
+	defer orSrv.Close()
+
+	result, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: orSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if result.DisabledCount != 0 {
+		t.Fatalf("expected DisabledCount=0, got %d", result.DisabledCount)
+	}
+
+	got, ok := config.LookupModel("legacy-model")
+	if !ok {
+		t.Fatal("legacy model missing from runtime config")
+	}
+	if !got.IsEnabled() {
+		t.Fatalf("legacy model should remain enabled, status=%v", got.Status)
+	}
+	if len(got.Upstreams) != 2 {
+		t.Fatalf("legacy model upstreams should be unchanged, got %v", got.Upstreams)
+	}
+}
+
+// TestR4_G2_AdminCustomizedUpstreams_Preserved verifies that when an admin has
+// customized the upstreams field, reconciliation does not modify upstreams and
+// therefore does not disable the route (upstreams remain non-empty).
+func TestR4_G2_AdminCustomizedUpstreams_Preserved(t *testing.T) {
+	if err := store.InitForTest("file:g2_custom_upstreams?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	seedRouteForG2(t, config.ModelRoute{
+		ID:               "legacy-model",
+		Name:             "Legacy Model",
+		Upstream:         config.UpstreamGo,
+		Upstreams:        []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:         config.ProtocolChat,
+		RealModel:        "legacy-model",
+		Group:            "go",
+		Status:           config.ModelStatusPtr(config.ModelStatusEnabled),
+		IsCustomized:     true,
+		CustomizedFields: []string{"upstreams"},
+	})
+
+	// Both providers succeed but don't list legacy-model.
+	opencodeSrv := jsonServer(`{"object":"list","data":[{"id":"other-go"}]}`)
+	defer opencodeSrv.Close()
+	ollamaSrv := jsonServer(`{"models":[{"name":"other-ollama"}]}`)
+	defer ollamaSrv.Close()
+	orSrv := emptyOpenRouterServer()
+	defer orSrv.Close()
+
+	result, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: orSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if result.DisabledCount != 0 {
+		t.Fatalf("expected DisabledCount=0, got %d", result.DisabledCount)
+	}
+
+	got, ok := config.LookupModel("legacy-model")
+	if !ok {
+		t.Fatal("legacy model missing from runtime config")
+	}
+	// Upstreams preserved (admin-customized).
+	if len(got.Upstreams) != 2 {
+		t.Fatalf("admin-customized upstreams should be preserved, got %v", got.Upstreams)
+	}
+	// Status NOT disabled because upstreams remain non-empty.
+	if !got.IsEnabled() {
+		t.Fatalf("legacy model should remain enabled (upstreams non-empty), status=%v", got.Status)
+	}
+}
+
+// TestR4_G2_AdminCustomizedStatus_Preserved verifies that when an admin has
+// customized the status field, reconciliation does not disable the route even
+// when all upstreams are removed.
+func TestR4_G2_AdminCustomizedStatus_Preserved(t *testing.T) {
+	if err := store.InitForTest("file:g2_custom_status?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	seedRouteForG2(t, config.ModelRoute{
+		ID:               "legacy-model",
+		Name:             "Legacy Model",
+		Upstream:         config.UpstreamGo,
+		Upstreams:        []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:         config.ProtocolChat,
+		RealModel:        "legacy-model",
+		Group:            "go",
+		Status:           config.ModelStatusPtr(config.ModelStatusEnabled),
+		IsCustomized:     true,
+		CustomizedFields: []string{"status"},
+	})
+
+	// Both providers succeed but don't list legacy-model → upstreams cleared,
+	// but status is admin-customized so must remain enabled.
+	opencodeSrv := jsonServer(`{"object":"list","data":[{"id":"other-go"}]}`)
+	defer opencodeSrv.Close()
+	ollamaSrv := jsonServer(`{"models":[{"name":"other-ollama"}]}`)
+	defer ollamaSrv.Close()
+	orSrv := emptyOpenRouterServer()
+	defer orSrv.Close()
+
+	result, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: orSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	})
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	// DisabledCount should not increment because status was admin-preserved.
+	if result.DisabledCount != 0 {
+		t.Fatalf("expected DisabledCount=0, got %d", result.DisabledCount)
+	}
+
+	got, ok := config.LookupModel("legacy-model")
+	if !ok {
+		t.Fatal("legacy model missing from runtime config")
+	}
+	// Upstreams cleared in the DB (not customized). The runtime layer
+	// re-populates Upstreams from Upstream, so verify the persisted row.
+	rows, err := store.LoadModelRoutes()
+	if err != nil {
+		t.Fatalf("load rows: %v", err)
+	}
+	for _, r := range rows {
+		if r.ID == "legacy-model" {
+			if r.UpstreamsJSON != "" {
+				t.Fatalf("upstreams should be cleared in DB, got %q", r.UpstreamsJSON)
+			}
+		}
+	}
+	// Status preserved as enabled (admin-customized).
+	if !got.IsEnabled() {
+		t.Fatalf("admin-customized status should be preserved (enabled), got %v", got.Status)
+	}
+}
+
+// TestR4_G2_DisabledModelNotInPublicList verifies that after a model is
+// disabled by reconciliation, it appears in AllModels() but NOT in
+// AllEnabledModels(), and IsEnabled() reports false.
+func TestR4_G2_DisabledModelNotInPublicList(t *testing.T) {
+	if err := store.InitForTest("file:g2_public_list?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+
+	seedRouteForG2(t, config.ModelRoute{
+		ID:        "legacy-model",
+		Name:      "Legacy Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "legacy-model",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	})
+
+	opencodeSrv := jsonServer(`{"object":"list","data":[{"id":"alive-model"}]}`)
+	defer opencodeSrv.Close()
+	ollamaSrv := jsonServer(`{"models":[{"name":"alive-model"}]}`)
+	defer ollamaSrv.Close()
+	orSrv := emptyOpenRouterServer()
+	defer orSrv.Close()
+
+	if _, err := Sync(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: orSrv.URL,
+		Now:                 func() time.Time { return time.Unix(100, 0) },
+	}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	// The disabled model should be present in AllModels() with IsEnabled()==false.
+	foundDisabled := false
+	for _, m := range config.AllModels() {
+		if m.ID == "legacy-model" {
+			if m.IsEnabled() {
+				t.Fatalf("legacy-model should be disabled in AllModels(), status=%v", m.Status)
+			}
+			foundDisabled = true
+			break
+		}
+	}
+	if !foundDisabled {
+		t.Fatal("legacy-model not found in AllModels()")
+	}
+
+	// The disabled model should NOT appear in AllEnabledModels().
+	for _, m := range config.AllEnabledModels() {
+		if m.ID == "legacy-model" {
+			t.Fatalf("legacy-model should not appear in AllEnabledModels(): %#v", m)
+		}
+	}
+	// Sanity: alive-model should be in AllEnabledModels().
+	foundAlive := false
+	for _, m := range config.AllEnabledModels() {
+		if m.ID == "alive-model" {
+			foundAlive = true
+			break
+		}
+	}
+	if !foundAlive {
+		t.Fatal("alive-model missing from AllEnabledModels()")
+	}
+}

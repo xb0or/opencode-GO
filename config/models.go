@@ -99,6 +99,34 @@ func (m ModelRoute) UpstreamGroup(u Upstream) string {
 	return string(u)
 }
 
+// ResolveUpstreamGroup is the single authoritative group resolver. It must
+// be called once by the outer failover loop and the result passed to every
+// downstream consumer (token permission, PickAttempts, Go/Ollama request
+// handlers, usage log, billing).
+//
+// Priority (highest first):
+//  1. Targets[upstream].Group — per-upstream explicit override
+//  2. UpstreamGroups[upstream] — per-upstream group mapping
+//  3. route.Group — legacy route-level group (backward compat for configs
+//     like {Upstream:"ollama", Group:"premium"})
+//  4. string(upstream) — default: upstream name as group
+func (m ModelRoute) ResolveUpstreamGroup(u Upstream) string {
+	if m.Targets != nil {
+		if t, ok := m.Targets[u]; ok && t.Group != "" {
+			return t.Group
+		}
+	}
+	if m.UpstreamGroups != nil {
+		if g, ok := m.UpstreamGroups[u]; ok && g != "" {
+			return g
+		}
+	}
+	if u == m.Upstream && m.Group != "" {
+		return m.Group
+	}
+	return string(u)
+}
+
 // TargetRealModel returns the real_model to use for the given upstream.
 // When a per-upstream Target exists with a non-empty RealModel, it takes
 // precedence. Otherwise, the route-level RealModel is used.

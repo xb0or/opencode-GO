@@ -36,6 +36,7 @@ type Result struct {
 	MatchedCount    int      `json:"matched_count"`
 	CreatedCount    int      `json:"created_count"`
 	UpdatedCount    int      `json:"updated_count"`
+	DisabledCount   int      `json:"disabled_count"`
 	TotalCount      int      `json:"total_count"`
 	Warnings        []string `json:"warnings,omitempty"`
 }
@@ -191,6 +192,18 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 	// --- Merge by model ID ---
 	merged := mergeModels(goModels, ollamaModels)
 
+	// Build catalog ID sets for authoritative reconciliation (G2).
+	// These sets let us determine, for models that exist in DB but are NOT
+	// in the merged catalog this run, whether each provider still serves them.
+	goCatalogIDs := make(map[string]bool)
+	for _, m := range goModels {
+		goCatalogIDs[strings.TrimSpace(m.ID)] = true
+	}
+	ollamaCatalogIDs := make(map[string]bool)
+	for _, m := range ollamaModels {
+		ollamaCatalogIDs[strings.TrimSpace(m.ID)] = true
+	}
+
 	// --- Load existing DB rows ---
 	existingRows, err := store.LoadModelRoutes()
 	if err != nil {
@@ -230,6 +243,61 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		}
 		if err := store.SaveModelRoute(&nextRow); err != nil {
 			return result, fmt.Errorf("save model route %s: %w", id, err)
+		}
+	}
+
+	// G2: Reconcile models that exist in DB but are NOT in the merged catalog.
+	// These are models that may have been decommissioned from all providers.
+	// Per-provider: if the provider's fetch succeeded and the model is not in
+	// its catalog, remove that provider. If all providers are removed, disable
+	// the route. Admin-customized upstreams/status are preserved.
+	for id, row := range existingByID {
+		if seen[id] {
+			continue // still in catalog, already handled above
+		}
+		route := store.ModelRouteFromRow(row)
+		upstreamsCustomized := config.IsModelFieldCustomized(route, "upstreams")
+		statusCustomized := config.IsModelFieldCustomized(route, "status")
+		// Skip entirely if admin customized both fields.
+		if upstreamsCustomized && statusCustomized {
+			continue
+		}
+		if !upstreamsCustomized {
+			var finalUpstreams []config.Upstream
+			for _, u := range route.Upstreams {
+				switch u {
+				case config.UpstreamGo:
+					// Keep Go unless its fetch succeeded and the model is
+					// absent from the Go catalog (authoritative removal).
+					if !goFetched || goCatalogIDs[id] {
+						finalUpstreams = append(finalUpstreams, u)
+					}
+				case config.UpstreamOllama:
+					if !ollamaFetched || ollamaCatalogIDs[id] {
+						finalUpstreams = append(finalUpstreams, u)
+					}
+				default:
+					// Unknown upstreams are preserved as-is.
+					finalUpstreams = append(finalUpstreams, u)
+				}
+			}
+			route.Upstreams = finalUpstreams
+		}
+		// Disable if no upstreams remain and status is not admin-customized.
+		if !statusCustomized && len(route.Upstreams) == 0 {
+			route.Status = config.ModelStatusPtr(config.ModelStatusDisabled)
+		}
+		nextRow := store.NewModelRouteRow(route)
+		nextRow.LastSyncedAt = &now
+		nextRow.CreatedAt = row.CreatedAt
+		if rowChanged(row, nextRow) {
+			if err := store.SaveModelRoute(&nextRow); err != nil {
+				return result, fmt.Errorf("save model route %s: %w", id, err)
+			}
+			if route.Status != nil && *route.Status == config.ModelStatusDisabled &&
+				!(row.Status == config.ModelStatusDisabled) {
+				result.DisabledCount++
+			}
 		}
 	}
 
@@ -636,6 +704,19 @@ func fallbackTags(route config.ModelRoute) []string {
 		tags = append(tags, "vision")
 	}
 	return config.NormalizeModelTags(tags)
+}
+
+// rowChanged reports whether the reconciled row differs from the existing row
+// in a way that requires a DB write. Only Status and UpstreamsJSON are compared
+// because the G2 reconciliation loop only modifies those fields.
+func rowChanged(old, new store.ModelRouteRow) bool {
+	if old.Status != new.Status {
+		return true
+	}
+	if old.UpstreamsJSON != new.UpstreamsJSON {
+		return true
+	}
+	return false
 }
 
 // upstreamFetchFailed returns true when the given upstream's catalog fetch
