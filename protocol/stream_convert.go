@@ -215,6 +215,20 @@ func StreamConvertIncremental(
 	if len(acc.Choices) > 0 {
 		reason = acc.Choices[0].FinishReason
 	}
+	// P0-1: a "failed" finish reason means the upstream Responses API
+	// reported a response.failed event. Route to onError (NOT onComplete)
+	// so no success terminal events (response.completed / [DONE] /
+	// finish_reason / message_stop) are emitted — the client detects the
+	// failure by the absence of those events.
+	if reason == "failed" {
+		if fw, ok := writer.(*firstEventWriter); ok && !fw.triggered {
+			// Stream never committed; surface the error so the caller can
+			// failover rather than committing a truncated 200.
+			return acc, fmt.Errorf("upstream response failed")
+		}
+		_ = emitter.onError(fmt.Errorf("upstream response failed"))
+		return acc, nil
+	}
 	if err := emitter.onComplete(reason); err != nil {
 		return acc, err
 	}
@@ -335,6 +349,14 @@ func mergeUsage(resp *IRResponse, u *IRUsage) {
 	if u.CacheCreationTokens > 0 {
 		resp.Usage.CacheCreationTokens = u.CacheCreationTokens
 	}
+	// P1-2: cross-protocol streams often deliver input_tokens (PromptTokens)
+	// and output_tokens (CompletionTokens) in SEPARATE events, neither of
+	// which carries total_tokens. Recalculate total_tokens from the parts
+	// when it was not explicitly provided so the final usage report is not
+	// missing the total.
+	if resp.Usage.TotalTokens == 0 && resp.Usage.PromptTokens > 0 && resp.Usage.CompletionTokens > 0 {
+		resp.Usage.TotalTokens = resp.Usage.PromptTokens + resp.Usage.CompletionTokens
+	}
 }
 
 // mergeUsageInto merges src into dst (in-place), copying only non-zero fields.
@@ -359,6 +381,12 @@ func mergeUsageInto(dst, src *IRUsage) {
 	}
 	if src.CacheCreationTokens > 0 {
 		dst.CacheCreationTokens = src.CacheCreationTokens
+	}
+	// P1-2: recalculate total_tokens when it was not explicitly provided
+	// but both prompt and completion counts are now available (they may
+	// arrive in separate events in cross-protocol streams).
+	if dst.TotalTokens == 0 && dst.PromptTokens > 0 && dst.CompletionTokens > 0 {
+		dst.TotalTokens = dst.PromptTokens + dst.CompletionTokens
 	}
 }
 
@@ -1184,19 +1212,39 @@ func (e *responsesEmitter) onComplete(reason string) error {
 		}
 	}
 	mapped := mapFinishReasonToResponses(reason)
-	_ = mapped // status carried by the response.completed event type itself
 	resp := &IRResponse{ID: e.id, Model: e.model}
 	if e.usage != nil {
 		resp.Usage = e.usage
 	}
+	// P0-1: emit the correct terminal event based on the mapped reason.
+	// - "incomplete" (from upstream "length" / response.incomplete) must
+	//   emit response.incomplete, NOT response.completed, and must NOT
+	//   emit [DONE] (the stream is terminated by the incomplete event
+	//   itself).
+	// - "failed" should not reach here (it is routed to onError by
+	//   StreamConvertIncremental), but handle it defensively.
+	// - everything else (including "completed") emits response.completed
+	//   followed by [DONE] (current behavior).
+	eventType := "response.completed"
+	switch mapped {
+	case "incomplete":
+		eventType = "response.incomplete"
+	case "failed":
+		eventType = "response.failed"
+	}
 	if err := e.emit(&IRStreamEvent{
-		Type:     "response.completed",
+		Type:     eventType,
 		Response: resp,
 	}); err != nil {
 		return err
 	}
-	if err := e.enc.WriteDone(); err != nil {
-		return err
+	// Only emit [DONE] for a fully successful completion. Incomplete and
+	// failed terminal events end the stream on their own; emitting [DONE]
+	// would make them look like a successful completion to some clients.
+	if eventType == "response.completed" {
+		if err := e.enc.WriteDone(); err != nil {
+			return err
+		}
 	}
 	if e.flush != nil {
 		e.flush()

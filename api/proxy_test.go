@@ -5447,3 +5447,159 @@ func TestR4_G1_OllamaUsesPreResolvedGroup(t *testing.T) {
 	}
 }
 
+
+// ---------------------------------------------------------------------------
+// Round-5 audit verification tests (API-level).
+// ---------------------------------------------------------------------------
+
+// TestR5_P1_1_RouteGroupNotMutated verifies that the failover loop does NOT
+// mutate the original route.Group. When Go fails and Ollama has a custom
+// UpstreamGroups mapping, Ollama must use its own group, not the "go" group
+// that was resolved for the first iteration.
+func TestR5_P1_1_RouteGroupNotMutated(t *testing.T) {
+	if err := store.InitForTest("file:r5_p1_1_route_group_not_mutated?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	// Go upstream — returns 500 to trigger failover
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"go down","type":"server_error"}}`))
+	}))
+	defer goSrv.Close()
+
+	// Ollama upstream — succeeds. Records the Authorization header.
+	var ollamaAuth string
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ollamaAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer ollamaSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	oldOllamaURL := cfg.OllamaBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	cfg.OllamaBaseURL = ollamaSrv.URL
+	defer func() {
+		cfg.GoBaseURL = oldGoURL
+		cfg.OllamaBaseURL = oldOllamaURL
+	}()
+
+	// Model with UpstreamGroups mapping: ollama → "premium-ollama"
+	config.RegisterModel(config.ModelRoute{
+		ID:             "r5-p1-1-model",
+		Name:           "R5 P1-1 Model",
+		Upstream:       config.UpstreamGo,
+		Upstreams:      []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:       config.ProtocolChat,
+		RealModel:      "m",
+		Group:          "go",
+		UpstreamGroups: map[config.Upstream]string{config.UpstreamOllama: "premium-ollama"},
+	})
+	defer config.RemoveModel("r5-p1-1-model")
+
+	tok, err := pool.CreateToken("r5-p1-1-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	// Only premium-ollama group has a key — no "go" group key.
+	if err := store.DB().Create(&store.Key{
+		Value: "premium-ollama-key", Group: "premium-ollama", Label: "ollama-test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create ollama key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"r5-p1-1-model","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := newCloseNotifyRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if ollamaAuth != "Bearer premium-ollama-key" {
+		t.Errorf("P1-1 FAIL: Ollama auth = %q, want 'Bearer premium-ollama-key' (group pollution would use go-key or fail)", ollamaAuth)
+	}
+}
+
+// TestR5_P1_3_HTTP408TriggersUpstreamFailover verifies that a 408 response
+// from the first upstream triggers failover to the second upstream.
+func TestR5_P1_3_HTTP408TriggersUpstreamFailover(t *testing.T) {
+	if err := store.InitForTest("file:r5_p1_3_408_failover?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	// Go upstream — returns 408 Request Timeout
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusRequestTimeout)
+		_, _ = w.Write([]byte(`{"error":{"message":"request timeout","type":"timeout"}}`))
+	}))
+	defer goSrv.Close()
+
+	// Ollama upstream — succeeds
+	ollamaHit := false
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ollamaHit = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer ollamaSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	oldOllamaURL := cfg.OllamaBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	cfg.OllamaBaseURL = ollamaSrv.URL
+	defer func() {
+		cfg.GoBaseURL = oldGoURL
+		cfg.OllamaBaseURL = oldOllamaURL
+	}()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r5-p1-3-model",
+		Name:      "R5 P1-3 Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("r5-p1-3-model")
+
+	tok, err := pool.CreateToken("r5-p1-3-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "go-key", Group: "go", Label: "go-test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "ollama-key", Group: "ollama", Label: "ollama-test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create ollama key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"r5-p1-3-model","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := newCloseNotifyRecorder()
+	r.ServeHTTP(w, req)
+
+	if !ollamaHit {
+		t.Errorf("P1-3 FAIL: Ollama was not hit — 408 did not trigger upstream failover. Status=%d, body=%s", w.Code, w.Body.String())
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("P1-3 FAIL: status = %d, want 200 (Ollama should succeed); body=%s", w.Code, w.Body.String())
+	}
+}

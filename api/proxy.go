@@ -183,7 +183,11 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			}
 		}
 		attemptedAny = true
-		route.Group = upstreamGroup
+		// P1-1: do NOT mutate the original route — create a per-iteration
+		// copy so the resolved group for one upstream does not leak into
+		// the next iteration's ResolveUpstreamGroup call.
+		routeCopy := route
+		routeCopy.Group = upstreamGroup
 
 		// --------------- Ollama upstream ---------------
 		if currentUpstream == config.UpstreamOllama {
@@ -193,7 +197,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			// to Chat, then the helper would try to convert again).
 			// G1: upstreamGroup is pre-resolved by the outer loop and passed
 			// in so Ollama does NOT re-resolve via TargetGroup.
-			result := proxyOllamaRequest(c, p, route, inbound, originalBody, head, start, upstreamGroup)
+			result := proxyOllamaRequest(c, p, routeCopy, inbound, originalBody, head, start, upstreamGroup)
 			if result.Terminal {
 				// Client disconnected — stop immediately.
 				return
@@ -209,7 +213,7 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		}
 
 		// --------------- Go upstream ---------------
-		result := proxyGoUpstream(c, p, route, inbound, head, originalBody, start, upstreamPath, currentUpstream, ui, upstreamsToTry, upstreamGroup)
+		result := proxyGoUpstream(c, p, routeCopy, inbound, head, originalBody, start, upstreamPath, currentUpstream, ui, upstreamsToTry, upstreamGroup)
 		if result.Terminal {
 			return
 		}
@@ -386,15 +390,17 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			}
 		}
 
-		// P0-4: ALL remaining HTTP >= 400 responses (those not already
-		// handled by shouldRetryWithNextKey/shouldMarkUpstreamFailure, i.e.
-		// 400/404/405/408/409/410/412/413/414/415/416/422/423/424/425/426/
-		// 428/431/451 etc.) must NOT enter the cross-protocol streaming
-		// path (which assumes a 2xx SSE response). Preserve the original
-		// status code and error body. These are non-retryable: the request
-		// itself is invalid or the upstream is in a state where switching
-		// keys/providers will not help. (Retryable errors like 401/402/403/
-		// 429/5xx were already handled above.)
+		// P0-4 + P1-3: ALL remaining HTTP >= 400 responses must NOT enter
+		// the cross-protocol streaming path. But we distinguish two retry
+		// strategies:
+		//   - 408 Request Timeout: the upstream timed out. Switching to the
+		//     NEXT upstream may help, but do NOT retry the same key.
+		//   - All other 4xx (400/404/405/409/410/412/413/414/415/416/422/
+		//     423/424/425/426/428/431/451 etc.): non-retryable. The request
+		//     itself is invalid or the upstream state won't change by
+		//     switching keys/providers.
+		// (Retryable errors like 401/402/403/429/5xx were already handled
+		// above by shouldRetryWithNextKey/shouldMarkUpstreamFailure.)
 		if resp.StatusCode >= 400 {
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 			_ = resp.Body.Close()
@@ -404,11 +410,14 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			} else {
 				markAndLog(c, p, key, route, inbound, resp.StatusCode, start, head.Stream, nil, summarizeUpstreamError(resp.StatusCode, body))
 			}
+			// P1-3: 408 is upstream-retryable (try the next upstream) but
+			// not key-retryable (don't re-use the same key).
+			retryable := resp.StatusCode == http.StatusRequestTimeout && ui+1 < len(upstreamsToTry)
 			return attemptResult{
 				Response:  resp,
 				Status:    resp.StatusCode,
 				Err:       fmt.Errorf("upstream returned %d", resp.StatusCode),
-				Retryable: false,
+				Retryable: retryable,
 			}
 		}
 

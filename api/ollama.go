@@ -221,18 +221,18 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 		}
 	}
 
-	// P0-4: ALL remaining HTTP >= 400 responses (those not already handled
-	// by shouldRetryWithNextKey/shouldMarkUpstreamFailure) must NOT enter
-	// the cross-protocol streaming path. Preserve the original status.
+	// P0-4 + P1-3: ALL remaining HTTP >= 400 must NOT enter the streaming
+	// path. 408 is upstream-retryable (next upstream), other 4xx are not.
 	if resp.StatusCode >= 400 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyRead))
 		_ = resp.Body.Close()
 		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, stream, nil, summarizeUpstreamError(resp.StatusCode, errBody))
+		retryable := resp.StatusCode == http.StatusRequestTimeout
 		return attemptResult{
 			Response:  resp,
 			Status:    resp.StatusCode,
 			Err:       fmt.Errorf("upstream returned %d", resp.StatusCode),
-			Retryable: false,
+			Retryable: retryable,
 		}
 	}
 

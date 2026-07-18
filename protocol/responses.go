@@ -385,9 +385,45 @@ func DecodeResponsesStreamEvent(data []byte) (*IRStreamEvent, error) {
 		// Treat as terminal failure so P0-1 marks the stream ended.
 		ir.Choice = &IRChoice{Index: 0, FinishReason: "failed"}
 	default:
-		// P0-2: unknown event type → error rather than silently emitting
-		// an empty IR event that would trigger onStart.
-		return nil, fmt.Errorf("responses stream: unknown event type %q", ev.Type)
+		// P0-2: The Responses API has many legitimate lifecycle events that
+		// the converter does not need to handle explicitly but must NOT
+		// cause a fatal decoder error. Examples:
+		//   response.in_progress, response.queued,
+		//   response.output_item.added (for non-text items like
+		//     annotations, refusals, etc. — text items are handled above),
+		//   response.output_text.done, response.reasoning_text.done,
+		//   response.reasoning.done / response.reasoning_content.done,
+		//   response.content_part.added / response.content_part.done,
+		//   response.code_interpreter_call_code / _outputs,
+		//   response.file_search_call_completed,
+		//   response.web_search_call_completed,
+		//   response.mcp_call_*, response.annotation.*,
+		//   response.refusal.*, response.custom_tool_call.*,
+		//   response.ocr.*, etc.
+		//
+		// Return an IRStreamEvent with the type set but no meaningful
+		// content (no Choice delta, no ContentDelta, no FinishReason).
+		// isMeaningfulEvent returns false so onStart is NOT triggered, and
+		// normalize sees no content/delta/finish so it is a no-op.
+		//
+		// Truly unknown error-shaped payloads ({"error":...}) are already
+		// caught earlier by streamErrorPayload, and malformed JSON is
+		// caught by the unmarshal, so the default case is safe to pass
+		// through. Still extract Response metadata if present — some
+		// lifecycle events (e.g. response.in_progress) carry the response
+		// object with usage/id/model that may be useful.
+		if ev.Response != nil {
+			ir.Response = &IRResponse{ID: ev.Response.ID, Model: ev.Response.Model}
+			if ev.Response.Usage != nil {
+				ir.Response.Usage = &IRUsage{
+					PromptTokens:     ev.Response.Usage.InputTokens,
+					CompletionTokens: ev.Response.Usage.OutputTokens,
+					TotalTokens:      ev.Response.Usage.TotalTokens,
+					CacheReadTokens:  respCacheReadTokens(ev.Response.Usage),
+					ReasoningTokens:  respReasoningTokens(ev.Response.Usage),
+				}
+			}
+		}
 	}
 	return ir, nil
 }
@@ -568,7 +604,30 @@ func EncodeResponsesStreamEvent(ev *IRStreamEvent) ([]byte, error) {
 		return json.Marshal(RespStreamEvent{Type: "response.completed", Response: resp})
 
 	case "response.incomplete":
-		return json.Marshal(RespStreamEvent{Type: "response.incomplete"})
+		// P0-1: carry the response object (id/model/usage) so the client
+		// receives final metadata with the incomplete terminal event.
+		var resp *RespResponse
+		if ev.Response != nil {
+			resp = &RespResponse{ID: ev.Response.ID, Object: "response", Model: ev.Response.Model, Status: "incomplete"}
+			if ev.Response.Usage != nil {
+				resp.Usage = &RespUsage{
+					InputTokens:         ev.Response.Usage.PromptTokens,
+					OutputTokens:        ev.Response.Usage.CompletionTokens,
+					TotalTokens:         ev.Response.Usage.TotalTokens,
+					InputTokensDetails:  respUsageDetailsFromIR(ev.Response.Usage, true),
+					OutputTokensDetails: respUsageDetailsFromIR(ev.Response.Usage, false),
+				}
+			}
+		}
+		return json.Marshal(RespStreamEvent{Type: "response.incomplete", Response: resp})
+	case "response.failed":
+		// P0-1: defensive — failed is normally routed to onError, but if
+		// it reaches the encoder carry the response metadata.
+		var resp *RespResponse
+		if ev.Response != nil {
+			resp = &RespResponse{ID: ev.Response.ID, Object: "response", Model: ev.Response.Model}
+		}
+		return json.Marshal(RespStreamEvent{Type: "response.failed", Response: resp})
 	}
 	return json.Marshal(RespStreamEvent{Type: ev.Type})
 }

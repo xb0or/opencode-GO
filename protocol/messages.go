@@ -199,7 +199,10 @@ func DecodeMessagesResponse(data []byte) (*IRResponse, error) {
 		ir.Usage = &IRUsage{
 			PromptTokens:        resp.Usage.InputTokens,
 			CompletionTokens:    resp.Usage.OutputTokens,
-			TotalTokens:         resp.Usage.InputTokens + resp.Usage.OutputTokens,
+			// P1-2: do NOT pre-compute TotalTokens here — input and output
+			// tokens arrive in separate events (message_start vs
+			// message_delta). mergeUsage will recalculate TotalTokens from
+			// the accumulated parts when it is still zero.
 			CacheReadTokens:     resp.Usage.CacheReadTokens,
 			CacheCreationTokens: resp.Usage.CacheCreationTokens,
 			ReasoningTokens:     resp.Usage.ReasoningTokens,
@@ -283,7 +286,9 @@ func DecodeMessagesStreamEvent(data []byte) (*IRStreamEvent, error) {
 				ir.Response.Usage = &IRUsage{
 					PromptTokens:        ev.Message.Usage.InputTokens,
 					CompletionTokens:    ev.Message.Usage.OutputTokens,
-					TotalTokens:         ev.Message.Usage.InputTokens + ev.Message.Usage.OutputTokens,
+					// P1-2: do NOT pre-compute TotalTokens — output_tokens
+					// arrives later in message_delta. mergeUsage recalculates
+					// TotalTokens from the accumulated parts when it is zero.
 					CacheReadTokens:     ev.Message.Usage.CacheReadTokens,
 					CacheCreationTokens: ev.Message.Usage.CacheCreationTokens,
 				}
