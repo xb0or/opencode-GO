@@ -113,7 +113,7 @@ func proxySameProtocolSSEBuffered(c *gin.Context, resp *http.Response,
 	p *pool.Picker, key *store.Key, route config.ModelRoute, inbound config.Protocol,
 	start time.Time, body []byte) responseResult {
 
-	_, valid, preReadErr := findFirstValidSSEData(body)
+	_, valid, preReadErr := findFirstValidContentSSEData(body, inbound)
 	if !valid {
 		markKeyFailure(p, key, http.StatusBadGateway, body)
 		errMsg := "upstream returned 200 but no valid SSE data before connection close"
@@ -160,7 +160,7 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	// by readFirstSSEEvent stay in this bufReader for the subsequent
 	// io.Copy — no data is lost.
 	bufReader := bufio.NewReaderSize(resp.Body, maxSSERead)
-	firstEvent, valid, preReadErr := readFirstSSEEvent(bufReader)
+	firstEvent, valid, preReadErr := readFirstContentSSEEvent(bufReader, inbound)
 	if !valid {
 		_ = resp.Body.Close()
 		markKeyFailure(p, key, http.StatusBadGateway, nil)
@@ -170,7 +170,7 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 		}
 		markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true, nil, errMsg)
 		return responseResult{
-			Err:       fmt.Errorf("no valid SSE event received"),
+			Err:       fmt.Errorf("no valid SSE event received: %s", errMsg),
 			Retryable: true,
 		}
 	}
@@ -450,6 +450,125 @@ func readFirstSSEEvent(r *bufio.Reader) ([]byte, bool, error) {
 		}
 	}
 	return nil, false, nil
+}
+
+// readFirstContentSSEEvent wraps readFirstSSEEvent with Responses-protocol
+// awareness. For Responses streams, pure lifecycle events
+// (response.created/response.in_progress/response.queued) do NOT count as
+// "valid first events" — they carry no content and must not trigger HTTP 200
+// commit. We keep reading until we find either a content event or a terminal
+// failure event (response.failed/response.incomplete). If a failure terminal
+// arrives before any content, valid=false and the caller can failover.
+//
+// For non-Responses protocols, behaviour is identical to readFirstSSEEvent.
+func readFirstContentSSEEvent(r *bufio.Reader, inbound config.Protocol) ([]byte, bool, error) {
+	if inbound != config.ProtocolResponses {
+		return readFirstSSEEvent(r)
+	}
+	// Responses: accumulate lifecycle events but keep scanning for content.
+	var accumulated bytes.Buffer
+	for {
+		event, valid, err := readFirstSSEEvent(r)
+		if err != nil {
+			return nil, false, err
+		}
+		if !valid {
+			return nil, false, nil
+		}
+		// Parse the event type from the data: line.
+		etype := sseEventType(event)
+		switch etype {
+		case "response.failed", "response.incomplete":
+			// Failure terminal before any content — do NOT commit 200.
+			return nil, false, fmt.Errorf("upstream responses stream failed: %s", etype)
+		case "response.created", "response.in_progress", "response.queued":
+			// Pure lifecycle event — keep scanning.
+			accumulated.Write(event)
+			continue
+		default:
+			// Content event (or any other type) — this is a valid commit
+			// point. Return accumulated lifecycle events + this event.
+			accumulated.Write(event)
+			return accumulated.Bytes(), true, nil
+		}
+	}
+}
+
+// sseEventType extracts the "type" field from an SSE event's data: line.
+// Returns "" if the event has no type field or is not JSON.
+func sseEventType(event []byte) string {
+	lines := bytes.Split(event, []byte("\n"))
+	for _, line := range lines {
+		trimmed := bytes.TrimSpace(line)
+		if !bytes.HasPrefix(trimmed, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		// Parse JSON to extract type.
+		var v struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(payload, &v) == nil {
+			return v.Type
+		}
+	}
+	return ""
+}
+
+// findFirstValidContentSSEData wraps findFirstValidSSEData with Responses-
+// protocol awareness, mirroring readFirstContentSSEEvent for the buffered
+// path. For Responses streams, if the first valid data event is a pure
+// lifecycle event (response.created/etc.) and the stream ends without any
+// content event or with a failure terminal, valid=false.
+func findFirstValidContentSSEData(body []byte, inbound config.Protocol) (int, bool, error) {
+	if inbound != config.ProtocolResponses {
+		return findFirstValidSSEData(body)
+	}
+	// Responses: scan all data: lines for a content event or failure terminal.
+	lines := strings.Split(string(body), "\n")
+	offset := 0
+	hasContent := false
+	hasFailure := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			offset += len(line) + 1
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if len(payload) == 0 || payload == "[DONE]" {
+			offset += len(line) + 1
+			continue
+		}
+		var v struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal([]byte(payload), &v) == nil {
+			switch v.Type {
+			case "response.failed", "response.incomplete":
+				hasFailure = true
+			case "response.created", "response.in_progress", "response.queued":
+				// lifecycle — skip
+			default:
+				hasContent = true
+			}
+		} else {
+			// Non-JSON data — treat as content.
+			hasContent = true
+		}
+		offset += len(line) + 1
+	}
+	if hasFailure && !hasContent {
+		return 0, false, fmt.Errorf("upstream responses stream failed: no content before terminal")
+	}
+	if !hasContent {
+		return 0, false, nil
+	}
+	// Has content — delegate to the original to find the offset.
+	return findFirstValidSSEData(body)
 }
 
 // errClientWriteAfterCommit is returned by onFirstEvent when HTTP 200 has

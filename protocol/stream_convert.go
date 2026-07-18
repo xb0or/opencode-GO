@@ -182,6 +182,18 @@ func StreamConvertIncremental(
 
 		// Finish reason.
 		if ev.Choice != nil && ev.Choice.FinishReason != "" {
+			// P0-2 (round-7): a "failed" finish reason means the upstream
+			// Responses API reported response.failed. Intercept BEFORE
+			// calling emitter.onFinish — onFinish would write a terminal
+			// chunk (e.g. Chat finish_reason) to the output, which would
+			// trigger onFirstEvent and commit HTTP 200 prematurely,
+			// blocking failover. Return the sentinel immediately so the
+			// caller can failover (if uncommitted) or mark the key as
+			// failed (if already committed) without emitting any content.
+			if ev.Choice.FinishReason == "failed" {
+				acc.setFinishReason("failed")
+				return fmt.Errorf("%w: response.failed terminal in normalize", ErrUpstreamResponseFailed)
+			}
 			acc.setFinishReason(ev.Choice.FinishReason)
 			if err := emitter.onFinish(ev.Choice.FinishReason); err != nil {
 				return err

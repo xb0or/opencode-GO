@@ -267,6 +267,10 @@ func TestR6_P0_1_DoneWithoutTerminalReturnsError(t *testing.T) {
 // TestR6_P0_2_ResponseFailedReturnsError verifies that a response.failed
 // event causes StreamConvertIncremental to return ErrUpstreamResponseFailed,
 // not nil. The caller must NOT call MarkSuccess.
+//
+// Round-7 additional assertions:
+//   - output must NOT contain ANY finish_reason (not just "stop")
+//   - failure-only stream (no content) must NOT trigger onFirstEvent
 func TestR6_P0_2_ResponseFailedReturnsError(t *testing.T) {
 	upstream := strings.Join([]string{
 		`data: {"type":"response.created","response":{"id":"resp_1","model":"m"}}`,
@@ -287,11 +291,47 @@ func TestR6_P0_2_ResponseFailedReturnsError(t *testing.T) {
 	if !errors.Is(err, ErrUpstreamResponseFailed) {
 		t.Errorf("R6 P0-2 FAIL: error should wrap ErrUpstreamResponseFailed, got: %v", err)
 	}
-	// Must NOT contain [DONE] or success finish_reason.
+	// Must NOT contain [DONE] or ANY finish_reason.
 	if strings.Contains(output, "[DONE]") {
 		t.Errorf("R6 P0-2 FAIL: output contains [DONE] for failed response:\n%s", output)
 	}
-	if strings.Contains(output, `"finish_reason":"stop"`) {
-		t.Errorf("R6 P0-2 FAIL: output contains finish_reason=stop for failed response:\n%s", output)
+	if strings.Contains(output, "finish_reason") {
+		t.Errorf("R6 P0-2 FAIL: output contains finish_reason for failed response (should have none):\n%s", output)
+	}
+}
+
+// TestR6_P0_2_FailureOnlyNoCommit verifies that a failure-only stream
+// (response.created + response.failed, NO content delta) does NOT trigger
+// onFirstEvent — the gateway must not commit HTTP 200 for a stream that
+// only carries a failure terminal.
+func TestR6_P0_2_FailureOnlyNoCommit(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"m"}}`,
+		``,
+		`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"message":"overloaded"}}}`,
+		``,
+	}, "\n")
+
+	onFirstCalled := false
+	_, err, dst := runConvert(t, config.ProtocolResponses, config.ProtocolChat, upstream, func() error {
+		onFirstCalled = true
+		return nil
+	})
+	output := dst.String()
+
+	if err == nil {
+		t.Fatalf("R6 P0-2 FAIL: expected error for failure-only stream, got nil. output=%s", output)
+	}
+	if !errors.Is(err, ErrUpstreamResponseFailed) {
+		t.Errorf("R6 P0-2 FAIL: error should wrap ErrUpstreamResponseFailed, got: %v", err)
+	}
+	if onFirstCalled {
+		t.Errorf("R6 P0-2 FAIL: onFirstEvent was triggered for a failure-only stream (would commit HTTP 200). output=%s", output)
+	}
+	if strings.Contains(output, "finish_reason") {
+		t.Errorf("R6 P0-2 FAIL: output contains finish_reason for failure-only stream:\n%s", output)
+	}
+	if strings.Contains(output, "[DONE]") {
+		t.Errorf("R6 P0-2 FAIL: output contains [DONE] for failure-only stream:\n%s", output)
 	}
 }

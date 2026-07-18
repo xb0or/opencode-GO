@@ -5603,3 +5603,97 @@ func TestR5_P1_3_HTTP408TriggersUpstreamFailover(t *testing.T) {
 		t.Errorf("P1-3 FAIL: status = %d, want 200 (Ollama should succeed); body=%s", w.Code, w.Body.String())
 	}
 }
+
+// TestR6_P0_2_ResponseFailedTriggersFailover verifies that when the Go
+// upstream returns a Responses stream containing response.failed (not
+// response.completed), the gateway marks the key as failed and fails over
+// to the second upstream (Ollama). The client must NOT receive a 200 with
+// finish_reason:"failed".
+func TestR6_P0_2_ResponseFailedTriggersFailover(t *testing.T) {
+	if err := store.InitForTest("file:r6_p0_2_response_failed_failover?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	// Go upstream — returns 200 with SSE stream containing response.failed
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fl := w.(http.Flusher)
+		fl.Flush()
+		// response.created then response.failed — NO response.completed
+		fmt.Fprintf(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\"}}\n\n")
+		fl.Flush()
+		fmt.Fprintf(w, "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_1\",\"status\":\"failed\",\"error\":{\"message\":\"overloaded\"}}}\n\n")
+		fl.Flush()
+	}))
+	defer goSrv.Close()
+
+	// Ollama upstream — succeeds with a normal Chat completion
+	ollamaHit := false
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ollamaHit = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer ollamaSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	oldOllamaURL := cfg.OllamaBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	cfg.OllamaBaseURL = ollamaSrv.URL
+	defer func() {
+		cfg.GoBaseURL = oldGoURL
+		cfg.OllamaBaseURL = oldOllamaURL
+	}()
+
+	// Inbound = Responses, Go upstream speaks Responses (same protocol)
+	config.RegisterModel(config.ModelRoute{
+		ID:        "r6-p0-2-model",
+		Name:      "R6 P0-2 Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolResponses,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("r6-p0-2-model")
+
+	tok, err := pool.CreateToken("r6-p0-2-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "go-key", Group: "go", Label: "go-test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "ollama-key", Group: "ollama", Label: "ollama-test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create ollama key: %v", err)
+	}
+
+	r := NewRouter(pool.NewPicker())
+	// Non-streaming request (stream=false) to force full body read
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses",
+		bytes.NewBufferString(`{"model":"r6-p0-2-model","input":"hi","stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	w := newCloseNotifyRecorder()
+	r.ServeHTTP(w, req)
+
+	body := w.Body.String()
+
+	// Ollama must have been hit (failover occurred)
+	if !ollamaHit {
+		t.Errorf("R6 P0-2 FAIL: Ollama was not hit — response.failed did not trigger failover. Status=%d, body=%s", w.Code, body)
+	}
+
+	// The client must NOT receive finish_reason:"failed"
+	if strings.Contains(body, "finish_reason") && strings.Contains(body, "failed") {
+		t.Errorf("R6 P0-2 FAIL: client received finish_reason=failed in body:\n%s", body)
+	}
+}
