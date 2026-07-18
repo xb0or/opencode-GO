@@ -32,11 +32,15 @@ func ResponsesStreamDecoder(r io.Reader, onEvent func(*IRStreamEvent) error) err
 			continue
 		}
 		if bytes.Equal(payload, []byte("[DONE]")) {
-			// Responses streams may include a [DONE] sentinel after
-			// response.completed; it is not itself a terminal event for the
-			// purposes of P0-1 (response.completed already marked the stream
-			// complete), but we accept it as a clean terminator if seen.
-			terminalSeen = true
+			// P0-1 (round-6): [DONE] is a clean terminator ONLY when a real
+			// terminal event (response.completed/incomplete/failed) was
+			// already seen. If [DONE] arrives without a preceding terminal
+			// event, the upstream stream was truncated — return
+			// io.ErrUnexpectedEOF so the caller does NOT synthesize a fake
+			// success completion.
+			if !terminalSeen {
+				return io.ErrUnexpectedEOF
+			}
 			return nil
 		}
 		ev, err := DecodeResponsesStreamEvent(payload)

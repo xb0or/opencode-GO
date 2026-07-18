@@ -40,6 +40,14 @@ import (
 // no bytes have been written to the client yet.
 var ErrStreamConvertInvalid = errors.New("stream: upstream SSE could not be decoded")
 
+// ErrUpstreamResponseFailed indicates the upstream Responses API sent a
+// response.failed event (or an equivalent failure terminal). The stream was
+// syntactically valid but the upstream reported a logical failure. Callers
+// must NOT treat this as a success: mark the key/upstream as failed even if
+// HTTP 200 was already committed to the client. When the response is not yet
+// committed, the caller may failover to the next upstream.
+var ErrUpstreamResponseFailed = errors.New("upstream response failed")
+
 // StreamConvertIncremental incrementally converts an upstream SSE stream to
 // the target protocol. It returns the accumulated IRResponse (for usage
 // logging) and an error if the stream could not be processed.
@@ -215,19 +223,21 @@ func StreamConvertIncremental(
 	if len(acc.Choices) > 0 {
 		reason = acc.Choices[0].FinishReason
 	}
-	// P0-1: a "failed" finish reason means the upstream Responses API
-	// reported a response.failed event. Route to onError (NOT onComplete)
-	// so no success terminal events (response.completed / [DONE] /
-	// finish_reason / message_stop) are emitted — the client detects the
-	// failure by the absence of those events.
+	// P0-1/P0-2 (round-6): a "failed" finish reason means the upstream
+	// Responses API reported a response.failed event. ALWAYS return
+	// ErrUpstreamResponseFailed so the caller can mark the key/upstream
+	// as failed — even when HTTP 200 was already committed, the upstream
+	// reported a logical failure and must NOT be counted as a success.
+	// When the response is not yet committed, the caller can failover.
 	if reason == "failed" {
 		if fw, ok := writer.(*firstEventWriter); ok && !fw.triggered {
-			// Stream never committed; surface the error so the caller can
-			// failover rather than committing a truncated 200.
-			return acc, fmt.Errorf("upstream response failed")
+			// Stream never committed; surface the error for failover.
+			return acc, fmt.Errorf("%w: response.failed terminal", ErrUpstreamResponseFailed)
 		}
-		_ = emitter.onError(fmt.Errorf("upstream response failed"))
-		return acc, nil
+		// Already committed: truncate the client stream via onError, but
+		// still return the sentinel so the caller marks the key as failed.
+		_ = emitter.onError(ErrUpstreamResponseFailed)
+		return acc, fmt.Errorf("%w: response.failed terminal after commit", ErrUpstreamResponseFailed)
 	}
 	if err := emitter.onComplete(reason); err != nil {
 		return acc, err

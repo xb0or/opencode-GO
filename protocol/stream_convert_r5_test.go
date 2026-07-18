@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -230,5 +231,67 @@ func TestR5_P1_2_ChatToMessagesUsageFields(t *testing.T) {
 	}
 	if foundOutput != 20 {
 		t.Errorf("P1-2 FAIL: Messages output_tokens=%d, want 20", foundOutput)
+	}
+}
+// ---------------------------------------------------------------------------
+// Round-6 audit verification tests.
+// ---------------------------------------------------------------------------
+
+// TestR6_P0_1_DoneWithoutTerminalReturnsError verifies that a Responses
+// stream consisting of only response.created + [DONE] (no
+// response.completed/incomplete/failed) returns an error, not nil.
+func TestR6_P0_1_DoneWithoutTerminalReturnsError(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"m"}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	resp, err, dst := runConvert(t, config.ProtocolResponses, config.ProtocolChat, upstream, nil)
+	output := dst.String()
+
+	// Must return an error (ErrUnexpectedEOF), not nil.
+	if err == nil {
+		t.Fatalf("R6 P0-1 FAIL: expected error for [DONE] without terminal, got nil. resp=%+v output=%s", resp, output)
+	}
+	// Must NOT contain fake success terminal.
+	if strings.Contains(output, `"finish_reason":"stop"`) {
+		t.Errorf("R6 P0-1 FAIL: output contains fake finish_reason=stop:\n%s", output)
+	}
+	if strings.Contains(output, "[DONE]") {
+		t.Errorf("R6 P0-1 FAIL: output contains [DONE] for truncated stream:\n%s", output)
+	}
+}
+
+// TestR6_P0_2_ResponseFailedReturnsError verifies that a response.failed
+// event causes StreamConvertIncremental to return ErrUpstreamResponseFailed,
+// not nil. The caller must NOT call MarkSuccess.
+func TestR6_P0_2_ResponseFailedReturnsError(t *testing.T) {
+	upstream := strings.Join([]string{
+		`data: {"type":"response.created","response":{"id":"resp_1","model":"m"}}`,
+		``,
+		`data: {"type":"response.output_text.delta","delta":"hi"}`,
+		``,
+		`data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"message":"overloaded"}}}`,
+		``,
+	}, "\n")
+
+	resp, err, dst := runConvert(t, config.ProtocolResponses, config.ProtocolChat, upstream, nil)
+	output := dst.String()
+
+	// Must return an error (ErrUpstreamResponseFailed), not nil.
+	if err == nil {
+		t.Fatalf("R6 P0-2 FAIL: expected ErrUpstreamResponseFailed, got nil. resp=%+v output=%s", resp, output)
+	}
+	if !errors.Is(err, ErrUpstreamResponseFailed) {
+		t.Errorf("R6 P0-2 FAIL: error should wrap ErrUpstreamResponseFailed, got: %v", err)
+	}
+	// Must NOT contain [DONE] or success finish_reason.
+	if strings.Contains(output, "[DONE]") {
+		t.Errorf("R6 P0-2 FAIL: output contains [DONE] for failed response:\n%s", output)
+	}
+	if strings.Contains(output, `"finish_reason":"stop"`) {
+		t.Errorf("R6 P0-2 FAIL: output contains finish_reason=stop for failed response:\n%s", output)
 	}
 }
