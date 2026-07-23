@@ -863,7 +863,7 @@
                 <div>
                   <div class="eyebrow">{{t('keys.eyebrow')}}</div>
                   <h1>{{t('nav.ollama')}}</h1>
-                  <p>{{t('keys.subtitle')}}</p>
+                  <p>{{t('keys.ollamaSubtitle')}}</p>
                 </div>
                 <div class="hero-actions">
                   <button class="btn btn-primary" @click="openKeyModal">
@@ -883,6 +883,7 @@
                       <th>{{t('table.proxy')}}</th>
                       <th>{{t('table.cooldown')}}</th>
                       <th>{{t('table.usage')}}</th>
+                      <th>{{t('table.ollamaQuota')}}</th>
                       <th>{{t('table.actions')}}</th>
                     </tr>
                     <tr v-for="k in keys" :key="k.id">
@@ -923,7 +924,38 @@
                         {{k.cooldown_until?fmtTime(k.cooldown_until):'—'}}
                       </td>
                       <td>{{k.usage_count}}</td>
+                      <td class="quota-cell">
+                        <span v-if="quotaLoading[k.id]" style="color:var(--muted)">加载中...</span>
+                        <template v-else-if="quotaData[k.id]">
+                          <template v-if="quotaData[k.id].configured && quotaData[k.id].quota">
+                            <div class="quota-list">
+                              <div
+                                v-for="bucket in quotaBuckets(quotaData[k.id], k.id)"
+                                :key="k.id + '-ollama-' + bucket.key"
+                                class="quota-item"
+                              >
+                                <span :class="'badge ' + quotaBadgeClass(bucket.usagePercent)">
+                                  {{bucket.label}}<template v-if="bucket.usagePercent !== null && bucket.usagePercent !== undefined"> {{quotaPercent(bucket.usagePercent)}}</template>
+                                </span>
+                                <small class="quota-usage">{{quotaUsageLabel(bucket)}}</small>
+                                <small v-if="quotaResetLabel(bucket)" class="quota-reset">{{quotaResetLabel(bucket)}}</small>
+                              </div>
+                              <div v-if="quotaData[k.id].plan" class="quota-checked">Plan: {{quotaData[k.id].plan}}</div>
+                              <div v-if="quotaCheckedLabel(quotaData[k.id])" class="quota-checked">{{quotaCheckedLabel(quotaData[k.id])}}</div>
+                            </div>
+                          </template>
+                          <span v-else class="badge badge-red" :title="quotaData[k.id].error || quotaData[k.id].message || ''">{{quotaData[k.id].error ? t('keys.quotaQueryFailed') : t('keys.quotaNotConfigured')}}</span>
+                        </template>
+                        <span v-else style="color:var(--muted)">—</span>
+                      </td>
                       <td class="btn-group">
+                        <button
+                          class="btn btn-ghost btn-sm"
+                          @click="fetchQuota(k.id)"
+                          :disabled="quotaLoading[k.id]"
+                        >
+                          {{quotaLoading[k.id]?t('keys.quotaLoading'):(quotaData[k.id]?t('keys.refreshQuota'):t('keys.queryQuota'))}}
+                        </button>
                         <button
                           class="btn btn-ghost btn-sm"
                           @click="resetCooldown(k.id)"
@@ -1727,6 +1759,20 @@
                   placeholder="wrk_... 或 https://opencode.ai/workspace/wrk_.../go"
                 />
                 <small class="hint-text">可直接粘贴工作区页面 URL；留空时使用 Cookie 自动获取。</small>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="currentGroup==='ollama'" style="border-top:1px solid var(--border);margin:8px 0">
+            <h3 style="margin:8px 0;font-size:14px">{{t('keys.ollamaUsageTitle')}}</h3>
+            <div class="form-row">
+              <div class="form-group">
+                <label>{{t('keys.ollamaCookie')}}</label>
+                <input
+                  v-model="newKey.cookie"
+                  @blur="normalizeKeyCookie"
+                  placeholder="Cookie: session=...; other=..."
+                />
+                <small class="hint-text">{{t('keys.ollamaCookieHint')}}</small>
               </div>
             </div>
           </div>

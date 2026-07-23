@@ -19,12 +19,12 @@ import (
 type Key struct {
 	ID             uint       `gorm:"primaryKey" json:"id"`
 	Value          string     `gorm:"uniqueIndex;size:255;not null" json:"value"`
-	Group          string     `gorm:"index;size:32;not null" json:"group"` // go | custom
+	Group          string     `gorm:"index;size:32;not null" json:"group"` // go | ollama | custom
 	Label          string     `gorm:"size:128" json:"label"`
 	Enabled        bool       `gorm:"default:true" json:"enabled"`
 	Weight         int        `gorm:"default:1" json:"weight"`
 	ProxyURL       string     `gorm:"size:512" json:"proxy_url"`
-	Cookie         string     `gorm:"size:1024" json:"cookie"`      // opencode.ai session cookie for quota
+	Cookie         string     `gorm:"size:4096" json:"cookie"`      // upstream session cookie for quota
 	WorkspaceID    string     `gorm:"size:128" json:"workspace_id"` // opencode.ai workspace ID for quota
 	QuotaSnapshot  string     `gorm:"type:text" json:"-"`           // last quota query payload, persisted for admin UI
 	QuotaUpdatedAt *time.Time `json:"quota_updated_at,omitempty"`

@@ -75,13 +75,20 @@ export function useKeys(api, showToast, t, showConfirm) {
     githubImportLoading.value = false;
   }
 
-  function normalizeCookieInput(raw) {
+  function normalizeCookieInput(raw, group = currentGroup.value) {
     let value = String(raw || "").trim();
     if (!value) return "";
     value = value
       .replace(/^cookie:\s*/i, "")
       .replace(/^set-cookie:\s*/i, "")
       .trim();
+    if (group === "ollama") {
+      return value
+        .split(";")
+        .map((part) => part.trim())
+        .filter((part) => part && part.includes("=") && !/^(path|domain|expires|max-age|secure|httponly|samesite)=/i.test(part))
+        .join("; ");
+    }
     const match = value.match(/(?:^|[;\s])auth=([^;\s]+)/i);
     if (match && match[1]) return "auth=" + match[1].trim();
     if (!value.includes("=")) return "auth=" + value;
@@ -89,7 +96,7 @@ export function useKeys(api, showToast, t, showConfirm) {
   }
 
   function normalizeKeyCookie() {
-    newKey.cookie = normalizeCookieInput(newKey.cookie);
+    newKey.cookie = normalizeCookieInput(newKey.cookie, currentGroup.value);
   }
 
   function normalizeWorkspaceInput(raw) {
@@ -145,9 +152,10 @@ export function useKeys(api, showToast, t, showConfirm) {
         weight: newKey.weight || 1,
         proxy_url: newKey.proxy_url,
       };
-      // Only send cookie/workspace for Go group (Ollama Cloud doesn't need them)
+      if (newKey.cookie) {
+        payload.cookie = normalizeCookieInput(newKey.cookie, currentGroup.value);
+      }
       if (currentGroup.value === 'go') {
-        payload.cookie = normalizeCookieInput(newKey.cookie);
         payload.workspace_id = normalizeWorkspaceInput(newKey.workspace_id);
       }
       if (editing) {
@@ -342,6 +350,19 @@ export function useKeys(api, showToast, t, showConfirm) {
 
   function quotaBuckets(data, keyId) {
     quotaTick.value;
+    if (data?.provider === "ollama") {
+      const quota = data?.quota || {};
+      return [
+        { key: "session", provider: "ollama", label: t("keys.ollamaSession"), ...(quota.session || {}) },
+        { key: "weekly", provider: "ollama", label: t("keys.ollamaWeekly"), ...(quota.weekly || {}) },
+        { key: "extraUsage", provider: "ollama", label: t("keys.ollamaExtra"), ...(quota.extraUsage || {}) },
+      ].filter((bucket) =>
+        bucket.detail ||
+        bucket.used ||
+        bucket.limit ||
+        bucket.usagePercent !== null && bucket.usagePercent !== undefined
+      );
+    }
     const quota = data?.quota || {};
     const usage = data?.usage || {};
     const resets = quotaResetAt.value[keyId] || {};
@@ -356,6 +377,9 @@ export function useKeys(api, showToast, t, showConfirm) {
   function quotaResetLabel(bucket) {
     quotaTick.value;
     if (!bucket || bucket.key === "total") return "";
+    if (typeof bucket.resetAt === "string" && bucket.resetAt.trim()) {
+      return t("keys.quotaResetText", { time: bucket.resetAt.trim() });
+    }
     const resetAt = Number(bucket.resetAt || 0);
     if (!Number.isFinite(resetAt) || resetAt <= 0) return t("keys.quotaResetUnknown");
     const remaining = Math.max(0, Math.floor((resetAt - Date.now()) / 1000));
@@ -395,6 +419,9 @@ export function useKeys(api, showToast, t, showConfirm) {
   }
 
   function quotaUsageLabel(bucket) {
+    if (bucket?.provider === "ollama") {
+      return bucket.detail || t("keys.quotaUnavailable");
+    }
     const usage = bucket?.usage || {};
     const requests = formatQuotaNumber(usage.requests);
     const tokens = formatQuotaNumber(usage.totalTokens ?? usage.total_tokens);

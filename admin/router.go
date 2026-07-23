@@ -283,7 +283,7 @@ func createKey(c *gin.Context) {
 		Enabled:     true,
 		Weight:      w,
 		ProxyURL:    strings.TrimSpace(body.ProxyURL),
-		Cookie:      normalizeAuthCookie(body.Cookie),
+		Cookie:      normalizeKeyCookie(group, body.Cookie),
 		WorkspaceID: normalizeWorkspaceID(body.WorkspaceID),
 	}
 	if err := store.DB().Create(k).Error; err != nil {
@@ -318,10 +318,10 @@ func updateKey(c *gin.Context) {
 		"label":     body.Label,
 		"proxy_url": strings.TrimSpace(body.ProxyURL),
 	}
-	oldCookie := normalizeAuthCookie(k.Cookie)
+	oldCookie := normalizeKeyCookie(k.Group, k.Cookie)
 	oldWorkspaceID := normalizeWorkspaceID(k.WorkspaceID)
 	nextCookie := oldCookie
-	if cookie := normalizeAuthCookie(body.Cookie); cookie != "" {
+	if cookie := normalizeKeyCookie(k.Group, body.Cookie); cookie != "" {
 		updates["cookie"] = cookie
 		nextCookie = cookie
 	}
@@ -1585,6 +1585,10 @@ func fetchKeyQuota(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "key not found"})
 		return
 	}
+	if strings.EqualFold(strings.TrimSpace(k.Group), "ollama") {
+		fetchOllamaKeyQuota(c, k)
+		return
+	}
 	cookie := normalizeAuthCookie(k.Cookie)
 	if cookie == "" {
 		respondKeyQuota(c, k.ID, gin.H{
@@ -1684,6 +1688,73 @@ func fetchKeyQuota(c *gin.Context) {
 			"monthly": goQuotaBucketPayload(result.MonthlyUsage),
 		},
 	})
+}
+
+func fetchOllamaKeyQuota(c *gin.Context, k store.Key) {
+	cookie := normalizeOllamaCookie(k.Cookie)
+	if cookie == "" {
+		respondKeyQuota(c, k.ID, gin.H{
+			"provider":   "ollama",
+			"configured": false,
+			"message":    "ollama login cookie not configured",
+		})
+		return
+	}
+
+	result, err := fetchOllamaQuota(cookie, k.ProxyURL)
+	if err != nil {
+		respondKeyQuota(c, k.ID, gin.H{
+			"provider":   "ollama",
+			"configured": true,
+			"cookie":     maskQuotaCookie(cookie),
+			"error":      err.Error(),
+			"hint":       "请从已登录的 ollama.com 页面复制完整 Cookie；设置页用量数据来自 HTML 页面。",
+			"quota":      nil,
+		})
+		return
+	}
+
+	payload := gin.H{
+		"provider":   "ollama",
+		"configured": true,
+		"cookie":     maskQuotaCookie(cookie),
+		"plan":       result.Plan,
+		"quota": gin.H{
+			"session":    ollamaUsagePayload(result.Session),
+			"weekly":     ollamaUsagePayload(result.Weekly),
+			"extraUsage": ollamaUsagePayload(result.ExtraUsage),
+		},
+	}
+	respondKeyQuota(c, k.ID, payload)
+}
+
+func ollamaUsagePayload(section *OllamaUsageSection) gin.H {
+	if section == nil {
+		return nil
+	}
+	payload := gin.H{
+		"label":        section.Label,
+		"used":         section.Used,
+		"limit":        section.Limit,
+		"usagePercent": section.UsagePercent,
+		"requests":     section.Requests,
+		"model":        section.Model,
+		"resetAt":      section.ResetAt,
+		"balance":      section.Balance,
+		"detail":       section.Detail,
+	}
+	return payload
+}
+
+func maskQuotaCookie(cookie string) string {
+	cookie = strings.TrimSpace(cookie)
+	if cookie == "" {
+		return ""
+	}
+	if len(cookie) <= 12 {
+		return "****"
+	}
+	return cookie[:8] + "..." + cookie[len(cookie)-4:]
 }
 
 func respondKeyQuota(c *gin.Context, keyID uint, payload gin.H) {
