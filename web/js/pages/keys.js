@@ -353,9 +353,8 @@ export function useKeys(api, showToast, t, showConfirm) {
     if (data?.provider === "ollama") {
       const quota = data?.quota || {};
       return [
-        { key: "session", provider: "ollama", label: t("keys.ollamaSession"), ...(quota.session || {}) },
-        { key: "weekly", provider: "ollama", label: t("keys.ollamaWeekly"), ...(quota.weekly || {}) },
-        { key: "extraUsage", provider: "ollama", label: t("keys.ollamaExtra"), ...(quota.extraUsage || {}) },
+        { key: "session", provider: "ollama", ...(quota.session || {}), label: t("keys.ollamaSession") },
+        { key: "weekly", provider: "ollama", ...(quota.weekly || {}), label: t("keys.ollamaWeekly") },
       ].filter((bucket) =>
         bucket.detail ||
         bucket.used ||
@@ -378,7 +377,10 @@ export function useKeys(api, showToast, t, showConfirm) {
     quotaTick.value;
     if (!bucket || bucket.key === "total") return "";
     if (typeof bucket.resetAt === "string" && bucket.resetAt.trim()) {
-      return t("keys.quotaResetText", { time: bucket.resetAt.trim() });
+      const time = bucket.provider === "ollama"
+        ? localizeOllamaReset(bucket.resetAt)
+        : bucket.resetAt.trim();
+      return t("keys.quotaResetText", { time });
     }
     const resetAt = Number(bucket.resetAt || 0);
     if (!Number.isFinite(resetAt) || resetAt <= 0) return t("keys.quotaResetUnknown");
@@ -420,12 +422,47 @@ export function useKeys(api, showToast, t, showConfirm) {
 
   function quotaUsageLabel(bucket) {
     if (bucket?.provider === "ollama") {
-      return bucket.detail || t("keys.quotaUnavailable");
+      const parts = [];
+      if (bucket.usagePercent !== null && bucket.usagePercent !== undefined) {
+        parts.push(`${quotaPercent(bucket.usagePercent)} ${t("keys.quotaUsed")}`);
+      }
+      if (bucket.used && bucket.limit) {
+        parts.push(`${bucket.used} / ${bucket.limit}`);
+      }
+      if (bucket.requests) {
+        parts.push(`${bucket.requests} ${t("keys.quotaRequests")}`);
+      }
+      if (bucket.model) {
+        parts.push(`${t("keys.quotaModel")}: ${bucket.model}`);
+      }
+      return parts.join(" · ") || t("keys.quotaUnavailable");
     }
     const usage = bucket?.usage || {};
     const requests = formatQuotaNumber(usage.requests);
     const tokens = formatQuotaNumber(usage.totalTokens ?? usage.total_tokens);
     return `${requests} ${t("keys.quotaRequests")} · ${tokens} ${t("keys.quotaTokens")}`;
+  }
+
+  function localizeOllamaReset(value) {
+    const text = String(value || "").trim();
+    if (!text || localeIsEnglish()) return text;
+    const units = {
+      second: "秒",
+      seconds: "秒",
+      minute: "分钟",
+      minutes: "分钟",
+      hour: "小时",
+      hours: "小时",
+      day: "天",
+      days: "天",
+      week: "周",
+      weeks: "周",
+    };
+    return text.replace(/\b(\d+(?:\.\d+)?)\s*(seconds?|minutes?|hours?|days?|weeks?)\b/gi, (_, amount, unit) => `${amount} ${units[unit.toLowerCase()] || unit}`);
+  }
+
+  function localeIsEnglish() {
+    return document.documentElement.lang === "en" || localStorage.getItem("admin_locale") === "en";
   }
 
   function formatQuotaNumber(value) {

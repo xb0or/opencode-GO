@@ -1720,9 +1720,8 @@ func fetchOllamaKeyQuota(c *gin.Context, k store.Key) {
 		"cookie":     maskQuotaCookie(cookie),
 		"plan":       result.Plan,
 		"quota": gin.H{
-			"session":    ollamaUsagePayload(result.Session),
-			"weekly":     ollamaUsagePayload(result.Weekly),
-			"extraUsage": ollamaUsagePayload(result.ExtraUsage),
+			"session": ollamaUsagePayload(result.Session),
+			"weekly":  ollamaUsagePayload(result.Weekly),
 		},
 	}
 	respondKeyQuota(c, k.ID, payload)

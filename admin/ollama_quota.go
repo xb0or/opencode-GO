@@ -22,10 +22,9 @@ const maxOllamaSettingsBody = 2 << 20
 // ollama.com/settings. Ollama currently renders this data into HTML instead
 // of exposing a stable JSON usage endpoint.
 type OllamaQuotaResponse struct {
-	Plan        string                `json:"plan,omitempty"`
-	Session     *OllamaUsageSection   `json:"session,omitempty"`
-	Weekly      *OllamaUsageSection   `json:"weekly,omitempty"`
-	ExtraUsage  *OllamaUsageSection   `json:"extraUsage,omitempty"`
+	Plan    string              `json:"plan,omitempty"`
+	Session *OllamaUsageSection `json:"session,omitempty"`
+	Weekly  *OllamaUsageSection `json:"weekly,omitempty"`
 }
 
 // OllamaUsageSection is intentionally tolerant: the settings page has no
@@ -56,6 +55,8 @@ var ollamaQuotaSectionLabels = []string{
 	"session usage",
 	"weekly usage",
 	"cloud plan",
+	// Keep Extra usage as a boundary so its page content cannot bleed into
+	// the Weekly usage section; it is intentionally not parsed or returned.
 	"extra usage",
 }
 
@@ -191,10 +192,7 @@ func parseOllamaQuotaPage(raw []byte) (*OllamaQuotaResponse, error) {
 	if section := ollamaSection(text, "weekly usage"); section != "" {
 		result.Weekly = parseOllamaUsageSection("Weekly usage", section)
 	}
-	if section := ollamaSection(text, "extra usage"); section != "" {
-		result.ExtraUsage = parseOllamaUsageSection("Extra usage", section)
-	}
-	if result.Session == nil && result.Weekly == nil && result.ExtraUsage == nil {
+	if result.Session == nil && result.Weekly == nil {
 		return nil, fmt.Errorf("Ollama settings page contains no recognized usage sections")
 	}
 	return result, nil

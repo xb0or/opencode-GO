@@ -1,6 +1,9 @@
 package admin
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeOllamaCookiePreservesSessionPairs(t *testing.T) {
 	got := normalizeOllamaCookie("Cookie: session=abc; theme=dark; Path=/; HttpOnly")
@@ -38,8 +41,8 @@ func TestParseOllamaQuotaPage(t *testing.T) {
 	if result.Weekly == nil || result.Weekly.Model == "" || result.Weekly.ResetAt == "" {
 		t.Fatalf("weekly = %#v, expected model and reset text", result.Weekly)
 	}
-	if result.ExtraUsage == nil || result.ExtraUsage.Balance != "$12.50" {
-		t.Fatalf("extra usage = %#v, want balance $12.50", result.ExtraUsage)
+	if strings.Contains(result.Weekly.Detail, "Balance") {
+		t.Fatalf("weekly detail leaked Extra usage content: %q", result.Weekly.Detail)
 	}
 }
 

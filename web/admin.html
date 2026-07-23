@@ -775,7 +775,7 @@
                       </td>
                       <td>{{k.usage_count}}</td>
                       <td class="quota-cell">
-                        <span v-if="quotaLoading[k.id]" style="color:var(--muted)">加载中...</span>
+                        <span v-if="quotaLoading[k.id]" style="color:var(--muted)">{{t('keys.quotaLoading')}}</span>
                         <template v-else-if="quotaData[k.id]">
                           <template v-if="quotaData[k.id].configured && quotaData[k.id].quota">
                             <div class="quota-list">
@@ -796,12 +796,12 @@
                             </div>
                           </template>
                           <template v-else-if="quotaData[k.id].configured">
-                            <span class="badge badge-red" :title="quotaData[k.id].error || ''">查询失败</span>
+                            <span class="badge badge-red" :title="quotaData[k.id].error || ''">{{t('keys.quotaQueryFailed')}}</span>
                             <div
                               v-if="quotaWorkspaceCandidates(quotaData[k.id]).length"
                               style="margin-top:4px;white-space:normal;max-width:260px"
                             >
-                              <div style="color:var(--muted);margin-bottom:3px">候选 Workspace：</div>
+                              <div style="color:var(--muted);margin-bottom:3px">{{t('keys.workspaceCandidates')}}</div>
                               <button
                                 v-for="candidate in quotaWorkspaceCandidates(quotaData[k.id])"
                                 :key="typeof candidate === 'string' ? candidate : candidate.id"
@@ -810,7 +810,7 @@
                                 :title="quotaCandidateLabel(candidate)"
                                 @click.stop="useQuotaWorkspaceCandidate(k.id, candidate)"
                               >
-                                使用 {{quotaCandidateLabel(candidate)}}
+                                {{t('keys.useWorkspace')}} {{quotaCandidateLabel(candidate)}}
                               </button>
                             </div>
                             <div
@@ -925,7 +925,7 @@
                       </td>
                       <td>{{k.usage_count}}</td>
                       <td class="quota-cell">
-                        <span v-if="quotaLoading[k.id]" style="color:var(--muted)">加载中...</span>
+                        <span v-if="quotaLoading[k.id]" style="color:var(--muted)">{{t('keys.quotaLoading')}}</span>
                         <template v-else-if="quotaData[k.id]">
                           <template v-if="quotaData[k.id].configured && quotaData[k.id].quota">
                             <div class="quota-list">
@@ -940,7 +940,7 @@
                                 <small class="quota-usage">{{quotaUsageLabel(bucket)}}</small>
                                 <small v-if="quotaResetLabel(bucket)" class="quota-reset">{{quotaResetLabel(bucket)}}</small>
                               </div>
-                              <div v-if="quotaData[k.id].plan" class="quota-checked">Plan: {{quotaData[k.id].plan}}</div>
+                              <div v-if="quotaData[k.id].plan" class="quota-checked">{{t('keys.quotaPlan')}}: {{quotaData[k.id].plan}}</div>
                               <div v-if="quotaCheckedLabel(quotaData[k.id])" class="quota-checked">{{quotaCheckedLabel(quotaData[k.id])}}</div>
                             </div>
                           </template>
