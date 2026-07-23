@@ -3,10 +3,12 @@ package modelsync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xb0or/opencode-GO/config"
@@ -36,10 +38,18 @@ type Result struct {
 	MatchedCount    int      `json:"matched_count"`
 	CreatedCount    int      `json:"created_count"`
 	UpdatedCount    int      `json:"updated_count"`
+	UnchangedCount  int      `json:"unchanged_count"`
+	DeletedCount    int      `json:"deleted_count,omitempty"`
 	DisabledCount   int      `json:"disabled_count"`
 	TotalCount      int      `json:"total_count"`
 	Warnings        []string `json:"warnings,omitempty"`
 }
+
+// ErrSyncInProgress is returned instead of running two catalog mutations at
+// once (for example, a background sync racing an admin rebuild).
+var ErrSyncInProgress = errors.New("model catalog sync already in progress")
+
+var catalogSyncMu sync.Mutex
 
 type openCodePayload struct {
 	Data []openCodeModel `json:"data"`
@@ -82,6 +92,22 @@ type sourceModel struct {
 // metadata, persists the merged catalog, and refreshes the runtime route table.
 // Admin customized fields are preserved according to each row's customized_fields set.
 func Sync(ctx context.Context, opts Options) (Result, error) {
+	return syncCatalog(ctx, opts, false)
+}
+
+// Rebuild fetches and validates a fresh catalog before atomically replacing
+// every persisted model route. Both routable sources must be available;
+// OpenRouter remains optional because it only enriches metadata.
+func Rebuild(ctx context.Context, opts Options) (Result, error) {
+	return syncCatalog(ctx, opts, true)
+}
+
+func syncCatalog(ctx context.Context, opts Options, rebuild bool) (Result, error) {
+	if !catalogSyncMu.TryLock() {
+		return Result{}, ErrSyncInProgress
+	}
+	defer catalogSyncMu.Unlock()
+
 	opts = withDefaults(opts)
 	client := opts.Client
 
@@ -105,8 +131,8 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		out := make([]sourceModel, 0, len(models))
 		for _, m := range models {
 			out = append(out, sourceModel{
-				ID:      m.ID,
-				Name:    m.Name,
+				ID:       m.ID,
+				Name:     m.Name,
 				Upstream: config.UpstreamGo,
 				perUpstreamTargets: map[config.Upstream]config.UpstreamTarget{
 					config.UpstreamGo: {
@@ -130,8 +156,8 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		out := make([]sourceModel, 0, len(models))
 		for _, m := range models {
 			out = append(out, sourceModel{
-				ID:      m.Name,
-				Name:    m.Name,
+				ID:       m.Name,
+				Name:     m.Name,
 				Upstream: config.UpstreamOllama,
 				perUpstreamTargets: map[config.Upstream]config.UpstreamTarget{
 					config.UpstreamOllama: {
@@ -191,6 +217,14 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 
 	// --- Merge by model ID ---
 	merged := mergeModels(goModels, ollamaModels)
+	if rebuild {
+		if !goFetched || !ollamaFetched {
+			return result, fmt.Errorf("safe rebuild requires successful OpenCode Go and Ollama catalog fetches")
+		}
+		if len(merged) == 0 {
+			return result, fmt.Errorf("safe rebuild refused an empty routable model catalog")
+		}
+	}
 
 	// Build catalog ID sets for authoritative reconciliation (G2).
 	// These sets let us determine, for models that exist in DB but are NOT
@@ -215,6 +249,44 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	now := opts.Now()
+	if rebuild {
+		rows := make([]store.ModelRouteRow, 0, len(merged))
+		routes := make([]config.ModelRoute, 0, len(merged))
+		seen := make(map[string]bool, len(merged))
+		for _, sm := range merged {
+			id := strings.TrimSpace(sm.ID)
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			route := buildMergedRoute(sm, store.ModelRouteRow{}, false, true, true)
+			if matched, matchedBy, ok := config.MatchOpenRouterModel(route, openrouterModels); ok {
+				config.ApplyOpenRouterMetadata(&route, matched, matchedBy)
+				result.MatchedCount++
+			} else if len(route.Tags) == 0 {
+				route.Tags = fallbackTags(route)
+			}
+			if err := config.ValidateModelRoute(route); err != nil {
+				return result, fmt.Errorf("validate rebuilt model route %s: %w", id, err)
+			}
+			row := store.NewModelRouteRow(route)
+			row.LastSyncedAt = &now
+			rows = append(rows, row)
+			routes = append(routes, route)
+			result.CreatedCount++
+		}
+		if len(rows) == 0 {
+			return result, fmt.Errorf("safe rebuild produced no valid model routes")
+		}
+		result.DeletedCount = len(existingRows)
+		if err := store.ReplaceModelRoutes(rows); err != nil {
+			return result, fmt.Errorf("atomically replace model routes: %w", err)
+		}
+		config.ReplaceModels(routes)
+		result.TotalCount = len(routes)
+		return result, nil
+	}
+
 	seen := map[string]bool{}
 	for _, sm := range merged {
 		id := strings.TrimSpace(sm.ID)
@@ -237,7 +309,11 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		nextRow.LastSyncedAt = &now
 		if existed {
 			nextRow.CreatedAt = row.CreatedAt
-			result.UpdatedCount++
+			if modelRouteContentChanged(row, nextRow) {
+				result.UpdatedCount++
+			} else {
+				result.UnchangedCount++
+			}
 		} else {
 			result.CreatedCount++
 		}
@@ -260,6 +336,7 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 		statusCustomized := config.IsModelFieldCustomized(route, "status")
 		// Skip entirely if admin customized both fields.
 		if upstreamsCustomized && statusCustomized {
+			result.UnchangedCount++
 			continue
 		}
 		if !upstreamsCustomized {
@@ -294,10 +371,13 @@ func Sync(ctx context.Context, opts Options) (Result, error) {
 			if err := store.SaveModelRoute(&nextRow); err != nil {
 				return result, fmt.Errorf("save model route %s: %w", id, err)
 			}
+			result.UpdatedCount++
 			if route.Status != nil && *route.Status == config.ModelStatusDisabled &&
 				!(row.Status == config.ModelStatusDisabled) {
 				result.DisabledCount++
 			}
+		} else {
+			result.UnchangedCount++
 		}
 	}
 
@@ -413,14 +493,14 @@ func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed b
 	}
 
 	// Build per-upstream Targets from the source model's perUpstreamTargets.
-	// This allows Go and Ollama to use different real_model IDs and/or
-	// protocols for the same gateway model ID. Only populate Targets when
-	// upstreams differ in real_model or protocol — a single upstream or
-	// identical configurations don't need Targets.
+	// This allows Go and Ollama to use different real_model IDs, protocols,
+	// and key-pool groups for the same gateway model ID. Multi-upstream routes
+	// need Targets when any of those values differs from the primary defaults.
 	if len(sm.Upstreams) > 1 && sm.perUpstreamTargets != nil {
 		targets := make(map[config.Upstream]config.UpstreamTarget)
 		defaultProto := fallback.Protocol
 		defaultRealModel := fallback.RealModel
+		defaultGroup := fallback.Group
 		needTargets := false
 		for _, u := range sm.Upstreams {
 			t, ok := sm.perUpstreamTargets[u]
@@ -438,7 +518,7 @@ func buildMergedRoute(sm sourceModel, existingRow store.ModelRouteRow, existed b
 			targets[u] = t
 			// Need Targets if any upstream's real_model or protocol
 			// differs from the route-level default.
-			if t.RealModel != defaultRealModel || t.Protocol != defaultProto {
+			if t.RealModel != defaultRealModel || t.Protocol != defaultProto || t.Group != defaultGroup {
 				needTargets = true
 			}
 		}
@@ -717,6 +797,36 @@ func rowChanged(old, new store.ModelRouteRow) bool {
 		return true
 	}
 	return false
+}
+
+// modelRouteContentChanged compares catalog content while deliberately
+// ignoring timestamps. LastSyncedAt can advance without reporting a model as
+// changed to the admin UI.
+func modelRouteContentChanged(old, new store.ModelRouteRow) bool {
+	return old.ID != new.ID ||
+		old.Name != new.Name ||
+		old.Upstream != new.Upstream ||
+		old.UpstreamsJSON != new.UpstreamsJSON ||
+		old.UpstreamGroupsJSON != new.UpstreamGroupsJSON ||
+		old.Protocol != new.Protocol ||
+		old.RealModel != new.RealModel ||
+		old.Group != new.Group ||
+		old.ContextLen != new.ContextLen ||
+		old.Capabilities != new.Capabilities ||
+		old.Status != new.Status ||
+		old.Priority != new.Priority ||
+		old.TagsJSON != new.TagsJSON ||
+		old.PricingJSON != new.PricingJSON ||
+		old.ArchitectureJSON != new.ArchitectureJSON ||
+		old.SupportedParametersJSON != new.SupportedParametersJSON ||
+		old.TargetsJSON != new.TargetsJSON ||
+		old.OpenRouterID != new.OpenRouterID ||
+		old.OpenRouterName != new.OpenRouterName ||
+		old.OpenRouterMatchedBy != new.OpenRouterMatchedBy ||
+		old.Description != new.Description ||
+		old.KnowledgeCutoff != new.KnowledgeCutoff ||
+		old.IsCustomized != new.IsCustomized ||
+		old.CustomizedFieldsJSON != new.CustomizedFieldsJSON
 }
 
 // upstreamFetchFailed returns true when the given upstream's catalog fetch

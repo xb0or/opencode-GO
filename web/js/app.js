@@ -10,7 +10,7 @@ import { createApi, fmtTime } from "./api.js?v=20260624a";
 import { useDashboard } from "./pages/dashboard.js?v=20260624a";
 import { useKeys } from "./pages/keys.js?v=20260630a";
 import { useTokens } from "./pages/tokens.js?v=20260624a";
-import { useModels } from "./pages/models.js?v=20260630a";
+import { useModels } from "./pages/models.js?v=20260719a";
 import { useMappings } from "./pages/mappings.js?v=20260624a";
 import { useOps } from "./pages/ops.js?v=20260624a";
 import { useUsage } from "./pages/usage.js?v=20260624a";
@@ -454,16 +454,39 @@ createApp({
 
       // 模型管理
       models: models.models,
+      filteredModels: models.filteredModels,
+      modelStats: models.stats,
       newModel: models.newModel,
       showModal: models.showModal,
       editingModelId: models.editingId,
       syncingModels: models.syncing,
-      availableModels: models.availableModels,
+      rebuildingModels: models.rebuilding,
+      showModelRebuildModal: models.showRebuildModal,
+      modelRebuildConfirmation: models.rebuildConfirmation,
+      canRebuildModels: models.canRebuild,
+      modelSyncResult: models.syncResult,
+      modelSearchQuery: models.searchQuery,
+      modelUpstreamFilter: models.upstreamFilter,
+      modelStatusFilter: models.statusFilter,
+      expandedModels: models.expandedModels,
+      modelUpstreams: models.modelUpstreams,
+      modelTarget: models.modelTarget,
+      upstreamLabel: models.upstreamLabel,
+      isPrimaryModelUpstream: models.isPrimaryUpstream,
+      toggleModelDetails: models.toggleExpanded,
+      availableModelsFor: models.availableModelsFor,
+      applyModelTargetSuggestion: models.applyTargetSuggestion,
+      fillModelIDFromName: models.fillIDFromName,
+      setModelUpstreamEnabled: models.setUpstreamEnabled,
       openModal: models.openModal,
       openModelSettings: models.openModelSettings,
       closeModal: models.closeModal,
       loadModels: models.load,
       syncModels: models.syncCatalog,
+      openModelRebuild: models.openRebuild,
+      closeModelRebuild: models.closeRebuild,
+      rebuildModels: models.rebuildCatalog,
+      dismissModelSyncResult: models.dismissSyncResult,
       addModel: models.add,
       toggleModel: models.toggle,
       deleteModel: models.remove,

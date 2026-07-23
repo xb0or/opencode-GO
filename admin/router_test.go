@@ -389,7 +389,7 @@ func TestModelPatchAndTogglePersistRuntimeConfig(t *testing.T) {
 	r := gin.New()
 	MountWithPicker(r.Group("/admin"), pool.NewPicker())
 
-	body := bytes.NewBufferString(`{"name":"Admin Name","context_len":32000,"priority":7,"tags":["code","reasoning"],"pricing":{"prompt":"0.000001","completion":"0.000002"}}`)
+	body := bytes.NewBufferString(`{"name":"Admin Name","group":"premium-go","context_len":32000,"priority":7,"tags":["code","reasoning"],"pricing":{"prompt":"0.000001","completion":"0.000002"}}`)
 	req := httptest.NewRequest(http.MethodPatch, "/admin/models/editable-model", body)
 	req.Header.Set("Authorization", "Bearer "+signedAdminToken(t))
 	req.Header.Set("Content-Type", "application/json")
@@ -403,10 +403,10 @@ func TestModelPatchAndTogglePersistRuntimeConfig(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime model missing after patch")
 	}
-	if route.Name != "Admin Name" || route.ContextLen != 32000 || route.Priority != 7 || route.Pricing["completion"] != "0.000002" {
+	if route.Name != "Admin Name" || route.Group != "premium-go" || route.ContextLen != 32000 || route.Priority != 7 || route.Pricing["completion"] != "0.000002" {
 		t.Fatalf("runtime route not patched: %#v", route)
 	}
-	for _, want := range []string{"name", "context_len", "priority", "tags", "pricing"} {
+	for _, want := range []string{"name", "group", "context_len", "priority", "tags", "pricing"} {
 		if !config.IsModelFieldCustomized(route, want) {
 			t.Fatalf("customized field %q not recorded: %#v", want, route.CustomizedFields)
 		}
@@ -422,6 +422,9 @@ func TestModelPatchAndTogglePersistRuntimeConfig(t *testing.T) {
 	route, _ = config.LookupModel("editable-model")
 	if route.IsEnabled() {
 		t.Fatalf("model should be disabled after toggle: %#v", route)
+	}
+	if !config.IsModelFieldCustomized(route, "status") {
+		t.Fatalf("toggled status should be protected from sync: %#v", route.CustomizedFields)
 	}
 }
 
@@ -709,7 +712,7 @@ func validAdminClaims() jwt.MapClaims {
 // and asserts the response is 401 (invalid token).
 func assertTokenRejected(t *testing.T, token string, label string) {
 	t.Helper()
-	if err := store.InitForTest("file:p12_"+label+"?mode=memory&cache=shared"); err != nil {
+	if err := store.InitForTest("file:p12_" + label + "?mode=memory&cache=shared"); err != nil {
 		t.Fatalf("init test db: %v", err)
 	}
 	gin.SetMode(gin.TestMode)

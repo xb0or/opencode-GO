@@ -112,9 +112,10 @@ small local fallback list, then synchronizes from the live OpenCode Go endpoint:
 
 The synchronizer:
 
-1. Fetches `https://opencode.ai/zen/go/v1/models` as the authoritative base
-   model list.
-2. Fetches `https://openrouter.ai/api/v1/models` and best-effort matches by
+1. Fetches the OpenCode Go and Ollama Cloud catalogs as routable model sources,
+   merging identical model IDs into one route with per-upstream targets.
+2. Fetches `https://openrouter.ai/api/v1/models` only for metadata and
+   best-effort matches by
    model id/name/slug, including provider-prefixed ids such as
    `openai/gpt-4o`.
 3. Persists context length, architecture metadata, supported parameters,
@@ -122,8 +123,10 @@ The synchronizer:
 
 Startup performs one best-effort sync and then repeats it in the background
 every 6 hours. Admins can also click **Sync Models** on the Models page. If
-OpenRouter is unavailable, the OpenCode base list is still saved and startup
-continues.
+OpenRouter is unavailable, routable Go/Ollama models are still saved and
+startup continues. The **Clear & Resync** action fetches both routable catalogs
+first and only replaces the full model table in a single transaction after the
+new catalog passes validation.
 
 Admins can disable a model in the model table. Disabled models are hidden from
 `GET /v1/models` and rejected by proxy endpoints with `model_disabled`. Manual
@@ -233,7 +236,7 @@ Access at `http://<gateway>/admin` (default password: `admin`). Features:
 - **Dashboard** — total / today / last-hour calls, success rate, RPM / TPM / QPS, p50 / p95 / p99 latency, latency distribution buckets, 24-hour timeline, calls-by-model and calls-by-protocol charts, today & total token breakdown (input / output / reasoning / cache read / cache creation), today & total cost (total / actual / account), and a recent-call log
 - **API Keys** — add/remove/toggle keys; GitHub auto-login import for Go KEY/**auth Cookie**/**Workspace ID**; Google/manual entry stays supported; edit key value/label/weight/**proxy URL**; reset cooldown; view fail counts and usage; **auto-refresh or manually query Go quota** (rolling / weekly / monthly) with Workspace auto-detection and a persisted snapshot
 - **Tokens** — create/edit/delete/copy `sk-` gateway tokens with name, description, rate limit (req/min), **max total requests**, **expiry**, and enable/disable; per-token usage shown as total / today / last-hour requests and tokens
-- **Models** — sync the Go model catalog, enable/disable models, edit display name/protocol/context/priority/pricing/tags, and view OpenRouter-enriched metadata
+- **Models** — sync Go/Ollama catalogs, configure primary + failover upstream targets independently, enable/disable routes, edit metadata/pricing, distinguish OpenRouter metadata from routable providers, and safely clear/rebuild the catalog
 - **Model Mappings** — manage client model → upstream model rewrite rules, persisted in SQLite and applied immediately
 - **Usage logs** — paginated call history with filters (model, protocol, token, group, status, stream, time range, free-text search), sortable columns, and a filtered summary (calls, success/error, RPM/TPM, tokens, cost, avg latency)
 
@@ -253,7 +256,7 @@ All endpoints (except `login`) require `Authorization: Bearer <admin-jwt>`.
 | `GET  /admin/tokens` · `POST /admin/tokens` · `PATCH /admin/tokens/:id` · `DELETE /admin/tokens/:id` | list / create / edit (rate_limit, max_requests, expires_at, enabled) / delete |
 | `GET  /admin/stats` | dashboard aggregates (calls, tokens, cost, latency, timeline) |
 | `GET  /admin/usage` | paginated, filterable usage logs with summary |
-| `GET  /admin/models` · `POST /admin/models` · `PATCH /admin/models/:id` · `POST /admin/models/:id/toggle` · `DELETE /admin/models/:id` · `POST /admin/models/sync` | model route table CRUD + catalog sync |
+| `GET  /admin/models` · `POST /admin/models` · `PATCH /admin/models/:id` · `POST /admin/models/:id/toggle` · `DELETE /admin/models/:id` · `POST /admin/models/sync` · `POST /admin/models/rebuild` | multi-upstream model route CRUD, incremental sync, and confirmed atomic rebuild |
 | `GET  /admin/model-mappings` · `POST /admin/model-mappings` · `DELETE /admin/model-mappings/:source` | model rewrite rules CRUD |
 
 ### Admin Panel UI

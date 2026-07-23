@@ -16,7 +16,7 @@ import (
 type Upstream string
 
 const (
-	UpstreamGo Upstream = "go"
+	UpstreamGo     Upstream = "go"
 	UpstreamOllama Upstream = "ollama"
 )
 
@@ -42,29 +42,29 @@ type UpstreamTarget struct {
 
 // ModelRoute maps a gateway-facing model id to its real upstream location.
 type ModelRoute struct {
-	ID                  string                       `json:"id"`                              // gateway-facing model id, e.g. "glm-5.1"
-	Name                string                       `json:"name"`                            // display name
-	Upstream            Upstream                     `json:"upstream"`                        // primary upstream (used for routing); go | ollama
-	Upstreams           []Upstream                   `json:"upstreams,omitempty"`            // all upstreams that serve this model, e.g. ["go","ollama"]
-	UpstreamGroups      map[Upstream]string           `json:"upstream_groups,omitempty"`      // per-upstream key-pool group override; empty = use upstream name
-	Targets             map[Upstream]UpstreamTarget   `json:"targets,omitempty"`              // per-upstream real_model/protocol/group overrides
-	Protocol            Protocol                     `json:"protocol"`                        // chat | messages | responses | google
-	RealModel           string                       `json:"real_model"`                      // upstream model id, e.g. "glm-5.1"
-	Group               string                       `json:"group"`                           // logical KEY-pool group name, e.g. "go"
-	ContextLen          int                          `json:"context_len"`                     // optional context window hint
-	Status              *int                         `json:"status,omitempty"`                // 0 disabled, 1 enabled; nil defaults to enabled
-	Priority            int                          `json:"priority"`                        // optional admin-defined display/routing priority
-	Tags                []string                     `json:"tags,omitempty"`                  // normalized capability tags
-	IsCustomized        bool                         `json:"is_customized,omitempty"`         // true when admin edited protected fields
-	CustomizedFields    []string                     `json:"customized_fields,omitempty"`     // fields protected from automatic sync
-	OpenRouterID        string                       `json:"openrouter_id,omitempty"`         // matched OpenRouter model id
-	OpenRouterName      string                       `json:"openrouter_name,omitempty"`       // matched OpenRouter display name
-	OpenRouterMatchedBy string                       `json:"openrouter_matched_by,omitempty"` // matching strategy used during enrichment
-	Architecture        *ModelArchitecture           `json:"architecture,omitempty"`
-	Pricing             map[string]string            `json:"pricing,omitempty"` // per-token OpenRouter prices as strings
-	SupportedParameters []string                     `json:"supported_parameters,omitempty"`
-	Description         string                       `json:"description,omitempty"`
-	KnowledgeCutoff     string                       `json:"knowledge_cutoff,omitempty"`
+	ID                  string                      `json:"id"`                              // gateway-facing model id, e.g. "glm-5.1"
+	Name                string                      `json:"name"`                            // display name
+	Upstream            Upstream                    `json:"upstream"`                        // primary upstream (used for routing); go | ollama
+	Upstreams           []Upstream                  `json:"upstreams,omitempty"`             // all upstreams that serve this model, e.g. ["go","ollama"]
+	UpstreamGroups      map[Upstream]string         `json:"upstream_groups,omitempty"`       // per-upstream key-pool group override; empty = use upstream name
+	Targets             map[Upstream]UpstreamTarget `json:"targets,omitempty"`               // per-upstream real_model/protocol/group overrides
+	Protocol            Protocol                    `json:"protocol"`                        // chat | messages | responses | google
+	RealModel           string                      `json:"real_model"`                      // upstream model id, e.g. "glm-5.1"
+	Group               string                      `json:"group"`                           // logical KEY-pool group name, e.g. "go"
+	ContextLen          int                         `json:"context_len"`                     // optional context window hint
+	Status              *int                        `json:"status,omitempty"`                // 0 disabled, 1 enabled; nil defaults to enabled
+	Priority            int                         `json:"priority"`                        // optional admin-defined display/routing priority
+	Tags                []string                    `json:"tags,omitempty"`                  // normalized capability tags
+	IsCustomized        bool                        `json:"is_customized,omitempty"`         // true when admin edited protected fields
+	CustomizedFields    []string                    `json:"customized_fields,omitempty"`     // fields protected from automatic sync
+	OpenRouterID        string                      `json:"openrouter_id,omitempty"`         // matched OpenRouter model id
+	OpenRouterName      string                      `json:"openrouter_name,omitempty"`       // matched OpenRouter display name
+	OpenRouterMatchedBy string                      `json:"openrouter_matched_by,omitempty"` // matching strategy used during enrichment
+	Architecture        *ModelArchitecture          `json:"architecture,omitempty"`
+	Pricing             map[string]string           `json:"pricing,omitempty"` // per-token OpenRouter prices as strings
+	SupportedParameters []string                    `json:"supported_parameters,omitempty"`
+	Description         string                      `json:"description,omitempty"`
+	KnowledgeCutoff     string                      `json:"knowledge_cutoff,omitempty"`
 }
 
 // ModelArchitecture describes OpenRouter modality/tokenizer metadata.
@@ -314,6 +314,42 @@ type OpenRouterModel struct {
 	Pricing             map[string]string  `json:"pricing"`
 	SupportedParameters []string           `json:"supported_parameters"`
 	KnowledgeCutoff     string             `json:"knowledge_cutoff"`
+}
+
+// UnmarshalJSON accepts OpenRouter's extensible pricing object without
+// allowing a structured extension (for example the "overrides" array) to
+// discard the entire metadata catalog. Scalar string/number prices are kept;
+// arrays, objects, booleans, and null are metadata extensions and ignored.
+func (m *OpenRouterModel) UnmarshalJSON(data []byte) error {
+	type modelAlias OpenRouterModel
+	aux := struct {
+		Pricing map[string]json.RawMessage `json:"pricing"`
+		*modelAlias
+	}{modelAlias: (*modelAlias)(m)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	m.Pricing = make(map[string]string)
+	for key, raw := range aux.Pricing {
+		value := strings.TrimSpace(string(raw))
+		if value == "" {
+			continue
+		}
+		if value[0] == '"' {
+			var decoded string
+			if err := json.Unmarshal(raw, &decoded); err == nil {
+				m.Pricing[key] = decoded
+			}
+			continue
+		}
+		if (value[0] >= '0' && value[0] <= '9') || value[0] == '-' {
+			m.Pricing[key] = value
+		}
+	}
+	if len(m.Pricing) == 0 {
+		m.Pricing = nil
+	}
+	return nil
 }
 
 type openRouterModel = OpenRouterModel

@@ -70,7 +70,7 @@ type ModelRouteRow struct {
 	PricingJSON             string     `gorm:"type:text" json:"pricing_json,omitempty"`
 	ArchitectureJSON        string     `gorm:"type:text" json:"architecture_json,omitempty"`
 	SupportedParametersJSON string     `gorm:"type:text" json:"supported_parameters_json,omitempty"`
-	TargetsJSON            string     `gorm:"type:text" json:"targets_json,omitempty"`
+	TargetsJSON             string     `gorm:"type:text" json:"targets_json,omitempty"`
 	OpenRouterID            string     `gorm:"size:255" json:"openrouter_id,omitempty"`
 	OpenRouterName          string     `gorm:"size:255" json:"openrouter_name,omitempty"`
 	OpenRouterMatchedBy     string     `gorm:"size:64" json:"openrouter_matched_by,omitempty"`
@@ -235,6 +235,21 @@ func SaveModelRoute(r *ModelRouteRow) error {
 	return db.Save(r).Error
 }
 
+// ReplaceModelRoutes atomically replaces the complete persisted model catalog.
+// The delete and all inserts share one SQLite transaction, so callers never
+// observe a partially rebuilt catalog and the previous rows survive any error.
+func ReplaceModelRoutes(rows []ModelRouteRow) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&ModelRouteRow{}).Error; err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		return tx.Create(&rows).Error
+	})
+}
+
 // ModelRouteFromRow converts a persisted route row into the runtime config
 // representation, including JSON-encoded metadata fields.
 func ModelRouteFromRow(r ModelRouteRow) config.ModelRoute {
@@ -340,7 +355,7 @@ func NewModelRouteRow(m config.ModelRoute) ModelRouteRow {
 		PricingJSON:             encodeJSON(m.Pricing),
 		ArchitectureJSON:        encodeJSON(m.Architecture),
 		SupportedParametersJSON: encodeJSON(m.SupportedParameters),
-		TargetsJSON:            encodeJSON(m.Targets),
+		TargetsJSON:             encodeJSON(m.Targets),
 		OpenRouterID:            m.OpenRouterID,
 		OpenRouterName:          m.OpenRouterName,
 		OpenRouterMatchedBy:     m.OpenRouterMatchedBy,

@@ -11,7 +11,7 @@
     />
     <base href="/admin/" />
     <style>[v-cloak]{display:none!important}</style>
-    <link rel="stylesheet" href="css/admin.css?v=20260624a" />
+    <link rel="stylesheet" href="css/admin.css?v=20260719a" />
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   </head>
@@ -1034,7 +1034,7 @@
 
             <!-- Models -->
             <div v-if="page==='models'" class="models-page">
-              <div class="page-hero">
+              <div class="page-hero models-hero">
                 <div>
                   <div class="eyebrow">{{t('models.eyebrow')}}</div>
                   <h1>{{t('models.title')}}</h1>
@@ -1044,83 +1044,211 @@
                   <button
                     class="btn btn-ghost"
                     @click="syncModels"
-                    :disabled="syncingModels"
+                    :disabled="syncingModels || rebuildingModels"
                   >
                     {{syncingModels?t('models.syncing'):t('models.sync')}}
+                  </button>
+                  <button
+                    class="btn btn-rebuild"
+                    @click="openModelRebuild"
+                    :disabled="syncingModels || rebuildingModels"
+                  >
+                    {{t('models.rebuild')}}
                   </button>
                   <button class="btn btn-primary" @click="openModal">
                     {{t('models.addModel')}}
                   </button>
                 </div>
               </div>
-              <div class="card">
-                <h2>{{t('models.registered',{count:models.length})}}</h2>
-                <div class="table-wrap">
-                  <table>
-                    <tr>
-                      <th>{{t('table.active')}}</th>
-                      <th>{{t('table.id')}}</th>
-                      <th>{{t('table.name')}}</th>
-                      <th>{{t('table.upstream')}}</th>
-                      <th>{{t('table.protocol')}}</th>
-                      <th>{{t('table.context')}}</th>
-                      <th>{{t('table.priority')}}</th>
-                      <th>{{t('table.promptPrice')}}</th>
-                      <th>{{t('table.completionPrice')}}</th>
-                      <th>{{t('table.cachePrice')}}</th>
-                      <th>{{t('table.capabilities')}}</th>
-                      <th>{{t('table.actions')}}</th>
-                    </tr>
-                    <tr v-for="m in models" :key="m.id">
-                      <td>
-                        <label class="toggle"
-                          ><input
+
+              <div class="model-summary-grid" aria-label="Model catalog summary">
+                <div class="model-summary-card">
+                  <span>{{t('models.totalModels')}}</span>
+                  <strong>{{modelStats.total}}</strong>
+                </div>
+                <div class="model-summary-card">
+                  <span>{{t('models.enabledModels')}}</span>
+                  <strong class="green">{{modelStats.enabled}}</strong>
+                </div>
+                <div class="model-summary-card">
+                  <span>{{t('models.multiUpstream')}}</span>
+                  <strong class="blue">{{modelStats.multi}}</strong>
+                </div>
+                <div class="model-summary-card">
+                  <span>{{t('models.metadataMatched')}}</span>
+                  <strong class="accent">{{modelStats.matched}}</strong>
+                </div>
+              </div>
+
+              <div v-if="modelSyncResult" class="model-sync-result" :class="{'has-warnings':modelSyncResult.warnings?.length}">
+                <div class="model-sync-result-head">
+                  <div>
+                    <strong>{{modelSyncResult.mode==='rebuild'?t('models.rebuildDone'):t('models.syncDone')}}</strong>
+                    <span>{{t('models.syncResultHint')}}</span>
+                  </div>
+                  <button class="model-icon-button" @click="dismissModelSyncResult" :aria-label="t('common.close')">×</button>
+                </div>
+                <div class="model-sync-metrics">
+                  <span><b>{{modelSyncResult.opencode_count||0}}</b> OpenCode Go</span>
+                  <span><b>{{modelSyncResult.ollama_count||0}}</b> Ollama</span>
+                  <span class="metadata-metric"><b>{{modelSyncResult.matched_count||0}}</b> {{t('models.openRouterMetadata')}}</span>
+                  <span><b>+{{modelSyncResult.created_count||0}}</b> {{t('models.created')}}</span>
+                  <span><b>~{{modelSyncResult.updated_count||0}}</b> {{t('models.changed')}}</span>
+                  <span><b>={{modelSyncResult.unchanged_count||0}}</b> {{t('models.unchanged')}}</span>
+                  <span v-if="modelSyncResult.deleted_count"><b>-{{modelSyncResult.deleted_count}}</b> {{t('models.deleted')}}</span>
+                </div>
+                <ul v-if="modelSyncResult.warnings?.length" class="model-sync-warnings">
+                  <li v-for="warning in modelSyncResult.warnings" :key="warning">{{warning}}</li>
+                </ul>
+              </div>
+
+              <div class="card model-catalog-card">
+                <div class="model-catalog-head">
+                  <div>
+                    <h2>{{t('models.registered',{count:models.length})}}</h2>
+                    <p>{{t('models.catalogHint')}}</p>
+                  </div>
+                  <div class="model-filters">
+                    <input
+                      v-model="modelSearchQuery"
+                      type="search"
+                      :placeholder="t('models.searchPlaceholder')"
+                      :aria-label="t('models.searchPlaceholder')"
+                    />
+                    <select v-model="modelUpstreamFilter" :aria-label="t('models.filterUpstream')">
+                      <option value="all">{{t('models.allUpstreams')}}</option>
+                      <option value="go">OpenCode Go</option>
+                      <option value="ollama">Ollama Cloud</option>
+                    </select>
+                    <select v-model="modelStatusFilter" :aria-label="t('models.filterStatus')">
+                      <option value="all">{{t('models.allStatuses')}}</option>
+                      <option value="enabled">{{t('models.enabled')}}</option>
+                      <option value="disabled">{{t('models.disabled')}}</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div v-if="!filteredModels.length" class="model-empty-state">
+                  <strong>{{t('models.noModels')}}</strong>
+                  <span>{{t('models.noModelsHint')}}</span>
+                </div>
+
+                <div v-else class="model-route-list">
+                  <article
+                    v-for="m in filteredModels"
+                    :key="m.id"
+                    class="model-route-item"
+                    :class="{'is-disabled':m.status===0}"
+                  >
+                    <div class="model-route-main">
+                      <div class="model-route-toggle">
+                        <label class="toggle" :title="m.status===0?t('models.disabled'):t('models.enabled')">
+                          <input
                             type="checkbox"
                             :checked="m.status!==0"
-                            @change="toggleModel(m.id)" /><span
-                            class="slider"
-                          ></span
-                        ></label>
-                      </td>
-                      <td><code>{{m.id}}</code></td>
-                      <td>{{m.name}}</td>
-                      <td><span :class="'badge '+(m.upstream==='ollama'?'badge-grey':'badge-blue')">{{m.upstream||'go'}}</span></td>
-                      <td>{{m.protocol}}</td>
-                      <td>{{fmtNumber(m.context_len || m.context_length)}}</td>
-                      <td>{{m.priority||0}}</td>
-                      <td>{{fmtPrice(m.pricing, 'prompt')}}</td>
-                      <td>{{fmtPrice(m.pricing, 'completion')}}</td>
-                      <td style="font-size: 12px">
-                        <div>{{fmtPrice(m.pricing, 'input_cache_read')}}</div>
-                        <div style="color: var(--muted)">
-                          {{fmtPrice(m.pricing, 'input_cache_write')}}
+                            @change="toggleModel(m.id)"
+                          />
+                          <span class="slider"></span>
+                        </label>
+                      </div>
+
+                      <div class="model-identity">
+                        <div class="model-name-line">
+                          <strong>{{m.name||m.id}}</strong>
+                          <span v-if="m.is_customized" class="badge badge-yellow">{{t('models.customized')}}</span>
                         </div>
-                      </td>
-                      <td>
-                        <span
-                          v-for="cap in fmtCapabilities(m)"
-                          :key="m.id + '-' + cap"
-                          class="badge badge-accent capability-badge"
-                        >
-                          {{capabilityLabel(cap)}}
+                        <code :title="m.id">{{m.id}}</code>
+                      </div>
+
+                      <div class="model-route-cell">
+                        <span class="model-cell-label">{{t('models.routeUpstreams')}}</span>
+                        <div class="model-route-chips">
+                          <span
+                            v-for="upstream in modelUpstreams(m)"
+                            :key="m.id+'-'+upstream"
+                            class="model-route-chip"
+                            :class="[upstream,{'is-primary':isPrimaryModelUpstream(m,upstream)}]"
+                          >
+                            <i></i>
+                            {{upstreamLabel(upstream)}}
+                            <b v-if="isPrimaryModelUpstream(m,upstream)">{{t('models.primaryShort')}}</b>
+                            <small>{{modelTarget(m,upstream).protocol}}</small>
+                          </span>
+                        </div>
+                      </div>
+
+                      <div class="model-metadata-cell">
+                        <span class="model-cell-label">{{t('models.metadata')}}</span>
+                        <span v-if="m.openrouter_id" class="metadata-source-badge" :title="m.openrouter_id">
+                          OpenRouter · {{t('models.matched')}}
                         </span>
-                      </td>
-                      <td class="btn-group">
-                        <button
-                          class="btn btn-ghost btn-sm"
-                          @click="openModelSettings(m)"
-                        >
+                        <span v-else class="metadata-source-empty">{{t('models.notMatched')}}</span>
+                        <small>{{t('models.contextShort')}} {{fmtNumber(m.context_len || m.context_length)}}</small>
+                      </div>
+
+                      <div class="model-priority-cell">
+                        <span class="model-cell-label">{{t('models.priority')}}</span>
+                        <strong>{{m.priority||0}}</strong>
+                      </div>
+
+                      <div class="model-row-actions">
+                        <button class="btn btn-ghost btn-sm" @click="openModelSettings(m)">
                           {{t('models.settings')}}
                         </button>
-                        <button
-                          class="btn btn-danger btn-sm"
-                          @click="deleteModel(m.id)"
-                        >
+                        <button class="btn btn-danger-ghost btn-sm" @click="deleteModel(m.id)">
                           {{t('models.delete')}}
                         </button>
-                      </td>
-                    </tr>
-                  </table>
+                      </div>
+                    </div>
+
+                    <button class="model-details-toggle" @click="toggleModelDetails(m.id)">
+                      <span>{{expandedModels[m.id]?t('models.hideDetails'):t('models.showDetails')}}</span>
+                      <span :class="{'is-open':expandedModels[m.id]}">⌄</span>
+                    </button>
+
+                    <div v-if="expandedModels[m.id]" class="model-route-details">
+                      <div class="model-target-details">
+                        <div
+                          v-for="upstream in modelUpstreams(m)"
+                          :key="m.id+'-target-'+upstream"
+                          class="model-detail-panel"
+                        >
+                          <div class="model-detail-title">
+                            <strong>{{upstreamLabel(upstream)}}</strong>
+                            <span v-if="isPrimaryModelUpstream(m,upstream)">{{t('models.primaryUpstream')}}</span>
+                          </div>
+                          <dl>
+                            <div><dt>{{t('models.targetModel')}}</dt><dd><code>{{modelTarget(m,upstream).real_model}}</code></dd></div>
+                            <div><dt>{{t('models.protocol')}}</dt><dd>{{modelTarget(m,upstream).protocol}}</dd></div>
+                            <div><dt>{{t('models.keyGroup')}}</dt><dd>{{modelTarget(m,upstream).group}}</dd></div>
+                          </dl>
+                        </div>
+                      </div>
+                      <div class="model-detail-panel metadata-detail-panel">
+                        <div class="model-detail-title">
+                          <strong>{{t('models.metadata')}}</strong>
+                          <span>{{t('models.metadataOnlyHint')}}</span>
+                        </div>
+                        <dl>
+                          <div><dt>OpenRouter</dt><dd>{{m.openrouter_name||m.openrouter_id||t('models.notMatched')}}</dd></div>
+                          <div><dt>{{t('models.contextLen')}}</dt><dd>{{fmtNumber(m.context_len || m.context_length)}}</dd></div>
+                          <div><dt>{{t('models.promptPrice')}}</dt><dd>{{fmtPrice(m.pricing,'prompt')}}</dd></div>
+                          <div><dt>{{t('models.completionPrice')}}</dt><dd>{{fmtPrice(m.pricing,'completion')}}</dd></div>
+                        </dl>
+                        <div class="model-capability-list">
+                          <span
+                            v-for="cap in fmtCapabilities(m)"
+                            :key="m.id+'-'+cap"
+                            class="badge badge-accent capability-badge"
+                          >{{capabilityLabel(cap)}}</span>
+                        </div>
+                        <p v-if="m.description">{{m.description}}</p>
+                        <p v-if="m.customized_fields?.length" class="model-custom-fields">
+                          {{t('models.customizedFields')}}: {{m.customized_fields.join(', ')}}
+                        </p>
+                      </div>
+                    </div>
+                  </article>
                 </div>
               </div>
             </div>
@@ -1222,107 +1350,199 @@
         </div>
       </div>
 
-      <!-- Model Add Modal -->
+      <!-- Model Add/Edit Modal -->
       <div v-if="showModal" class="modal-overlay" @click.self="closeModal">
-        <div class="modal">
-          <h2>{{editingModelId?t('models.editModel'):t('models.addModel')}}</h2>
-          <div class="form-row">
-            <div class="form-group">
-              <label>{{t('models.upstream')}}</label>
-              <select v-model="newModel.upstream">
-                <option value="go">Go (opencode.ai)</option>
-                <option value="ollama">Ollama Cloud</option>
-              </select>
+        <div class="modal model-route-modal" role="dialog" aria-modal="true" :aria-label="editingModelId?t('models.editModel'):t('models.addModel')">
+          <div class="model-modal-header">
+            <div>
+              <h2>{{editingModelId?t('models.editModel'):t('models.addModel')}}</h2>
+              <p>{{t('models.formHint')}}</p>
             </div>
-            <div class="form-group">
-              <label>{{t('models.protocol')}}</label>
-              <select v-model="newModel.protocol">
-                <option value="chat">chat</option>
-                <option value="messages">messages</option>
-                <option value="responses">responses</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label>{{t('models.priority')}}</label>
-              <input v-model.number="newModel.priority" type="number" />
+            <button class="model-icon-button" @click="closeModal" :aria-label="t('common.close')">×</button>
+          </div>
+
+          <div class="model-modal-body">
+            <section class="model-form-section">
+              <div class="model-form-section-title">
+                <span>1</span>
+                <div><h3>{{t('models.basicInfo')}}</h3><p>{{t('models.basicInfoHint')}}</p></div>
+              </div>
+              <div class="form-row">
+                <div class="form-group model-id-field">
+                  <label>{{t('models.modelId')}}</label>
+                  <input v-model="newModel.id" placeholder="glm-5.2" :disabled="!!editingModelId" />
+                </div>
+                <div class="form-group">
+                  <label>{{t('models.displayName')}}</label>
+                  <input v-model="newModel.name" @blur="fillModelIDFromName" :placeholder="t('models.namePlaceholder')" />
+                </div>
+                <div class="form-group model-priority-input">
+                  <label>{{t('models.priority')}}</label>
+                  <input v-model.number="newModel.priority" type="number" />
+                </div>
+              </div>
+              <label class="model-status-control">
+                <input v-model="newModel.status" type="checkbox" :true-value="1" :false-value="0" />
+                <span>{{t('models.enableRoute')}}</span>
+              </label>
+            </section>
+
+            <section class="model-form-section">
+              <div class="model-form-section-title">
+                <span>2</span>
+                <div><h3>{{t('models.routeConfig')}}</h3><p>{{t('models.routeConfigHint')}}</p></div>
+              </div>
+
+              <div class="model-upstream-selector">
+                <label :class="{'is-selected':newModel.upstreams.includes('go')}">
+                  <input
+                    type="checkbox"
+                    :checked="newModel.upstreams.includes('go')"
+                    @change="setModelUpstreamEnabled('go',$event)"
+                  />
+                  <span><strong>OpenCode Go</strong><small>opencode.ai</small></span>
+                </label>
+                <label :class="{'is-selected':newModel.upstreams.includes('ollama')}">
+                  <input
+                    type="checkbox"
+                    :checked="newModel.upstreams.includes('ollama')"
+                    @change="setModelUpstreamEnabled('ollama',$event)"
+                  />
+                  <span><strong>Ollama Cloud</strong><small>ollama.com</small></span>
+                </label>
+              </div>
+
+              <div class="form-group model-primary-select">
+                <label>{{t('models.primaryUpstream')}}</label>
+                <select v-model="newModel.upstream">
+                  <option v-for="upstream in newModel.upstreams" :key="upstream" :value="upstream">
+                    {{upstreamLabel(upstream)}}
+                  </option>
+                </select>
+                <small>{{t('models.primaryUpstreamHint')}}</small>
+              </div>
+
+              <div class="model-target-editor-list">
+                <div v-for="upstream in newModel.upstreams" :key="'editor-'+upstream" class="model-target-editor">
+                  <div class="model-target-editor-head">
+                    <div>
+                      <i :class="upstream"></i>
+                      <strong>{{upstreamLabel(upstream)}}</strong>
+                    </div>
+                    <span v-if="newModel.upstream===upstream">{{t('models.primaryUpstream')}}</span>
+                  </div>
+                  <div class="model-target-editor-grid">
+                    <div class="form-group model-target-model-field">
+                      <label>{{t('models.targetModel')}}</label>
+                      <input
+                        v-model="newModel.targets[upstream].real_model"
+                        :list="'model-options-'+upstream"
+                        :placeholder="newModel.id||t('models.targetPlaceholder')"
+                        @change="applyModelTargetSuggestion(upstream)"
+                      />
+                      <datalist :id="'model-options-'+upstream">
+                        <option v-for="item in availableModelsFor(upstream)" :key="upstream+'-'+item.id" :value="item.id">
+                          {{item.name}}
+                        </option>
+                      </datalist>
+                    </div>
+                    <div class="form-group">
+                      <label>{{t('models.protocol')}}</label>
+                      <select v-model="newModel.targets[upstream].protocol">
+                        <option value="chat">chat</option>
+                        <option value="messages">messages</option>
+                        <option value="responses">responses</option>
+                      </select>
+                    </div>
+                    <div class="form-group">
+                      <label>{{t('models.keyGroup')}}</label>
+                      <input v-model="newModel.targets[upstream].group" :placeholder="upstream" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="model-form-section">
+              <div class="model-form-section-title">
+                <span>3</span>
+                <div><h3>{{t('models.metadataAndBilling')}}</h3><p>{{t('models.metadataFormHint')}}</p></div>
+              </div>
+              <div class="model-metadata-notice">
+                <strong>OpenRouter</strong>
+                <span>{{t('models.metadataOnlyHint')}}</span>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>{{t('models.contextLen')}}</label>
+                  <input v-model.number="newModel.context_len" type="number" min="0" placeholder="128000" />
+                </div>
+                <div class="form-group">
+                  <label>{{t('models.tags')}}</label>
+                  <input v-model="newModel.tags_text" :placeholder="t('models.tagsPlaceholder')" />
+                </div>
+              </div>
+              <h4 class="model-pricing-title">{{t('models.pricing')}}</h4>
+              <div class="model-pricing-grid">
+                <div class="form-group">
+                  <label>{{t('models.promptPrice')}}</label>
+                  <input v-model="newModel.prompt_price" inputmode="decimal" placeholder="0.0000001" />
+                </div>
+                <div class="form-group">
+                  <label>{{t('models.completionPrice')}}</label>
+                  <input v-model="newModel.completion_price" inputmode="decimal" placeholder="0.0000002" />
+                </div>
+                <div class="form-group">
+                  <label>{{t('models.cacheReadPrice')}}</label>
+                  <input v-model="newModel.cache_read_price" inputmode="decimal" placeholder="0.00000002" />
+                </div>
+                <div class="form-group">
+                  <label>{{t('models.cacheWritePrice')}}</label>
+                  <input v-model="newModel.cache_write_price" inputmode="decimal" placeholder="0.00000008" />
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <div class="model-modal-footer">
+            <span>{{editingModelId?t('models.changedOnlyHint'):t('models.createHint')}}</span>
+            <div class="btn-group">
+              <button class="btn btn-ghost" @click="closeModal">{{t('common.cancel')}}</button>
+              <button class="btn btn-primary" @click="addModel">
+                {{editingModelId?t('models.updateBtn'):t('models.addBtn')}}
+              </button>
             </div>
           </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>{{t('models.modelId')}}</label>
-              <input
-                v-model="newModel.id"
-                placeholder="auto-generated"
-                :disabled="!!editingModelId"
-              />
-            </div>
-            <div class="form-group">
-              <label>{{t('models.displayName')}}</label>
-              <input
-                v-model="newModel.name"
-                :placeholder="t('models.namePlaceholder')"
-              />
-            </div>
+        </div>
+      </div>
+
+      <!-- Safe model catalog rebuild -->
+      <div v-if="showModelRebuildModal" class="modal-overlay" @click.self="closeModelRebuild">
+        <div class="modal model-rebuild-modal" role="dialog" aria-modal="true" :aria-label="t('models.rebuildTitle')">
+          <div class="model-rebuild-icon">!</div>
+          <h2>{{t('models.rebuildTitle')}}</h2>
+          <p>{{t('models.rebuildWarning',{count:models.length})}}</p>
+          <div class="model-rebuild-safety">
+            <strong>{{t('models.rebuildSafetyTitle')}}</strong>
+            <ul>
+              <li>{{t('models.rebuildSafetyFetch')}}</li>
+              <li>{{t('models.rebuildSafetyAtomic')}}</li>
+              <li>{{t('models.rebuildSafetyMetadata')}}</li>
+            </ul>
           </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>{{t('models.upstreamModel')}}</label>
-              <select v-model="newModel.real_model">
-                <option value="" disabled>
-                  — {{t('models.select')}} —
-                </option>
-                <option v-for="m in availableModels" :key="m.id" :value="m.id">
-                  {{m.name}} ({{m.id}})
-                </option>
-              </select>
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>{{t('models.contextLen')}}</label>
-              <input
-                v-model.number="newModel.context_len"
-                type="number"
-                placeholder="128000"
-              />
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>{{t('models.tags')}}</label>
-              <input
-                v-model="newModel.tags_text"
-                :placeholder="t('models.tagsPlaceholder')"
-              />
-            </div>
-          </div>
-          <h3 style="margin: 8px 0">{{t('models.pricing')}}</h3>
-          <div class="form-row">
-            <div class="form-group">
-              <label>{{t('models.promptPrice')}}</label>
-              <input v-model="newModel.prompt_price" placeholder="0.0000001" />
-            </div>
-            <div class="form-group">
-              <label>{{t('models.completionPrice')}}</label>
-              <input v-model="newModel.completion_price" placeholder="0.0000002" />
-            </div>
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label>{{t('models.cacheReadPrice')}}</label>
-              <input v-model="newModel.cache_read_price" placeholder="0.00000002" />
-            </div>
-            <div class="form-group">
-              <label>{{t('models.cacheWritePrice')}}</label>
-              <input v-model="newModel.cache_write_price" placeholder="0.00000008" />
-            </div>
+          <div class="form-group">
+            <label>{{t('models.typeToConfirm')}}</label>
+            <input
+              v-model="modelRebuildConfirmation"
+              autocomplete="off"
+              placeholder="REBUILD"
+              @keyup.enter="rebuildModels"
+            />
           </div>
           <div class="btn-group">
-            <button class="btn btn-ghost" @click="closeModal">
-              {{t('common.cancel')}}
-            </button>
-            <button class="btn btn-primary" @click="addModel">
-              {{editingModelId?t('models.updateBtn'):t('models.addBtn')}}
+            <button class="btn btn-ghost" @click="closeModelRebuild" :disabled="rebuildingModels">{{t('common.cancel')}}</button>
+            <button class="btn btn-danger" @click="rebuildModels" :disabled="!canRebuildModels || rebuildingModels">
+              {{rebuildingModels?t('models.rebuilding'):t('models.confirmRebuild')}}
             </button>
           </div>
         </div>
@@ -1548,6 +1768,6 @@
       <div v-if="toast.show" :class="'toast '+toast.type">{{toast.msg}}</div>
     </div>
 
-    <script type="module" src="js/app.js?v=20260630a"></script>
+    <script type="module" src="js/app.js?v=20260719a"></script>
   </body>
 </html>

@@ -220,14 +220,14 @@ func TestSyncPreservesOllamaUpstream(t *testing.T) {
 	config.ReplaceModels(nil)
 
 	ollamaRoute := config.ModelRoute{
-		ID:        "glm-5.2",
-		Name:      "GLM 5.2 (Ollama)",
-		Upstream:  config.UpstreamOllama,
-		Upstreams: []config.Upstream{config.UpstreamOllama, config.UpstreamGo},
-		Protocol:  config.ProtocolChat,
-		RealModel: "glm-5.2",
-		Group:     "ollama",
-		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+		ID:               "glm-5.2",
+		Name:             "GLM 5.2 (Ollama)",
+		Upstream:         config.UpstreamOllama,
+		Upstreams:        []config.Upstream{config.UpstreamOllama, config.UpstreamGo},
+		Protocol:         config.ProtocolChat,
+		RealModel:        "glm-5.2",
+		Group:            "ollama",
+		Status:           config.ModelStatusPtr(config.ModelStatusEnabled),
 		IsCustomized:     true,
 		CustomizedFields: []string{"upstream", "upstreams", "group"},
 	}
@@ -455,14 +455,14 @@ func TestSyncPreservesExplicitlyCustomizedUpstreams(t *testing.T) {
 
 	// Admin explicitly customized the upstream fields.
 	custom := config.ModelRoute{
-		ID:        "glm-5.2",
-		Name:      "Custom GLM",
-		Upstream:  config.UpstreamOllama,
-		Upstreams: []config.Upstream{config.UpstreamOllama},
-		Protocol:  config.ProtocolChat,
-		RealModel: "glm-5.2",
-		Group:     "ollama",
-		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+		ID:               "glm-5.2",
+		Name:             "Custom GLM",
+		Upstream:         config.UpstreamOllama,
+		Upstreams:        []config.Upstream{config.UpstreamOllama},
+		Protocol:         config.ProtocolChat,
+		RealModel:        "glm-5.2",
+		Group:            "ollama",
+		Status:           config.ModelStatusPtr(config.ModelStatusEnabled),
 		IsCustomized:     true,
 		CustomizedFields: []string{"upstream", "upstreams"},
 	}
@@ -769,6 +769,34 @@ func TestP1_3_BuildMergedRouteUsesPerUpstreamRealModel(t *testing.T) {
 	}
 	if ollamaTarget.Protocol != config.ProtocolChat {
 		t.Errorf("Ollama Protocol = %q, want %q", ollamaTarget.Protocol, config.ProtocolChat)
+	}
+}
+
+func TestBuildMergedRouteKeepsPerUpstreamKeyGroupsWhenTargetsOtherwiseMatch(t *testing.T) {
+	sm := sourceModel{
+		ID:        "shared-model",
+		Name:      "Shared Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		perUpstreamTargets: map[config.Upstream]config.UpstreamTarget{
+			config.UpstreamGo: {
+				RealModel: "shared-model",
+				Protocol:  config.ProtocolChat,
+				Group:     "go",
+			},
+			config.UpstreamOllama: {
+				RealModel: "shared-model",
+				Protocol:  config.ProtocolChat,
+				Group:     "ollama",
+			},
+		},
+	}
+	route := buildMergedRoute(sm, store.ModelRouteRow{}, false, true, true)
+	if len(route.Targets) != 2 {
+		t.Fatalf("key-group difference must produce per-upstream targets: %#v", route.Targets)
+	}
+	if got := route.ResolveUpstreamGroup(config.UpstreamOllama); got != "ollama" {
+		t.Fatalf("Ollama group = %q, want ollama", got)
 	}
 }
 
@@ -1334,5 +1362,155 @@ func TestR4_G2_DisabledModelNotInPublicList(t *testing.T) {
 	}
 	if !foundAlive {
 		t.Fatal("alive-model missing from AllEnabledModels()")
+	}
+}
+
+func TestRebuildAtomicallyReplacesCatalogAndKeepsMetadataSeparate(t *testing.T) {
+	if err := store.InitForTest("file:model_rebuild_success?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	old := config.ModelRoute{
+		ID:               "manual-old",
+		Name:             "Manual Old",
+		Upstream:         config.UpstreamGo,
+		Upstreams:        []config.Upstream{config.UpstreamGo},
+		Protocol:         config.ProtocolChat,
+		RealModel:        "manual-old",
+		Group:            "go",
+		Status:           config.ModelStatusPtr(config.ModelStatusEnabled),
+		IsCustomized:     true,
+		CustomizedFields: []string{"name"},
+	}
+	seedRouteForG2(t, old)
+	config.ReplaceModels([]config.ModelRoute{old})
+	defer config.ReplaceModels(nil)
+
+	opencodeSrv := jsonServer(`{"object":"list","data":[{"id":"shared-model","name":"Shared"},{"id":"go-only","name":"Go Only"}]}`)
+	defer opencodeSrv.Close()
+	ollamaSrv := jsonServer(`{"models":[{"name":"shared-model"},{"name":"ollama-only"}]}`)
+	defer ollamaSrv.Close()
+	openrouterSrv := jsonServer(`{"data":[{"id":"shared-model","name":"Shared Metadata","context_length":131072,"pricing":{"prompt":"0.000001"}}]}`)
+	defer openrouterSrv.Close()
+
+	result, err := Rebuild(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(200, 0) },
+	})
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	if result.DeletedCount != 1 || result.CreatedCount != 3 || result.TotalCount != 3 {
+		t.Fatalf("unexpected rebuild counts: %#v", result)
+	}
+	if result.MatchedCount != 1 {
+		t.Fatalf("matched count = %d, want 1", result.MatchedCount)
+	}
+	if _, ok := config.LookupModel("manual-old"); ok {
+		t.Fatal("old manual route should be removed by a full rebuild")
+	}
+	shared, ok := config.LookupModel("shared-model")
+	if !ok {
+		t.Fatal("shared model missing after rebuild")
+	}
+	if len(shared.Upstreams) != 2 || shared.Upstreams[0] != config.UpstreamGo || shared.Upstreams[1] != config.UpstreamOllama {
+		t.Fatalf("shared upstreams = %v, want [go ollama]", shared.Upstreams)
+	}
+	if shared.OpenRouterID != "shared-model" || shared.ContextLen != 131072 {
+		t.Fatalf("OpenRouter metadata not applied: %#v", shared)
+	}
+	for _, upstream := range shared.Upstreams {
+		if upstream != config.UpstreamGo && upstream != config.UpstreamOllama {
+			t.Fatalf("metadata source leaked into routable upstreams: %v", shared.Upstreams)
+		}
+	}
+	rows, err := store.LoadModelRoutes()
+	if err != nil {
+		t.Fatalf("load rebuilt rows: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("persisted rebuilt rows = %d, want 3", len(rows))
+	}
+}
+
+func TestRebuildFetchFailurePreservesExistingCatalog(t *testing.T) {
+	if err := store.InitForTest("file:model_rebuild_failure?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	old := config.ModelRoute{
+		ID:        "keep-me",
+		Name:      "Keep Me",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo},
+		Protocol:  config.ProtocolChat,
+		RealModel: "keep-me",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	}
+	seedRouteForG2(t, old)
+	config.ReplaceModels([]config.ModelRoute{old})
+	defer config.ReplaceModels(nil)
+
+	opencodeSrv := jsonServer(`{"object":"list","data":[{"id":"new-model"}]}`)
+	defer opencodeSrv.Close()
+	ollamaSrv := failingServer()
+	defer ollamaSrv.Close()
+	openrouterSrv := emptyOpenRouterServer()
+	defer openrouterSrv.Close()
+
+	if _, err := Rebuild(context.Background(), Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+	}); err == nil {
+		t.Fatal("rebuild should fail when a routable catalog cannot be fetched")
+	}
+	if _, ok := config.LookupModel("keep-me"); !ok {
+		t.Fatal("runtime catalog changed after failed rebuild")
+	}
+	rows, err := store.LoadModelRoutes()
+	if err != nil {
+		t.Fatalf("load rows: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "keep-me" {
+		t.Fatalf("persisted catalog changed after failed rebuild: %#v", rows)
+	}
+}
+
+func TestSyncReportsUnchangedModelsInsteadOfFalseUpdates(t *testing.T) {
+	if err := store.InitForTest("file:model_sync_unchanged_count?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	config.ReplaceModels(nil)
+	defer config.ReplaceModels(nil)
+
+	opencodeSrv := jsonServer(`{"object":"list","data":[{"id":"stable-model","name":"Stable Model"}]}`)
+	defer opencodeSrv.Close()
+	ollamaSrv := jsonServer(`{"models":[]}`)
+	defer ollamaSrv.Close()
+	openrouterSrv := jsonServer(`{"data":[{"id":"stable-model","name":"Stable Model","context_length":64000,"pricing":{"prompt":"0.000001"}}]}`)
+	defer openrouterSrv.Close()
+
+	options := Options{
+		OpenCodeModelsURL:   opencodeSrv.URL,
+		OllamaModelsURL:     ollamaSrv.URL,
+		OpenRouterModelsURL: openrouterSrv.URL,
+		Now:                 func() time.Time { return time.Unix(300, 0) },
+	}
+	first, err := Sync(context.Background(), options)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	if first.CreatedCount != 1 {
+		t.Fatalf("first sync counts: %#v", first)
+	}
+	options.Now = func() time.Time { return time.Unix(400, 0) }
+	second, err := Sync(context.Background(), options)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	if second.UpdatedCount != 0 || second.UnchangedCount != 1 {
+		t.Fatalf("identical second sync should be unchanged, got %#v", second)
 	}
 }

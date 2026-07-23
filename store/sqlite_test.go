@@ -2,6 +2,8 @@ package store
 
 import (
 	"testing"
+
+	"github.com/xb0or/opencode-GO/config"
 )
 
 // TestP1_1_TryReserveRequestDBError verifies that TryReserveRequest returns
@@ -123,5 +125,41 @@ func TestP1_1_TryReserveRequestQuotaExhausted(t *testing.T) {
 	}
 	if refreshed.RequestsUsed != 2 {
 		t.Errorf("requests_used = %d, want 2", refreshed.RequestsUsed)
+	}
+}
+
+func TestReplaceModelRoutesRollsBackOnInsertFailure(t *testing.T) {
+	if err := InitForTest("file:replace_model_routes_rollback?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	original := NewModelRouteRow(config.ModelRoute{
+		ID:        "original",
+		Name:      "Original",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo},
+		Protocol:  config.ProtocolChat,
+		RealModel: "original",
+		Group:     "go",
+		Status:    config.ModelStatusPtr(config.ModelStatusEnabled),
+	})
+	if err := SaveModelRoute(&original); err != nil {
+		t.Fatalf("seed original route: %v", err)
+	}
+
+	duplicateA := original
+	duplicateA.ID = "duplicate"
+	duplicateA.RealModel = "duplicate-a"
+	duplicateB := duplicateA
+	duplicateB.RealModel = "duplicate-b"
+	if err := ReplaceModelRoutes([]ModelRouteRow{duplicateA, duplicateB}); err == nil {
+		t.Fatal("duplicate primary keys should make replacement fail")
+	}
+
+	rows, err := LoadModelRoutes()
+	if err != nil {
+		t.Fatalf("load rows after rollback: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "original" {
+		t.Fatalf("original catalog was not restored by rollback: %#v", rows)
 	}
 }

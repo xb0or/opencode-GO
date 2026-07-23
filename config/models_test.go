@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestMatchOpenRouterModelUsesSlugSuffix(t *testing.T) {
 	candidates := []openRouterModel{
@@ -57,6 +60,32 @@ func TestApplyOpenRouterMetadataCopiesCatalogFields(t *testing.T) {
 	}
 	if len(route.SupportedParameters) != 3 || route.SupportedParameters[0] != "structured_outputs" {
 		t.Fatalf("SupportedParameters not sorted/copied: %#v", route.SupportedParameters)
+	}
+}
+
+func TestOpenRouterModelIgnoresStructuredPricingExtensions(t *testing.T) {
+	var model OpenRouterModel
+	err := json.Unmarshal([]byte(`{
+		"id":"vendor/model",
+		"name":"Model",
+		"pricing":{
+			"prompt":"0.000001",
+			"completion":0.000002,
+			"overrides":[{"min_prompt_tokens":272000,"prompt":"0.000003"}],
+			"internal":null
+		}
+	}`), &model)
+	if err != nil {
+		t.Fatalf("unmarshal OpenRouter model: %v", err)
+	}
+	if model.Pricing["prompt"] != "0.000001" || model.Pricing["completion"] != "0.000002" {
+		t.Fatalf("scalar pricing not preserved: %#v", model.Pricing)
+	}
+	if _, ok := model.Pricing["overrides"]; ok {
+		t.Fatalf("structured pricing extension should be ignored: %#v", model.Pricing)
+	}
+	if _, ok := model.Pricing["internal"]; ok {
+		t.Fatalf("null pricing extension should be ignored: %#v", model.Pricing)
 	}
 }
 

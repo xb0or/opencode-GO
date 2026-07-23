@@ -83,6 +83,7 @@ func Mount(rg *gin.RouterGroup) {
 		authed.GET("/usage", listUsageLogs)
 		authed.GET("/models", listModelsAdmin)
 		authed.POST("/models/sync", syncModels)
+		authed.POST("/models/rebuild", rebuildModels)
 		authed.POST("/models", upsertModel)
 		authed.PATCH("/models/:id", updateModel)
 		authed.POST("/models/:id/toggle", toggleModel)
@@ -565,6 +566,36 @@ func syncModels(c *gin.Context) {
 	defer cancel()
 	result, err := modelsync.Sync(ctx, modelsync.Options{})
 	if err != nil {
+		if err == modelsync.ErrSyncInProgress {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "result": result})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "result": result})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func rebuildModels(c *gin.Context) {
+	var body struct {
+		Confirmation string `json:"confirmation"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "confirmation is required"})
+		return
+	}
+	if strings.ToUpper(strings.TrimSpace(body.Confirmation)) != "REBUILD" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "type REBUILD to confirm catalog replacement"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer cancel()
+	result, err := modelsync.Rebuild(ctx, modelsync.Options{})
+	if err != nil {
+		if err == modelsync.ErrSyncInProgress {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "result": result})
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "result": result})
 		return
 	}
@@ -573,20 +604,20 @@ func syncModels(c *gin.Context) {
 
 func upsertModel(c *gin.Context) {
 	var body struct {
-		ID              string                    `json:"id"`
-		Name            *string                   `json:"name"`
-		Upstream        *config.Upstream           `json:"upstream"`
-		Upstreams       *[]config.Upstream         `json:"upstreams,omitempty"`
-		UpstreamGroups  *map[config.Upstream]string `json:"upstream_groups,omitempty"`
-		Targets         *map[config.Upstream]config.UpstreamTarget `json:"targets,omitempty"`
-		Protocol        *config.Protocol           `json:"protocol"`
-		RealModel       *string                    `json:"real_model"`
-		Group           string                     `json:"group"`
-		ContextLen      *int                       `json:"context_len"`
-		Status          *int                       `json:"status"`
-		Priority        *int                       `json:"priority"`
-		Tags            []string                   `json:"tags"`
-		Pricing         map[string]string           `json:"pricing"`
+		ID             string                                     `json:"id"`
+		Name           *string                                    `json:"name"`
+		Upstream       *config.Upstream                           `json:"upstream"`
+		Upstreams      *[]config.Upstream                         `json:"upstreams,omitempty"`
+		UpstreamGroups *map[config.Upstream]string                `json:"upstream_groups,omitempty"`
+		Targets        *map[config.Upstream]config.UpstreamTarget `json:"targets,omitempty"`
+		Protocol       *config.Protocol                           `json:"protocol"`
+		RealModel      *string                                    `json:"real_model"`
+		Group          string                                     `json:"group"`
+		ContextLen     *int                                       `json:"context_len"`
+		Status         *int                                       `json:"status"`
+		Priority       *int                                       `json:"priority"`
+		Tags           []string                                   `json:"tags"`
+		Pricing        map[string]string                          `json:"pricing"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -619,7 +650,7 @@ func upsertModel(c *gin.Context) {
 		Group:    body.Group,
 		Status:   config.ModelStatusPtr(config.ModelStatusEnabled),
 	}
-	changed := []string{"protocol"}
+	changed := []string{"protocol", "group"}
 	if body.Upstream != nil {
 		if !config.IsValidUpstream(*body.Upstream) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unknown upstream %q (valid: go, ollama)", *body.Upstream)})
@@ -707,6 +738,7 @@ func upsertModel(c *gin.Context) {
 	}
 	if body.Status != nil {
 		route.Status = config.ModelStatusPtr(*body.Status)
+		changed = append(changed, "status")
 	}
 	if body.Priority != nil {
 		route.Priority = *body.Priority
@@ -746,18 +778,19 @@ func updateModel(c *gin.Context) {
 	route := store.ModelRouteFromRow(row)
 
 	var body struct {
-		Name            *string                    `json:"name"`
-		Upstream        *config.Upstream           `json:"upstream"`
-		Upstreams       *[]config.Upstream         `json:"upstreams,omitempty"`
-		UpstreamGroups  *map[config.Upstream]string `json:"upstream_groups,omitempty"`
-		Targets         *map[config.Upstream]config.UpstreamTarget `json:"targets,omitempty"`
-		Protocol        *config.Protocol           `json:"protocol"`
-		RealModel       *string                    `json:"real_model"`
-		ContextLen      *int                       `json:"context_len"`
-		Status          *int                       `json:"status"`
-		Priority        *int                       `json:"priority"`
-		Tags            []string                   `json:"tags"`
-		Pricing         map[string]string           `json:"pricing"`
+		Name           *string                                    `json:"name"`
+		Upstream       *config.Upstream                           `json:"upstream"`
+		Upstreams      *[]config.Upstream                         `json:"upstreams,omitempty"`
+		UpstreamGroups *map[config.Upstream]string                `json:"upstream_groups,omitempty"`
+		Targets        *map[config.Upstream]config.UpstreamTarget `json:"targets,omitempty"`
+		Protocol       *config.Protocol                           `json:"protocol"`
+		RealModel      *string                                    `json:"real_model"`
+		Group          *string                                    `json:"group"`
+		ContextLen     *int                                       `json:"context_len"`
+		Status         *int                                       `json:"status"`
+		Priority       *int                                       `json:"priority"`
+		Tags           []string                                   `json:"tags"`
+		Pricing        map[string]string                          `json:"pricing"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -850,6 +883,15 @@ func updateModel(c *gin.Context) {
 		route.RealModel = strings.TrimSpace(*body.RealModel)
 		changed = append(changed, "real_model")
 	}
+	if body.Group != nil {
+		group := strings.TrimSpace(*body.Group)
+		if group == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "group must not be empty"})
+			return
+		}
+		route.Group = group
+		changed = append(changed, "group")
+	}
 	if body.ContextLen != nil {
 		route.ContextLen = *body.ContextLen
 		changed = append(changed, "context_len")
@@ -868,6 +910,7 @@ func updateModel(c *gin.Context) {
 	}
 	if body.Status != nil {
 		route.Status = config.ModelStatusPtr(*body.Status)
+		changed = append(changed, "status")
 	}
 	route.CustomizedFields = mergeModelCustomizedFields(id, route.CustomizedFields, changed...)
 	route.IsCustomized = route.IsCustomized || len(changed) > 0 || len(route.CustomizedFields) > 0
@@ -896,6 +939,8 @@ func toggleModel(c *gin.Context) {
 	} else {
 		route.Status = config.ModelStatusPtr(config.ModelStatusEnabled)
 	}
+	route.CustomizedFields = mergeModelCustomizedFields(id, route.CustomizedFields, "status")
+	route.IsCustomized = true
 	nextRow := store.NewModelRouteRow(route)
 	nextRow.CreatedAt = row.CreatedAt
 	nextRow.LastSyncedAt = row.LastSyncedAt
