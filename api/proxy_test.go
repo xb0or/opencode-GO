@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 54761)
-Total output lines: 6009
-
 package api
 
 import (
@@ -2889,7 +2886,553 @@ func TestLastUpstreamErrorDoesNotPreserveStaleEntityHeaders(t *testing.T) {
 		Upstream:  config.UpstreamGo,
 		Upstreams: []config.Upstream{config.UpstreamGo},
 		Protocol:  config.ProtocolChat,
-		RealMode…4761 tokens truncated…fig.UpstreamGo, config.UpstreamOllama},
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("entity-headers-model")
+
+	tok, err := pool.CreateToken("entity-headers-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "go-key",
+		Group:   "go",
+		Label:   "go-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+
+	body := `{"model":"entity-headers-model","messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r := NewRouter(pool.NewPicker())
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429; body=%s", w.Code, w.Body.String())
+	}
+
+	// Content-Length must NOT be the upstream's value (24).
+	if w.Header().Get("Content-Length") == "24" {
+		t.Fatal("stale Content-Length from upstream was preserved")
+	}
+	// Content-Encoding must NOT be "gzip".
+	if w.Header().Get("Content-Encoding") == "gzip" {
+		t.Fatal("stale Content-Encoding from upstream was preserved")
+	}
+	// Retry-After must be preserved.
+	if w.Header().Get("Retry-After") != "120" {
+		t.Fatalf("Retry-After = %q, want 120", w.Header().Get("Retry-After"))
+	}
+	// X-RateLimit-Remaining must be preserved.
+	if w.Header().Get("X-RateLimit-Remaining") != "0" {
+		t.Fatalf("X-RateLimit-Remaining = %q, want 0", w.Header().Get("X-RateLimit-Remaining"))
+	}
+	// Body must be valid JSON (not truncated).
+	var resp struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response body is not valid JSON: %v; raw=%q", err, w.Body.String())
+	}
+	if resp.Error.Type != "rate_limit_error" {
+		t.Fatalf("error type = %q, want rate_limit_error", resp.Error.Type)
+	}
+}
+
+// TestAllowedPrimaryFailureIsNotOverriddenByDisallowedFallback verifies that
+// when a token-allowed upstream fails (503) and the next upstream is not
+// allowed by the token, the real failure status (503) is returned — not 403.
+func TestAllowedPrimaryFailureIsNotOverriddenByDisallowedFallback(t *testing.T) {
+	if err := store.InitForTest("file:primary_fail_not_overridden?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":{"message":"go overloaded"}}`))
+	}))
+	defer goSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	defer func() { cfg.GoBaseURL = oldGoURL }()
+
+	// Route has Go and Ollama upstreams. Token only allows "go" group.
+	config.RegisterModel(config.ModelRoute{
+		ID:        "primary-fail-model",
+		Name:      "Primary Fail",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("primary-fail-model")
+
+	tok, err := pool.CreateToken("primary-fail-client", "go", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "go-key",
+		Group:   "go",
+		Label:   "go-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create go key: %v", err)
+	}
+
+	body := `{"model":"primary-fail-model","messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r := NewRouter(pool.NewPicker())
+	r.ServeHTTP(w, req)
+
+	// Must be 503 (the real upstream failure), not 403 (permission denied).
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (real upstream failure), not 403; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestDisallowedPrimaryFallbackToAllowedSucceeds verifies the reverse case:
+// the first upstream is not allowed by the token, but the second is allowed
+// and succeeds — the request should succeed.
+func TestDisallowedPrimaryFallbackToAllowedSucceeds(t *testing.T) {
+	if err := store.InitForTest("file:disallowed_primary?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"m","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	cfg := config.Get()
+	oldOllamaURL := cfg.OllamaBaseURL
+	cfg.OllamaBaseURL = ollamaSrv.URL
+	defer func() { cfg.OllamaBaseURL = oldOllamaURL }()
+
+	// Route has Go and Ollama upstreams. Token only allows "ollama" group.
+	config.RegisterModel(config.ModelRoute{
+		ID:        "disallowed-primary-model",
+		Name:      "Disallowed Primary",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	})
+	defer config.RemoveModel("disallowed-primary-model")
+
+	tok, err := pool.CreateToken("disallowed-primary-client", "ollama", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value:   "ollama-key",
+		Group:   "ollama",
+		Label:   "ollama-test",
+		Enabled: true,
+		Weight:  1,
+	}).Error; err != nil {
+		t.Fatalf("create ollama key: %v", err)
+	}
+
+	body := `{"model":"disallowed-primary-model","messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r := NewRouter(pool.NewPicker())
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P0-2: Same-protocol SSE must deliver the first complete event to the
+// client during an upstream pause, and every small event must be flushed
+// promptly (no batching).
+// ---------------------------------------------------------------------------
+
+// TestP0_2_FirstEventDeliveredDuringUpstreamPause verifies that the proxy
+// flushes the first complete SSE event (including the terminating blank
+// line) to the client BEFORE the upstream sends anything else. The upstream
+// sends one event, then pauses 500ms, then sends [DONE]. The client must
+// receive the first event during the pause — proving the proxy does not
+// wait for the full upstream stream before flushing.
+func TestP0_2_FirstEventDeliveredDuringUpstreamPause(t *testing.T) {
+	if err := store.InitForTest("file:p02_first_event_pause?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream ResponseWriter does not support flushing")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// First complete event.
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"))
+		flusher.Flush()
+		// Pause — the client must receive the first event during this gap.
+		time.Sleep(500 * time.Millisecond)
+		// Then the terminating event.
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "p02-pause-model",
+		Name:      "P0-2 Pause Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "p02-pause-model",
+		Group:     "go",
+	})
+	defer config.RemoveModel("p02-pause-model")
+
+	tok, err := pool.CreateToken("p02-pause-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "upstream-key", Group: "go", Label: "test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	// Use a real HTTP server + client so we can observe streaming behavior.
+	proxySrv := httptest.NewServer(NewRouter(pool.NewPicker()))
+	defer proxySrv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, proxySrv.URL+"/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"p02-pause-model","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	// Read the first event with a deadline. The upstream pauses 500ms after
+	// the first event, so we should receive it well within 400ms (giving
+	// some slack). If the proxy buffers the whole stream, we would time out.
+	reader := bufio.NewReader(resp.Body)
+	deadline := time.Now().Add(400 * time.Millisecond)
+	type result struct {
+		event string
+		err   error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		var sb strings.Builder
+		for {
+			line, err := reader.ReadSlice('\n')
+			if len(line) > 0 {
+				sb.Write(line)
+			}
+			// A complete SSE event ends with a blank line (\n\n).
+			if strings.HasSuffix(sb.String(), "\n\n") {
+				ch <- result{event: sb.String(), err: nil}
+				return
+			}
+			if err != nil {
+				ch <- result{event: sb.String(), err: err}
+				return
+			}
+		}
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			t.Fatalf("read first event: %v (partial=%q)", res.err, res.event)
+		}
+		// Must contain the first data line AND the terminating blank line.
+		if !strings.Contains(res.event, `"hello"`) {
+			t.Errorf("first event missing content: %q", res.event)
+		}
+		if !strings.HasSuffix(res.event, "\n\n") {
+			t.Errorf("first event not terminated by blank line: %q", res.event)
+		}
+		// Must NOT contain [DONE] — that arrives after the pause.
+		if strings.Contains(res.event, "[DONE]") {
+			t.Errorf("first event contains [DONE], should only arrive after pause: %q", res.event)
+		}
+	case <-time.After(time.Until(deadline)):
+		t.Fatal("timed out waiting for first SSE event — proxy is buffering instead of flushing")
+	}
+}
+
+// TestP0_2_MultipleSmallEventsFlushedPromptly verifies that multiple small
+// SSE events are each flushed promptly to the client, not batched into a
+// single delivery. The upstream sends 5 small events with 100ms between
+// each. The client should receive each one within a short window of its
+// dispatch, proving per-write flushing works.
+func TestP0_2_MultipleSmallEventsFlushedPromptly(t *testing.T) {
+	if err := store.InitForTest("file:p02_multi_small_events?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("upstream ResponseWriter does not support flushing")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < 5; i++ {
+			_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"%d\"}}]}\n\n", i)
+			flusher.Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		flusher.Flush()
+	}))
+	defer upstreamSrv.Close()
+
+	cfg := config.Get()
+	oldBaseURL := cfg.GoBaseURL
+	cfg.GoBaseURL = upstreamSrv.URL
+	defer func() { cfg.GoBaseURL = oldBaseURL }()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "p02-multi-model",
+		Name:      "P0-2 Multi Model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "p02-multi-model",
+		Group:     "go",
+	})
+	defer config.RemoveModel("p02-multi-model")
+
+	tok, err := pool.CreateToken("p02-multi-client", "", 0, nil)
+	if err != nil {
+		t.Fatalf("create token: %v", err)
+	}
+	if err := store.DB().Create(&store.Key{
+		Value: "upstream-key", Group: "go", Label: "test", Enabled: true, Weight: 1,
+	}).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	proxySrv := httptest.NewServer(NewRouter(pool.NewPicker()))
+	defer proxySrv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, proxySrv.URL+"/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"p02-multi-model","messages":[{"role":"user","content":"hi"}],"stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+tok.Token)
+	req.Header.Set("Content-Type", "application/json")
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	eventsByTime := make([]time.Duration, 0, 5)
+	for len(eventsByTime) < 5 {
+		var sb strings.Builder
+		for {
+			line, rerr := reader.ReadSlice('\n')
+			if len(line) > 0 {
+				sb.Write(line)
+			}
+			if strings.HasSuffix(sb.String(), "\n\n") {
+				eventsByTime = append(eventsByTime, time.Since(start))
+				break
+			}
+			if rerr != nil {
+				t.Fatalf("read event %d: %v (partial=%q)", len(eventsByTime)+1, rerr, sb.String())
+			}
+		}
+	}
+
+	// The first event should arrive within ~200ms. If the proxy batches
+	// everything, it would only arrive after the full stream (500ms+).
+	if eventsByTime[0] > 300*time.Millisecond {
+		t.Errorf("first event arrived at %v, expected < 300ms (proxy may be buffering)", eventsByTime[0])
+	}
+	// Events should arrive progressively, not all at once at the end.
+	// The last event arrives after ~500ms. If all 5 arrived within a
+	// tiny window near 500ms, the proxy is batching.
+	lastArrival := eventsByTime[len(eventsByTime)-1]
+	if lastArrival < 400*time.Millisecond {
+		t.Errorf("last event arrived at %v, expected >= 400ms (events should arrive progressively, not batched)", lastArrival)
+	}
+	// Check progressive delivery: at least 2 events should arrive before 400ms.
+	earlyEvents := 0
+	for _, tt := range eventsByTime {
+		if tt < 400*time.Millisecond {
+			earlyEvents++
+		}
+	}
+	if earlyEvents < 2 {
+		t.Errorf("only %d events arrived before 400ms, expected >= 2 (events are being batched): %v", earlyEvents, eventsByTime)
+	}
+}
+
+// TestP0_2_ReadFirstSSEEventCompleteEvent verifies the readFirstSSEEvent
+// helper returns a complete event (data line + terminating blank line),
+// not just the data line.
+func TestP0_2_ReadFirstSSEEventCompleteEvent(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		wantOK bool
+		// The returned event must end with \n\n (the blank terminator).
+		wantSuffix string
+	}{
+		{
+			name:       "standard event with blank terminator",
+			input:      "data: {\"x\":1}\n\n",
+			wantOK:     true,
+			wantSuffix: "\n\n",
+		},
+		{
+			name:       "event with comment line first",
+			input:      ": keepalive\ndata: {\"x\":2}\n\n",
+			wantOK:     true,
+			wantSuffix: "\n\n",
+		},
+		{
+			name:       "DONE event is not the first valid event",
+			input:      "data: [DONE]\n\ndata: {\"x\":3}\n\n",
+			wantOK:     true,
+			wantSuffix: "\n\n",
+		},
+		{
+			name:       "EOF without blank line but with data",
+			input:      "data: {\"x\":4}\n",
+			wantOK:     true,
+			wantSuffix: "\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := bufio.NewReaderSize(strings.NewReader(tc.input), maxSSERead)
+			event, ok, err := readFirstSSEEvent(r)
+			if err != nil {
+				t.Fatalf("readFirstSSEEvent: %v", err)
+			}
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v; event=%q", ok, tc.wantOK, event)
+			}
+			if !tc.wantOK {
+				return
+			}
+			if !strings.HasSuffix(string(event), tc.wantSuffix) {
+				t.Errorf("event %q does not end with %q", string(event), tc.wantSuffix)
+			}
+		})
+	}
+}
+
+// TestP0_2_ReadFirstSSEEventHardLimit verifies that a huge line with no
+// newline does not exhaust memory — readFirstSSEEvent must bail out at
+// maxSSERead bytes.
+func TestP0_2_ReadFirstSSEEventHardLimit(t *testing.T) {
+	// Build a huge line with no newline and no data: prefix — this
+	// should hit the hard cap and return an error, not grow unbounded.
+	huge := strings.Repeat("A", maxSSERead+4096)
+	r := bufio.NewReaderSize(strings.NewReader(huge), maxSSERead)
+	_, ok, err := readFirstSSEEvent(r)
+	if ok {
+		t.Fatal("expected ok=false for a huge line with no SSE event, got true")
+	}
+	if err == nil {
+		t.Fatal("expected an error for a huge line exceeding maxSSERead, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// P0-1: Non-retryable client errors (400/404/409/413/415/422) must NOT
+// trigger key failover or upstream failover. The original upstream status
+// code must be preserved — no synthetic 502.
+// ---------------------------------------------------------------------------
+
+// TestP0_1_NonRetryable400DoesNotSwitchKey verifies that when the first Go
+// key returns HTTP 400, the proxy does NOT try a second key or a second
+// upstream, and the client sees the original 400 (not a 502).
+func TestP0_1_NonRetryable400DoesNotSwitchKey(t *testing.T) {
+	if err := store.InitForTest("file:p01_400_no_switch_key?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	gin.SetMode(gin.TestMode)
+
+	var goRequestCount int32
+	var secondKeyUsed int32
+
+	goSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&goRequestCount, 1)
+		auth := r.Header.Get("Authorization")
+		if strings.Contains(auth, "go-key-2") {
+			atomic.StoreInt32(&secondKeyUsed, 1)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid request: model field is required","type":"invalid_request_error"}}`))
+	}))
+	defer goSrv.Close()
+
+	ollamaContacted := int32(0)
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.StoreInt32(&ollamaContacted, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-ollama","model":"m","choices":[]}`))
+	}))
+	defer ollamaSrv.Close()
+
+	cfg := config.Get()
+	oldGoURL := cfg.GoBaseURL
+	oldOllamaURL := cfg.OllamaBaseURL
+	cfg.GoBaseURL = goSrv.URL
+	cfg.OllamaBaseURL = ollamaSrv.URL
+	defer func() {
+		cfg.GoBaseURL = oldGoURL
+		cfg.OllamaBaseURL = oldOllamaURL
+	}()
+
+	config.RegisterModel(config.ModelRoute{
+		ID:        "p01-400-model",
+		Name:      "P0-1 400 Model",
+		Upstream:  config.UpstreamGo,
+		Upstreams: []config.Upstream{config.UpstreamGo, config.UpstreamOllama},
 		Protocol:  config.ProtocolChat,
 		RealModel: "m",
 		Group:     "go",
