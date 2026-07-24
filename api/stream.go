@@ -113,6 +113,8 @@ func proxySameProtocolSSEBuffered(c *gin.Context, resp *http.Response,
 	p *pool.Picker, key *store.Key, route config.ModelRoute, inbound config.Protocol,
 	start time.Time, body []byte) responseResult {
 
+	timing := newStreamTimingCapture(inbound, start)
+	timing.Observe(body)
 	_, valid, preReadErr := findFirstValidContentSSEData(body, inbound)
 	if !valid {
 		markKeyFailure(p, key, http.StatusBadGateway, body)
@@ -155,9 +157,9 @@ func proxySameProtocolSSEBuffered(c *gin.Context, resp *http.Response,
 	}
 	if resp.StatusCode < 400 && writeErr == nil {
 		p.MarkSuccess(key.ID)
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "")
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "", timing.Metrics().args()...)
 	} else {
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, copyErrString(writeErr))
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, copyErrString(writeErr), timing.Metrics().args()...)
 	}
 	return responseResult{ResponseStarted: true}
 }
@@ -179,7 +181,9 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	// hitting ErrBufferFull prematurely. Bytes read ahead but not returned
 	// by readFirstSSEEvent stay in this bufReader for the subsequent
 	// io.Copy — no data is lost.
-	bufReader := bufio.NewReaderSize(resp.Body, maxSSERead)
+	timing := newStreamTimingCapture(inbound, start)
+	timedBody := &firstByteTimingReader{src: resp.Body, capture: timing}
+	bufReader := bufio.NewReaderSize(timedBody, maxSSERead)
 	firstEvent, valid, preReadErr := readFirstContentSSEEvent(bufReader, inbound)
 	if !valid {
 		_ = resp.Body.Close()
@@ -194,6 +198,7 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 			Retryable: true,
 		}
 	}
+	timing.Observe(firstEvent)
 
 	// First valid event found — commit response headers and first event.
 	copyResponseHeaders(c, resp)
@@ -204,7 +209,7 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	_, writeErr := c.Writer.Write(firstEvent)
 	if writeErr != nil {
 		_ = resp.Body.Close()
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, nil, "client write error: "+writeErr.Error())
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, nil, "client write error: "+writeErr.Error(), timing.Metrics().args()...)
 		return responseResult{ResponseStarted: true}
 	}
 	c.Writer.Flush()
@@ -235,9 +240,9 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	if tracker != nil {
 		// Tracker goes FIRST so it sees the chunk even if the client write
 		// fails (ensuring we record a failure terminal in the same chunk).
-		writers = []io.Writer{tracker, fw, tail}
+		writers = []io.Writer{tracker, fw, tail, timing}
 	} else {
-		writers = []io.Writer{fw, tail}
+		writers = []io.Writer{fw, tail, timing}
 	}
 	mw := io.MultiWriter(writers...)
 	_, copyErr := io.Copy(mw, bufReader)
@@ -257,33 +262,33 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 			// Upstream reported failure — mark key as failed, do NOT MarkSuccess.
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true,
-				usage, "upstream responses stream failed after commit")
+				usage, "upstream responses stream failed after commit", timing.Metrics().args()...)
 			return responseResult{ResponseStarted: true}
 		case copyErr != nil:
 			// Client write error (e.g. disconnect) — don't punish the key.
 			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true,
-				usage, "stream copy error: "+copyErr.Error())
+				usage, "stream copy error: "+copyErr.Error(), timing.Metrics().args()...)
 			return responseResult{ResponseStarted: true}
 		case terminalErr != nil:
 			// No valid terminal event (ErrUnexpectedEOF or parse error).
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true,
-				usage, "invalid responses stream terminal: "+terminalErr.Error())
+				usage, "invalid responses stream terminal: "+terminalErr.Error(), timing.Metrics().args()...)
 			return responseResult{ResponseStarted: true}
 		default:
 			// response.completed or response.incomplete — healthy terminal.
 			p.MarkSuccess(key.ID)
-			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "")
+			markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "", timing.Metrics().args()...)
 			return responseResult{ResponseStarted: true}
 		}
 	}
 
 	// Non-Responses protocols: original logic.
 	if copyErr != nil {
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "stream copy error: "+copyErr.Error())
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "stream copy error: "+copyErr.Error(), timing.Metrics().args()...)
 	} else {
 		p.MarkSuccess(key.ID)
-		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "")
+		markAndLog(c, p, key, route, inbound, resp.StatusCode, start, true, usage, "", timing.Metrics().args()...)
 	}
 	return responseResult{ResponseStarted: true}
 }
@@ -354,9 +359,12 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		// P0-2: do NOT commit HTTP 200 yet. Run the incremental converter with a
 		// staging buffer and an onFirstEvent hook (see proxyCrossProtocolStream
 		// for the full rationale).
+		timing := newStreamTimingCapture(inbound, start)
+		timing.Observe(body)
 		committed := false
 		var staging bytes.Buffer
 		sw := &switchWriter{staging: &staging}
+		timedSW := &timingWriter{dst: sw, capture: timing}
 		onFirstEvent := func() error {
 			c.Writer.Header().Set("Content-Type", "text/event-stream")
 			c.Writer.Header().Set("Cache-Control", "no-cache")
@@ -378,13 +386,13 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		}
 		acc, convErr := protocol.StreamConvertIncremental(
 			string(upstreamProto), string(inbound),
-			firstEvent, restReader, sw, nil, onFirstEvent,
+			firstEvent, restReader, timedSW, nil, onFirstEvent,
 		)
 		if convErr != nil {
 			if !committed {
 				markKeyFailure(p, key, http.StatusBadGateway, nil)
 				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true,
-					usageFromIRUsage(acc), "stream decode failed: "+convErr.Error())
+					usageFromIRUsage(acc), "stream decode failed: "+convErr.Error(), timing.Metrics().args()...)
 				return responseResult{
 					Err:       fmt.Errorf("stream decode failed: %w", convErr),
 					Retryable: true,
@@ -392,13 +400,13 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 			}
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
-				usageFromIRUsage(acc), "stream convert error: "+convErr.Error())
+				usageFromIRUsage(acc), "stream convert error: "+convErr.Error(), timing.Metrics().args()...)
 			return responseResult{ResponseStarted: true}
 		}
 		if !committed {
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true,
-				nil, "cross-protocol stream produced no valid target events")
+				nil, "cross-protocol stream produced no valid target events", timing.Metrics().args()...)
 			return responseResult{
 				Err:       fmt.Errorf("stream produced no valid target events"),
 				Retryable: true,
@@ -406,9 +414,9 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 		}
 		p.MarkSuccess(key.ID)
 		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
-			usageFromIRUsage(acc), "")
+			usageFromIRUsage(acc), "", timing.Metrics().args()...)
 		return responseResult{ResponseStarted: true}
-		}
+	}
 
 	// Non-streaming: convert the response.
 	converted, err := protocol.ConvertResponse(upstreamProto, inbound, body)
@@ -752,7 +760,9 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 	inbound, upstreamProto config.Protocol,
 	p *pool.Picker, key *store.Key, route config.ModelRoute, start time.Time) responseResult {
 
-	bufReader := bufio.NewReaderSize(resp.Body, maxSSERead)
+	timing := newStreamTimingCapture(inbound, start)
+	timedBody := &firstByteTimingReader{src: resp.Body, capture: timing}
+	bufReader := bufio.NewReaderSize(timedBody, maxSSERead)
 	firstEvent, found, readErr := readFirstSSEEvent(bufReader)
 	if readErr != nil || !found {
 		errBody, _ := io.ReadAll(io.LimitReader(bufReader, maxErrorBodyRead))
@@ -776,6 +786,10 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 			Retryable: true,
 		}
 	}
+	// The first upstream event has arrived. Cross-protocol conversion may
+	// produce several target events from it, so record FRT independently from
+	// the first target token observed below.
+	timing.SetFirstResponseNow()
 
 	// P0-2: do NOT commit HTTP 200 yet. Run the incremental converter with a
 	// staging buffer and an onFirstEvent hook. The hook fires after the first
@@ -788,6 +802,7 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 	// The converter writes to a switchable writer: staging first, then the
 	// real client writer after onFirstEvent commits.
 	sw := &switchWriter{staging: &staging}
+	timedSW := &timingWriter{dst: sw, capture: timing}
 
 	onFirstEvent := func() error {
 		// P0-3: mark committed IMMEDIATELY after WriteHeader so the caller
@@ -818,7 +833,7 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 
 	acc, convErr := protocol.StreamConvertIncremental(
 		string(upstreamProto), string(inbound),
-		firstEvent, bufReader, sw, nil, onFirstEvent,
+		firstEvent, bufReader, timedSW, nil, onFirstEvent,
 	)
 	_ = resp.Body.Close()
 	if convErr != nil {
@@ -829,7 +844,7 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 			markKeyFailure(p, key, http.StatusBadGateway, nil)
 			errMsg := "cross-protocol stream decode failed: " + convErr.Error()
 			markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true,
-				usageFromIRUsage(acc), errMsg)
+				usageFromIRUsage(acc), errMsg, timing.Metrics().args()...)
 			return responseResult{
 				Err:       fmt.Errorf("stream decode failed: %w", convErr),
 				Retryable: true,
@@ -843,19 +858,19 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 		//     must NOT receive success terminal events (handled by onError).
 		if errors.Is(convErr, errClientWriteAfterCommit) {
 			markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
-				usageFromIRUsage(acc), "client write failed after commit: "+convErr.Error())
+				usageFromIRUsage(acc), "client write failed after commit: "+convErr.Error(), timing.Metrics().args()...)
 			return responseResult{ResponseStarted: true}
 		}
 		markKeyFailure(p, key, http.StatusBadGateway, nil)
 		markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
-			usageFromIRUsage(acc), "stream convert error: "+convErr.Error())
+			usageFromIRUsage(acc), "stream convert error: "+convErr.Error(), timing.Metrics().args()...)
 		return responseResult{ResponseStarted: true}
 	}
 	if !committed {
 		// No error but also no valid target event — treat as a failed stream.
 		markKeyFailure(p, key, http.StatusBadGateway, nil)
 		markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true,
-			nil, "cross-protocol stream produced no valid target events")
+			nil, "cross-protocol stream produced no valid target events", timing.Metrics().args()...)
 		return responseResult{
 			Err:       fmt.Errorf("stream produced no valid target events"),
 			Retryable: true,
@@ -863,7 +878,7 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 	}
 	p.MarkSuccess(key.ID)
 	markAndLog(c, p, key, route, inbound, http.StatusOK, start, true,
-		usageFromIRUsage(acc), "")
+		usageFromIRUsage(acc), "", timing.Metrics().args()...)
 	return responseResult{ResponseStarted: true}
 }
 

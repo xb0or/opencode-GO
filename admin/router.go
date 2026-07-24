@@ -1166,13 +1166,13 @@ func stats(c *gin.Context) {
 
 	var todayActualCost float64
 	store.DB().Model(&store.UsageLog{}).
-		Select("coalesce(sum(actual_cost),0)").
+		Select("coalesce(sum(case when actual_cost > 0 then actual_cost else total_cost * case when group_multiplier > 0 then group_multiplier else 1 end end),0)").
 		Where("created_at >= ?", todayStart).
 		Scan(&todayActualCost)
 
 	var todayAccountCost float64
 	store.DB().Model(&store.UsageLog{}).
-		Select("coalesce(sum(account_cost),0)").
+		Select("coalesce(sum(case when account_cost > 0 then account_cost else case when actual_cost > 0 then actual_cost else total_cost * case when group_multiplier > 0 then group_multiplier else 1 end end end),0)").
 		Where("created_at >= ?", todayStart).
 		Scan(&todayAccountCost)
 
@@ -1183,12 +1183,12 @@ func stats(c *gin.Context) {
 
 	var totalActualCost float64
 	store.DB().Model(&store.UsageLog{}).
-		Select("coalesce(sum(actual_cost),0)").
+		Select("coalesce(sum(case when actual_cost > 0 then actual_cost else total_cost * case when group_multiplier > 0 then group_multiplier else 1 end end),0)").
 		Scan(&totalActualCost)
 
 	var totalAccountCost float64
 	store.DB().Model(&store.UsageLog{}).
-		Select("coalesce(sum(account_cost),0)").
+		Select("coalesce(sum(case when account_cost > 0 then account_cost else case when actual_cost > 0 then actual_cost else total_cost * case when group_multiplier > 0 then group_multiplier else 1 end end end),0)").
 		Scan(&totalAccountCost)
 
 	var durations []int64
@@ -1413,7 +1413,7 @@ func usageLogSummary(c *gin.Context) gin.H {
 	}
 	var s sums
 	usageLogQueryForSummary(c).
-		Select("coalesce(sum(input_tokens),0) as input_tokens, coalesce(sum(output_tokens),0) as output_tokens, coalesce(sum(reasoning_tokens),0) as reasoning_tokens, coalesce(sum(cache_read_tokens),0) as cache_read_tokens, coalesce(sum(cache_creation_tokens),0) as cache_creation_tokens, coalesce(sum(total_tokens),0) as total_tokens, coalesce(sum(total_cost),0) as total_cost, coalesce(sum(case when actual_cost > 0 then actual_cost else total_cost end),0) as actual_cost, coalesce(sum(case when account_cost > 0 then account_cost else case when actual_cost > 0 then actual_cost else total_cost end end),0) as account_cost, coalesce(avg(duration_ms),0) as avg_duration_ms").
+		Select("coalesce(sum(input_tokens),0) as input_tokens, coalesce(sum(output_tokens),0) as output_tokens, coalesce(sum(reasoning_tokens),0) as reasoning_tokens, coalesce(sum(cache_read_tokens),0) as cache_read_tokens, coalesce(sum(cache_creation_tokens),0) as cache_creation_tokens, coalesce(sum(total_tokens),0) as total_tokens, coalesce(sum(total_cost),0) as total_cost, coalesce(sum(case when actual_cost > 0 then actual_cost else total_cost * case when group_multiplier > 0 then group_multiplier else 1 end end),0) as actual_cost, coalesce(sum(case when account_cost > 0 then account_cost else case when actual_cost > 0 then actual_cost else total_cost * case when group_multiplier > 0 then group_multiplier else 1 end end end),0) as account_cost, coalesce(avg(duration_ms),0) as avg_duration_ms").
 		Scan(&s)
 
 	lastMinute := time.Now().Add(-time.Minute)

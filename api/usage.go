@@ -42,8 +42,12 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 		finalCost = baseCost
 	}
 	frt := int64(0)
+	ttft := int64(0)
 	if len(firstResponseMs) > 0 && firstResponseMs[0] > 0 {
 		frt = firstResponseMs[0]
+	}
+	if len(firstResponseMs) > 1 && firstResponseMs[1] > 0 {
+		ttft = firstResponseMs[1]
 	}
 	pricing := usagePricing(route)
 	entry := store.UsageLog{
@@ -58,6 +62,7 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 		StatusCode:          status,
 		DurationMs:          time.Since(start).Milliseconds(),
 		FirstResponseMs:     frt,
+		TTFTMs:              ttft,
 		Stream:              stream,
 		InputTokens:         usage.InputTokens,
 		OutputTokens:        usage.OutputTokens,
@@ -78,6 +83,182 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 		Error:               errMsg,
 	}
 	_ = store.DB().Create(&entry).Error
+}
+
+// responseTiming contains the two stream milestones shown in the usage UI.
+// FRT is the time to the first upstream SSE event; TTFT is the time to the
+// first actual generated token/content delta. Both are zero when the stream
+// did not reach the corresponding milestone.
+type responseTiming struct {
+	FirstResponseMs int64
+	TTFTMs          int64
+}
+
+func (m responseTiming) args() []int64 {
+	return []int64{m.FirstResponseMs, m.TTFTMs}
+}
+
+// streamTimingCapture observes SSE bytes without changing the bytes written
+// to the client. It is deliberately protocol-aware only for identifying the
+// first generated token; usage extraction remains in the existing parsers.
+type streamTimingCapture struct {
+	proto   config.Protocol
+	start   time.Time
+	pending []byte
+	timing  responseTiming
+}
+
+func newStreamTimingCapture(proto config.Protocol, start time.Time) *streamTimingCapture {
+	return &streamTimingCapture{proto: proto, start: start}
+}
+
+func (c *streamTimingCapture) Write(p []byte) (int, error) {
+	c.pending = append(c.pending, p...)
+	for {
+		i := bytes.IndexByte(c.pending, '\n')
+		if i < 0 {
+			break
+		}
+		line := append([]byte(nil), c.pending[:i+1]...)
+		c.pending = c.pending[i+1:]
+		c.observeLine(line)
+	}
+	return len(p), nil
+}
+
+func (c *streamTimingCapture) Observe(p []byte) {
+	_, _ = c.Write(p)
+}
+
+func (c *streamTimingCapture) observeLine(line []byte) {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return
+	}
+	payload := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return
+	}
+	if c.timing.FirstResponseMs == 0 {
+		c.timing.FirstResponseMs = maxInt64(1, time.Since(c.start).Milliseconds())
+	}
+	if c.timing.TTFTMs == 0 && sseLineHasGeneratedToken(c.proto, payload) {
+		c.timing.TTFTMs = maxInt64(1, time.Since(c.start).Milliseconds())
+	}
+}
+
+func (c *streamTimingCapture) Metrics() responseTiming {
+	// The final SSE line is allowed to omit its trailing newline. Flush the
+	// pending fragment before persisting metrics so a last data event cannot
+	// make FRT/TTFT appear empty.
+	if len(c.pending) > 0 {
+		pending := c.pending
+		c.pending = nil
+		c.observeLine(pending)
+	}
+	return c.timing
+}
+
+func (c *streamTimingCapture) SetFirstResponseNow() {
+	if c.timing.FirstResponseMs == 0 {
+		c.timing.FirstResponseMs = maxInt64(1, time.Since(c.start).Milliseconds())
+	}
+}
+
+// firstByteTimingReader records the time at which the upstream first returns
+// response bytes. This is the stable FRT boundary even when the first read
+// contains Responses lifecycle events that are intentionally buffered before
+// the first content event is forwarded.
+type firstByteTimingReader struct {
+	src     io.Reader
+	capture *streamTimingCapture
+}
+
+func (r *firstByteTimingReader) Read(p []byte) (int, error) {
+	n, err := r.src.Read(p)
+	if n > 0 {
+		r.capture.SetFirstResponseNow()
+	}
+	return n, err
+}
+
+type timingWriter struct {
+	dst     io.Writer
+	capture *streamTimingCapture
+}
+
+func (w *timingWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if n > 0 {
+		w.capture.Observe(p[:n])
+	}
+	return n, err
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func sseLineHasGeneratedToken(proto config.Protocol, payload []byte) bool {
+	var raw map[string]any
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return false
+	}
+	nonEmpty := func(v any) bool {
+		s, ok := v.(string)
+		return ok && strings.TrimSpace(s) != ""
+	}
+	nonEmptyContent := func(v any) bool {
+		if nonEmpty(v) {
+			return true
+		}
+		items, ok := v.([]any)
+		if !ok {
+			return false
+		}
+		for _, item := range items {
+			m, _ := item.(map[string]any)
+			if nonEmpty(m["text"]) || nonEmpty(m["value"]) || nonEmpty(m["content"]) {
+				return true
+			}
+		}
+		return false
+	}
+	if proto == config.ProtocolChat {
+		choices, _ := raw["choices"].([]any)
+		for _, item := range choices {
+			choice, _ := item.(map[string]any)
+			delta, _ := choice["delta"].(map[string]any)
+			if nonEmptyContent(delta["content"]) || nonEmptyContent(delta["reasoning_content"]) || nonEmptyContent(delta["text"]) {
+				return true
+			}
+			if calls, ok := delta["tool_calls"].([]any); ok {
+				for _, call := range calls {
+					m, _ := call.(map[string]any)
+					fn, _ := m["function"].(map[string]any)
+					if nonEmpty(m["arguments"]) || nonEmpty(fn["arguments"]) || nonEmpty(fn["name"]) {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	}
+	if proto == config.ProtocolMessages {
+		if raw["type"] == "content_block_delta" {
+			delta, _ := raw["delta"].(map[string]any)
+			return nonEmptyContent(delta["text"]) || nonEmptyContent(delta["partial_json"]) || nonEmptyContent(delta["thinking"])
+		}
+		return false
+	}
+	if proto == config.ProtocolResponses {
+		typ, _ := raw["type"].(string)
+		return strings.HasSuffix(typ, ".delta") && (strings.Contains(typ, "text") || strings.Contains(typ, "arguments") || strings.Contains(typ, "reasoning")) && nonEmptyContent(raw["delta"])
+	}
+	return false
 }
 
 // incrementRequestsUsed increments the request counter for the token

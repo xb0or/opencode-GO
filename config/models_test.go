@@ -171,3 +171,15 @@ func TestR4_G1_ResolveUpstreamGroup_Default(t *testing.T) {
 		t.Fatalf("ResolveUpstreamGroup(ollama) = %q, want %q (default)", got, "ollama")
 	}
 }
+
+func TestApplyLocalModelDefaultsDeduplicatesUpstreams(t *testing.T) {
+	route := ModelRoute{
+		ID:        "duplicate-route",
+		Upstream:  UpstreamOllama,
+		Upstreams: []Upstream{UpstreamOllama, UpstreamGo, UpstreamOllama},
+	}
+	applyLocalModelDefaults(&route)
+	if len(route.Upstreams) != 2 || route.Upstreams[0] != UpstreamOllama || route.Upstreams[1] != UpstreamGo {
+		t.Fatalf("upstreams = %#v, want [ollama go]", route.Upstreams)
+	}
+}
