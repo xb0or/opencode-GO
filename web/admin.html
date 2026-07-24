@@ -619,7 +619,7 @@
                       </td>
                       <td class="usage-latency-cell">
                         <b>{{usageDuration(l.duration_ms)}}</b>
-                        <small>FRT {{l.first_response_ms ? usageDuration(l.first_response_ms) : '—'}} · {{usageStreamRate(l)}}</small>
+                        <small>{{t('usage.frt')}} {{l.first_response_ms ? usageDuration(l.first_response_ms) : '—'}} · {{t('usage.ttft')}} {{l.ttft_ms ? usageDuration(l.ttft_ms) : '—'}} · {{t('usage.tps')}} {{usageStreamRate(l)}}</small>
                       </td>
                       <td class="token-cell usage-token-detail">
                         <b>{{usageTokens(l.total_tokens)}}</b>
@@ -666,8 +666,8 @@
                         <span>{{t('table.token')}}<b>{{usageTokenLabel(usageSelected)}}</b></span>
                         <span>{{t('usage.group')}}<b>{{usageGroupLabel(usageSelected)}}</b></span>
                         <span>{{t('usage.ipAddress')}}<b>{{usageSelected.ip_address || '—'}}</b></span>
-                        <span>{{t('table.duration')}}<b>{{usageDuration(usageSelected.duration_ms)}} · FRT {{usageSelected.first_response_ms ? usageDuration(usageSelected.first_response_ms) : '—'}}</b></span>
-                        <span>{{t('table.stream')}}<b>{{streamLabel(usageSelected.stream)}} · {{usageStreamRate(usageSelected)}}</b></span>
+                        <span>{{t('table.duration')}}<b>{{usageDuration(usageSelected.duration_ms)}} · {{t('usage.frt')}} {{usageSelected.first_response_ms ? usageDuration(usageSelected.first_response_ms) : '—'}} · {{t('usage.ttft')}} {{usageSelected.ttft_ms ? usageDuration(usageSelected.ttft_ms) : '—'}}</b></span>
+                        <span>{{t('table.stream')}}<b>{{streamLabel(usageSelected.stream)}} · {{t('usage.tps')}} {{usageStreamRate(usageSelected)}}</b></span>
                       </div>
                     </section>
 

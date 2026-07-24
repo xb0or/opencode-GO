@@ -241,6 +241,9 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 		// Cross-protocol SSE streaming: avoid buffering the full upstream
 		// body. Use the incremental Decoder → IR → Encoder → Flush pipeline.
 		rr := proxyCrossProtocolStream(c, resp, inbound, upstreamProto, p, key, route, start)
+		if c.Writer.Written() {
+			return attemptResult{Handled: true}
+		}
 		if rr.ResponseStarted {
 			return attemptResult{Handled: true}
 		}
@@ -276,6 +279,9 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 		}
 	}
 	rr := proxyCrossProtocolResponse(c, resp, stream, inbound, upstreamProto, p, key, route, start, responseBody)
+	if c.Writer.Written() {
+		return attemptResult{Handled: true}
+	}
 	if rr.ResponseStarted {
 		return attemptResult{Handled: true}
 	}
@@ -365,6 +371,9 @@ func proxyOllamaSameProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 	// in the caller's lambda fires after this function returns, which is
 	// safe because resp.Body is already closed by the handler.
 	rr := proxySameProtocolResponse(c, resp, stream, p, key, route, inbound, start, nil)
+	if c.Writer.Written() {
+		return attemptResult{Handled: true}
+	}
 	if rr.ResponseStarted {
 		return attemptResult{Handled: true}
 	}

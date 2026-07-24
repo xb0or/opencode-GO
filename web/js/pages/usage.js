@@ -19,9 +19,6 @@ function round2(v) {
   return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 }
 
-const MIN_STREAM_RATE_ACTIVE_MS = 1000;
-const MAX_REASONABLE_STREAM_TPS = 250;
-
 function dateTimeLocalValue(date) {
   const pad = (n) => String(n).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
@@ -162,7 +159,11 @@ export function useUsage(api, showToast, t) {
   function formatCost(v) {
     const n = numberOrZero(v);
     if (n === 0) return '$0.0000';
-    if (Math.abs(n) < 0.0001) return '$' + n.toExponential(2);
+    // Avoid scientific notation for per-request costs. It is technically
+    // accurate but difficult to read in a billing table (e.g. 5.68e-5).
+    if (Math.abs(n) < 0.0001) {
+      return '$' + n.toFixed(10).replace(/0+$/, '').replace(/\.$/, '');
+    }
     return '$' + n.toFixed(4);
   }
 
@@ -205,16 +206,16 @@ export function useUsage(api, showToast, t) {
   function streamRate(row) {
     const output = numberOrZero(row?.output_tokens);
     const totalMs = numberOrZero(row?.duration_ms);
+    const ttft = numberOrZero(row?.ttft_ms);
     const frt = numberOrZero(row?.first_response_ms);
-    // t/s = output / (active传输时间)。需要 frt 才能算出真实的活跃传输窗口；
-    // 跨协议流式是 buffer-then-emit，frt 未记录，totalMs 不能反映逐 token 速率。
-    // 活跃窗口过短、FRT 接近总耗时或上游一次性吐出缓冲时，测量误差会被放大成几百几千 t/s。
-    // 这种值不代表模型真实生成速度，直接隐藏，避免误导使用记录。
-    if (!row?.stream || output <= 0 || totalMs <= 0 || frt <= 0) return '—';
-    const activeMs = totalMs - frt;
-    if (activeMs < MIN_STREAM_RATE_ACTIVE_MS) return '—';
+    if (!row?.stream || output <= 0 || totalMs <= 0) return '—';
+    let activeMs = totalMs - Math.max(ttft, frt, 0);
+    // Some providers return the complete stream in one network burst, so
+    // TTFT/FRT can be at or beyond the recorded wall-clock duration. Keep
+    // TPS useful by falling back to the full request duration in that case.
+    if (activeMs <= 0) activeMs = totalMs;
     const rate = output / (activeMs / 1000);
-    if (!Number.isFinite(rate) || rate <= 0 || rate > MAX_REASONABLE_STREAM_TPS) return '—';
+    if (!Number.isFinite(rate) || rate <= 0) return '—';
     return rate.toFixed(1) + ' t/s';
   }
 
@@ -235,7 +236,7 @@ export function useUsage(api, showToast, t) {
   }
 
   function finalCost(row) {
-    return numberOrZero(row?.actual_cost || row?.account_cost || row?.total_cost);
+    return numberOrZero(row?.actual_cost || row?.total_cost || row?.account_cost);
   }
 
   function billingMode(row) {

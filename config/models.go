@@ -451,6 +451,11 @@ func applyLocalModelDefaults(route *ModelRoute) {
 	}
 	if len(route.Upstreams) == 0 {
 		route.Upstreams = []Upstream{route.Upstream}
+	} else {
+		// Persisted routes from older versions could contain the same channel
+		// more than once. Normalize it at registration time so a failover loop
+		// can never send the same client request twice to one channel.
+		route.Upstreams = deduplicateUpstreams(route.Upstreams)
 	}
 	if route.Group == "" {
 		route.Group = "go"
@@ -475,6 +480,19 @@ func applyLocalModelDefaults(route *ModelRoute) {
 	if err := ValidateModelRoute(*route); err != nil {
 		log.Printf("warn: model route %q failed validation: %v", route.ID, err)
 	}
+}
+
+func deduplicateUpstreams(upstreams []Upstream) []Upstream {
+	seen := make(map[Upstream]struct{}, len(upstreams))
+	out := make([]Upstream, 0, len(upstreams))
+	for _, u := range upstreams {
+		if _, ok := seen[u]; ok {
+			continue
+		}
+		seen[u] = struct{}{}
+		out = append(out, u)
+	}
+	return out
 }
 
 // IsModelFieldCustomized reports whether automatic sync should preserve a

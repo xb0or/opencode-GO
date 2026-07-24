@@ -105,6 +105,7 @@ type UsageLog struct {
 	StatusCode          int       `json:"status_code"`
 	DurationMs          int64     `json:"duration_ms"`
 	FirstResponseMs     int64     `json:"first_response_ms"`
+	TTFTMs              int64     `json:"ttft_ms"`
 	Stream              bool      `json:"stream"`
 	InputTokens         int       `json:"input_tokens"`
 	OutputTokens        int       `json:"output_tokens"`

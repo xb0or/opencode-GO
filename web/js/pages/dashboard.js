@@ -174,6 +174,9 @@ export function useDashboard(api, showToast, t) {
 
   function formatCost(v) {
     const n = numberOrZero(v);
+    if (n !== 0 && Math.abs(n) < 0.0001) {
+      return '$' + n.toFixed(10).replace(/0+$/, '').replace(/\.$/, '');
+    }
     return '$' + n.toFixed(4);
   }
 

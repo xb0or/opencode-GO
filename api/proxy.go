@@ -152,10 +152,17 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 	if len(upstreamsToTry) == 0 {
 		upstreamsToTry = []config.Upstream{route.Upstream}
 	}
+	upstreamsToTry = uniqueUpstreams(upstreamsToTry)
 	var lastResult attemptResult
 	var attemptedAny bool
 
 	for ui, currentUpstream := range upstreamsToTry {
+		// A response handler may have committed headers while returning a
+		// retryable error. Once bytes are committed, never invoke another
+		// channel and never append a second response to the client stream.
+		if c.Writer.Written() {
+			return
+		}
 		// G1: Resolve the key-pool group for this upstream using the single
 		// authoritative resolver. The result is passed to every downstream
 		// consumer (token permission, PickAttempts, Go/Ollama handlers,
@@ -198,6 +205,9 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 			// G1: upstreamGroup is pre-resolved by the outer loop and passed
 			// in so Ollama does NOT re-resolve via TargetGroup.
 			result := proxyOllamaRequest(c, p, routeCopy, inbound, originalBody, head, start, upstreamGroup)
+			if c.Writer.Written() {
+				return
+			}
 			if result.Terminal {
 				// Client disconnected — stop immediately.
 				return
@@ -214,6 +224,9 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 
 		// --------------- Go upstream ---------------
 		result := proxyGoUpstream(c, p, routeCopy, inbound, head, originalBody, start, upstreamPath, currentUpstream, ui, upstreamsToTry, upstreamGroup)
+		if c.Writer.Written() {
+			return
+		}
 		if result.Terminal {
 			return
 		}
@@ -254,6 +267,19 @@ func proxyRequest(c *gin.Context, p *pool.Picker, inbound config.Protocol, upstr
 		return
 	}
 	writeOpenAIError(c, http.StatusBadGateway, "upstream_error", genericUpstreamMessage(http.StatusBadGateway))
+}
+
+func uniqueUpstreams(upstreams []config.Upstream) []config.Upstream {
+	seen := make(map[config.Upstream]struct{}, len(upstreams))
+	out := make([]config.Upstream, 0, len(upstreams))
+	for _, u := range upstreams {
+		if _, ok := seen[u]; ok {
+			continue
+		}
+		seen[u] = struct{}{}
+		out = append(out, u)
+	}
+	return out
 }
 
 // proxyGoUpstream handles a single Go upstream attempt, returning an
@@ -467,6 +493,13 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 			cancel()
 		}
 
+		// A response handler may have committed headers before returning an
+		// error (for example, a client disconnect during the first SSE event).
+		// Never let the retry loop send a second upstream response after that
+		// point, even if a future handler forgets to set ResponseStarted.
+		if c.Writer.Written() {
+			return attemptResult{Handled: true}
+		}
 		if rr.ResponseStarted {
 			return attemptResult{Handled: true}
 		}

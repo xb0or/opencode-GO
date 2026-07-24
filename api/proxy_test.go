@@ -301,6 +301,30 @@ func TestUsageFromSSELineParsesStreamUsage(t *testing.T) {
 	}
 }
 
+func TestStreamTimingCaptureRecordsFRTAndTTFT(t *testing.T) {
+	start := time.Now().Add(-25 * time.Millisecond)
+	capture := newStreamTimingCapture(config.ProtocolChat, start)
+	capture.Observe([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+	if capture.Metrics().FirstResponseMs == 0 || capture.Metrics().TTFTMs != 0 {
+		t.Fatalf("role-only event metrics = %#v, want FRT and no TTFT", capture.Metrics())
+	}
+	capture.Observe([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"))
+	if capture.Metrics().TTFTMs == 0 || capture.Metrics().TTFTMs < capture.Metrics().FirstResponseMs {
+		t.Fatalf("content event metrics = %#v, want TTFT >= FRT", capture.Metrics())
+	}
+}
+
+func TestUniqueUpstreamsPreservesOrder(t *testing.T) {
+	got := uniqueUpstreams([]config.Upstream{
+		config.UpstreamOllama,
+		config.UpstreamGo,
+		config.UpstreamOllama,
+	})
+	if len(got) != 2 || got[0] != config.UpstreamOllama || got[1] != config.UpstreamGo {
+		t.Fatalf("uniqueUpstreams() = %#v, want [ollama go]", got)
+	}
+}
+
 func TestEstimateUsageCostSeparatesCachedPromptTokens(t *testing.T) {
 	route := config.ModelRoute{
 		Pricing: map[string]string{
