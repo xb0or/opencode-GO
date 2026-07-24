@@ -49,6 +49,7 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 	if len(firstResponseMs) > 1 && firstResponseMs[1] > 0 {
 		ttft = firstResponseMs[1]
 	}
+	timing := finalizeResponseTiming(responseTiming{FirstResponseMs: frt, TTFTMs: ttft}, stream, status, time.Since(start))
 	pricing := usagePricing(route)
 	entry := store.UsageLog{
 		RequestID:           usageRequestID(c, key, start),
@@ -61,8 +62,8 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 		IPAddress:           c.ClientIP(),
 		StatusCode:          status,
 		DurationMs:          time.Since(start).Milliseconds(),
-		FirstResponseMs:     frt,
-		TTFTMs:              ttft,
+		FirstResponseMs:     timing.FirstResponseMs,
+		TTFTMs:              timing.TTFTMs,
 		Stream:              stream,
 		InputTokens:         usage.InputTokens,
 		OutputTokens:        usage.OutputTokens,
@@ -83,6 +84,17 @@ func markAndLog(c *gin.Context, p *pool.Picker, key *store.Key, route config.Mod
 		Error:               errMsg,
 	}
 	_ = store.DB().Create(&entry).Error
+}
+
+// finalizeResponseTiming keeps successful streamed rows useful when an
+// upstream or conversion path completes without exposing a separately
+// observable first byte. The request duration is the only reliable boundary
+// left in that case, and it also gives the UI enough data to calculate TPS.
+func finalizeResponseTiming(timing responseTiming, stream bool, status int, elapsed time.Duration) responseTiming {
+	if stream && status < 400 && timing.FirstResponseMs <= 0 {
+		timing.FirstResponseMs = maxInt64(1, elapsed.Milliseconds())
+	}
+	return timing
 }
 
 // responseTiming contains the two stream milestones shown in the usage UI.
