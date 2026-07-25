@@ -24,6 +24,21 @@ import (
 	"github.com/xb0or/opencode-GO/store"
 )
 
+type cancelAfterFirstEventReader struct {
+	event []byte
+	sent  bool
+}
+
+func (r *cancelAfterFirstEventReader) Read(p []byte) (int, error) {
+	if !r.sent {
+		r.sent = true
+		return copy(p, r.event), nil
+	}
+	return 0, context.Canceled
+}
+
+func (r *cancelAfterFirstEventReader) Close() error { return nil }
+
 func TestUpstreamAuthInjectionReplacesClientAuth(t *testing.T) {
 	src := http.Header{}
 	src.Set("Authorization", "Bearer gateway-token")
@@ -84,6 +99,67 @@ func TestShouldMarkUpstreamFailure(t *testing.T) {
 		if got := shouldMarkUpstreamFailure(tt.status); got != tt.want {
 			t.Fatalf("shouldMarkUpstreamFailure(%d) = %v, want %v", tt.status, got, tt.want)
 		}
+	}
+}
+
+func TestIsClientContextError(t *testing.T) {
+	if !isClientContextError(fmt.Errorf("stream convert: %w", context.Canceled)) {
+		t.Fatal("wrapped context.Canceled should be classified as a client context error")
+	}
+	if !isClientContextError(context.DeadlineExceeded) {
+		t.Fatal("context.DeadlineExceeded should be classified as a client context error")
+	}
+	if isClientContextError(fmt.Errorf("upstream decoder: unexpected EOF")) {
+		t.Fatal("ordinary decoder errors must not be classified as client context errors")
+	}
+}
+
+func TestCrossProtocolStreamContextCanceledDoesNotMarkKey(t *testing.T) {
+	if err := store.InitForTest("file:stream_context_canceled?mode=memory&cache=shared"); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+
+	key := &store.Key{Value: "stream-key", Group: "go", Enabled: true, Weight: 1}
+	if err := store.DB().Create(key).Error; err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+
+	c, w := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", http.NoBody)
+	reader := &cancelAfterFirstEventReader{event: []byte(
+		"event: message_start\n" +
+			"data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"m\"}}\n\n")}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       reader,
+	}
+	route := config.ModelRoute{
+		ID:        "stream-context-model",
+		Upstream:  config.UpstreamGo,
+		Protocol:  config.ProtocolChat,
+		RealModel: "m",
+		Group:     "go",
+	}
+
+	rr := proxyCrossProtocolStream(c, resp, config.ProtocolChat, config.ProtocolMessages,
+		pool.NewPicker(), key, route, time.Now())
+	if !rr.Terminal {
+		t.Fatal("context cancellation after a committed stream must terminate without failover")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("response status = %d, want 200 after the first SSE event was committed", w.Code)
+	}
+
+	var refreshed store.Key
+	if err := store.DB().First(&refreshed, key.ID).Error; err != nil {
+		t.Fatalf("reload key: %v", err)
+	}
+	if refreshed.FailCount != 0 {
+		t.Fatalf("client context cancellation must not increment fail_count: %d", refreshed.FailCount)
+	}
+	if refreshed.CooldownUntil != nil {
+		t.Fatalf("client context cancellation must not enter cooldown: %v", refreshed.CooldownUntil)
 	}
 }
 

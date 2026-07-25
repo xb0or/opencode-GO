@@ -27,6 +27,11 @@ type responseResult struct {
 	Err             error
 	Retryable       bool
 	ResponseStarted bool
+
+	// Terminal stops the current request without failover. It is used for
+	// client disconnects/cancellations that may occur before any response bytes
+	// are committed.
+	Terminal bool
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +192,11 @@ func proxySameProtocolSSELive(c *gin.Context, resp *http.Response,
 	firstEvent, valid, preReadErr := readFirstContentSSEEvent(bufReader, inbound)
 	if !valid {
 		_ = resp.Body.Close()
+		if isClientContextError(preReadErr) {
+			markAndLog(c, p, key, route, inbound, statusClientClosedRequest, start, true, nil,
+				"client canceled request: "+preReadErr.Error())
+			return responseResult{Terminal: true}
+		}
 		markKeyFailure(p, key, http.StatusBadGateway, nil)
 		errMsg := "upstream returned 200 but no valid SSE data before connection close"
 		if preReadErr != nil {
@@ -389,6 +399,15 @@ func proxyCrossProtocolResponse(c *gin.Context, resp *http.Response, stream bool
 			firstEvent, restReader, timedSW, nil, onFirstEvent,
 		)
 		if convErr != nil {
+			if isClientContextError(convErr) {
+				status := http.StatusOK
+				if !committed {
+					status = statusClientClosedRequest
+				}
+				markAndLog(c, p, key, route, inbound, status, start, true,
+					usageFromIRUsage(acc), "client canceled request: "+convErr.Error(), timing.Metrics().args()...)
+				return responseResult{ResponseStarted: committed, Terminal: true}
+			}
 			if !committed {
 				markKeyFailure(p, key, http.StatusBadGateway, nil)
 				markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, true,
@@ -767,6 +786,11 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 	if readErr != nil || !found {
 		errBody, _ := io.ReadAll(io.LimitReader(bufReader, maxErrorBodyRead))
 		_ = resp.Body.Close()
+		if isClientContextError(readErr) {
+			markAndLog(c, p, key, route, inbound, statusClientClosedRequest, start, true, nil,
+				"client canceled request: "+readErr.Error())
+			return responseResult{Terminal: true}
+		}
 		markKeyFailure(p, key, http.StatusBadGateway, errBody)
 		errMsg := fmt.Sprintf("upstream cross-protocol stream could not be read: %v; body: %s",
 			readErr, previewBody(errBody))
@@ -837,6 +861,15 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 	)
 	_ = resp.Body.Close()
 	if convErr != nil {
+		if isClientContextError(convErr) {
+			status := http.StatusOK
+			if !committed {
+				status = statusClientClosedRequest
+			}
+			markAndLog(c, p, key, route, inbound, status, start, true,
+				usageFromIRUsage(acc), "client canceled request: "+convErr.Error(), timing.Metrics().args()...)
+			return responseResult{ResponseStarted: committed, Terminal: true}
+		}
 		if !committed {
 			// P0-2/P0-3: conversion failed before any valid target event was
 			// emitted. The client has received nothing — failover is still

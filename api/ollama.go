@@ -244,6 +244,9 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 		if c.Writer.Written() {
 			return attemptResult{Handled: true}
 		}
+		if rr.Terminal {
+			return attemptResult{Terminal: true}
+		}
 		if rr.ResponseStarted {
 			return attemptResult{Handled: true}
 		}
@@ -267,6 +270,11 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxNonStreamBodyRead))
 	_ = resp.Body.Close()
 	if readErr != nil {
+		if isClientContextError(readErr) {
+			markAndLog(c, p, key, route, inbound, statusClientClosedRequest, start, stream, nil,
+				"client canceled request: "+readErr.Error())
+			return attemptResult{Terminal: true}
+		}
 		markKeyFailure(p, key, http.StatusBadGateway, nil)
 		markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, stream, nil, readErr.Error())
 		if i+1 < len(attempts) {
@@ -281,6 +289,9 @@ func proxyOllamaCrossProtocolKey(c *gin.Context, p *pool.Picker, key *store.Key,
 	rr := proxyCrossProtocolResponse(c, resp, stream, inbound, upstreamProto, p, key, route, start, responseBody)
 	if c.Writer.Written() {
 		return attemptResult{Handled: true}
+	}
+	if rr.Terminal {
+		return attemptResult{Terminal: true}
 	}
 	if rr.ResponseStarted {
 		return attemptResult{Handled: true}
