@@ -197,12 +197,20 @@ func (p *Picker) MarkFailure(keyID uint) {
 	store.DB().Model(&store.Key{}).Where("id = ?", k.ID).Updates(updates)
 }
 
-// MarkFailureWithQuota applies Go quota-aware cooldown for upstream 429
-// responses. If a quota reset window cannot be resolved, it falls back to the
-// regular exponential-backoff MarkFailure behavior.
+// MarkFailureWithQuota applies quota-aware cooldown for upstream 429 and the
+// regular authentication cooldown for 401. Other statuses only increment
+// failure history; they never set cooldown_until.
 func (p *Picker) MarkFailureWithQuota(keyID uint, statusCode int, errBody []byte, snapshot string) {
-	if statusCode != http.StatusTooManyRequests {
+	if statusCode == http.StatusUnauthorized {
 		p.MarkFailure(keyID)
+		return
+	}
+	if !isCooldownStatus(statusCode) {
+		// Keep the failure counter for diagnostics and selection statistics, but
+		// do not create a cooldown. Only 401 and 429 are key-specific signals;
+		// 5xx, conversion failures, and client-side errors can be unrelated to
+		// the selected credential.
+		p.markFailureCountOnly(keyID)
 		return
 	}
 
@@ -228,6 +236,17 @@ func (p *Picker) MarkFailureWithQuota(keyID uint, statusCode int, errBody []byte
 		"fail_count":     k.FailCount + 1,
 		"cooldown_until": until,
 	})
+}
+
+func isCooldownStatus(statusCode int) bool {
+	return statusCode == http.StatusUnauthorized || statusCode == http.StatusTooManyRequests
+}
+
+// markFailureCountOnly increments failure history without setting or extending
+// cooldown_until. It is used for failures that should remain visible in the
+// admin state while remaining eligible for subsequent requests.
+func (p *Picker) markFailureCountOnly(keyID uint) {
+	store.DB().Model(&store.Key{}).Where("id = ?", keyID).UpdateColumn("fail_count", gorm.Expr("fail_count + ?", 1))
 }
 
 type quotaSnapshotBucket struct {

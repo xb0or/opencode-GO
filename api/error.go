@@ -31,8 +31,11 @@ func previewBody(body []byte) string {
 	return s
 }
 
-// shouldMarkUpstreamFailure reports whether a response status should count as a
-// key failure and trigger cooldown bookkeeping.
+// shouldMarkUpstreamFailure reports whether a response status is an upstream
+// failure that may participate in key/upstream failover. Cooldown eligibility
+// is deliberately handled separately in pool.MarkFailureWithQuota: a
+// transient 5xx or a protocol error may be retried without putting the key into
+// cooldown.
 func shouldMarkUpstreamFailure(status int) bool {
 	switch status {
 	case http.StatusPaymentRequired, http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
@@ -120,6 +123,15 @@ func classifyProxyContextError(err error) (int, string, string, bool) {
 		return http.StatusGatewayTimeout, "upstream_timeout", "upstream request timed out", true
 	}
 	return 0, "", "", false
+}
+
+// isClientContextError reports cancellation/deadline errors caused by the
+// client request lifecycle. In a streaming request the upstream body uses the
+// client context, so a downstream disconnect can surface from the converter as
+// "stream convert error: context canceled" even though the upstream returned
+// HTTP 200 successfully.
+func isClientContextError(err error) bool {
+	return err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 func copyErrString(err error) string {

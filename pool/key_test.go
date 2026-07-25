@@ -276,6 +276,31 @@ func TestMarkFailureWithQuotaNon429Fallback(t *testing.T) {
 	}
 }
 
+func TestMarkFailureWithQuotaNonCooldownStatusesNeverCooldown(t *testing.T) {
+	setupTestDB(t)
+	k := &store.Key{Value: "quota-noncooldown-key", Group: "quota", Enabled: true, Weight: 1}
+	store.DB().Create(k)
+
+	p := NewPicker()
+	for i := 0; i < 3; i++ {
+		p.MarkFailureWithQuota(k.ID, http.StatusBadGateway, nil, "")
+	}
+	var updated store.Key
+	store.DB().First(&updated, k.ID)
+	if updated.FailCount != 3 {
+		t.Fatalf("fail_count=%d, want 3", updated.FailCount)
+	}
+	if updated.CooldownUntil != nil {
+		t.Fatalf("bad gateway failures must not set cooldown_until: %v", updated.CooldownUntil)
+	}
+
+	p.MarkFailureWithQuota(k.ID, http.StatusForbidden, nil, "")
+	store.DB().First(&updated, k.ID)
+	if updated.CooldownUntil != nil {
+		t.Fatalf("403 must not set cooldown_until: %v", updated.CooldownUntil)
+	}
+}
+
 func TestPicker_UsageCountIncremented(t *testing.T) {
 	setupTestDB(t)
 

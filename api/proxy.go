@@ -472,6 +472,11 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 				_ = resp.Body.Close()
 				cancel()
 				if readErr != nil {
+					if isClientContextError(readErr) {
+						markAndLog(c, p, key, route, inbound, statusClientClosedRequest, start, head.Stream, nil,
+							"client canceled request: "+readErr.Error())
+						return attemptResult{Terminal: true}
+					}
 					markKeyFailure(p, key, http.StatusBadGateway, nil)
 					markAndLog(c, p, key, route, inbound, http.StatusBadGateway, start, head.Stream, nil, readErr.Error())
 					if i+1 < len(attempts) {
@@ -499,6 +504,9 @@ func proxyGoUpstream(c *gin.Context, p *pool.Picker, route config.ModelRoute,
 		// point, even if a future handler forgets to set ResponseStarted.
 		if c.Writer.Written() {
 			return attemptResult{Handled: true}
+		}
+		if rr.Terminal {
+			return attemptResult{Terminal: true}
 		}
 		if rr.ResponseStarted {
 			return attemptResult{Handled: true}
