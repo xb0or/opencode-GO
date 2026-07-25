@@ -160,10 +160,10 @@ export function useKeys(api, showToast, t, showConfirm) {
       }
       if (editing) {
         await api("/keys/" + editingKeyId.value, "PATCH", payload, t);
-        showToast(t("keys.updateBtn") + " ✓");
+        showToast(t("keys.updateBtn"));
       } else {
         await api("/keys", "POST", payload, t);
-        showToast(t("keys.addBtn") + " ✓");
+        showToast(t("keys.addBtn"));
       }
       closeKeyModal();
       load();
@@ -213,7 +213,7 @@ export function useKeys(api, showToast, t, showConfirm) {
   async function resetCooldown(id) {
     try {
       await api("/keys/" + id + "/reset", "POST", null, t);
-      showToast(t("keys.cooldownReset") + " ✓");
+      showToast(t("keys.cooldownReset"));
       load();
     } catch (e) {
       showToast(e.message, "error");
@@ -309,7 +309,7 @@ export function useKeys(api, showToast, t, showConfirm) {
       );
       key.workspace_id = workspaceID;
       quotaData.value[id] = null;
-      showToast("Workspace ID 已保存，正在重新查询 ✓");
+      showToast("Workspace ID 已保存，正在重新查询");
       await fetchQuota(id);
       load();
     } catch (e) {
@@ -325,7 +325,7 @@ export function useKeys(api, showToast, t, showConfirm) {
       async () => {
         try {
           await api("/keys/" + id, "DELETE", null, t);
-          showToast(t("keys.delete") + " ✓");
+          showToast(t("keys.delete"));
           load();
         } catch (e) {
           showToast(e.message, "error");

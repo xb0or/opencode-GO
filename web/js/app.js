@@ -4,7 +4,7 @@
  * ES Module 入口文件，导入各模块并创建 Vue 3 应用。
  */
 
-import { icons } from "./icons.js?v=20260624a";
+import { icons } from "./icons.js?v=20260725a";
 import { locales } from "./locales.js?v=20260624a";
 import { createApi, fmtTime } from "./api.js?v=20260624a";
 import { useDashboard } from "./pages/dashboard.js?v=20260624a";
@@ -115,7 +115,7 @@ createApp({
     async function copyText(text) {
       try {
         await navigator.clipboard.writeText(text);
-        showToast(t("common.copied") + " ✓");
+        showToast(t("common.copied"));
       } catch (e) {
         showToast(t("common.copyFailed"), "error");
       }

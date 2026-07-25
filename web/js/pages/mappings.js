@@ -77,8 +77,7 @@ export function useMappings(api, showToast, t, showConfirm) {
       }
       await api("/model-mappings", "POST", newMapping, t);
       showToast(
-        (editingSource.value ? t("mappings.updateBtn") : t("mappings.addBtn")) +
-          " ✓"
+        editingSource.value ? t("mappings.updateBtn") : t("mappings.addBtn")
       );
       closeMappingModal();
       load();
@@ -100,7 +99,7 @@ export function useMappings(api, showToast, t, showConfirm) {
             null,
             t
           );
-          showToast(t("mappings.delete") + " ✓");
+          showToast(t("mappings.delete"));
           load();
         } catch (e) {
           showToast(e.message, "error");

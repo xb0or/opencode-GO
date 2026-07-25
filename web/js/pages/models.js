@@ -447,14 +447,14 @@ export function useModels(api, showToast, t, showConfirm) {
           return;
         }
         await api("/models/" + encodeURIComponent(editingId.value), "PATCH", patch, t);
-        showToast(t("models.updateBtn") + " ✓");
+        showToast(t("models.updateBtn"));
       } else {
         const payload = { ...next };
         if (!payload.context_len) delete payload.context_len;
         if (!payload.tags.length) delete payload.tags;
         if (!Object.keys(payload.pricing).length) delete payload.pricing;
         await api("/models", "POST", payload, t);
-        showToast(t("models.addBtn") + " ✓");
+        showToast(t("models.addBtn"));
       }
       closeModal();
       await load();
@@ -481,7 +481,7 @@ export function useModels(api, showToast, t, showConfirm) {
       async () => {
         try {
           await api("/models/" + encodeURIComponent(id), "DELETE", null, t);
-          showToast(t("models.delete") + " ✓");
+          showToast(t("models.delete"));
           await load();
         } catch (error) {
           showToast(error.message, "error");

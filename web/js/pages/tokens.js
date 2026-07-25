@@ -72,10 +72,10 @@ export function useTokens(api, showToast, t, showConfirm) {
       }
       if (editingTokenId.value) {
         await api("/tokens/" + editingTokenId.value, "PATCH", payload, t);
-        showToast(t("tokens.updateBtn") + " ✓");
+        showToast(t("tokens.updateBtn"));
       } else {
         await api("/tokens", "POST", payload, t);
-        showToast(t("tokens.create") + " ✓");
+        showToast(t("tokens.create"));
       }
       closeTokenModal();
       load();
@@ -101,7 +101,7 @@ export function useTokens(api, showToast, t, showConfirm) {
       async () => {
         try {
           await api("/tokens/" + id, "DELETE", null, t);
-          showToast(t("tokens.delete") + " ✓");
+          showToast(t("tokens.delete"));
           load();
         } catch (e) {
           showToast(e.message, "error");
