@@ -1003,6 +1003,7 @@ type responsesEmitter struct {
 	toolItems          map[int]*respToolItem
 	toolOrder          []int // source indices in start order
 	finished           bool
+	text               string // accumulated visible text for output_text.done/content_part.done
 	usage              *IRUsage
 }
 
@@ -1061,6 +1062,7 @@ func (e *responsesEmitter) onTextDelta(text string) error {
 		e.partAdded = true
 		e.currentType = "text"
 	}
+	e.text += text
 	return e.emit(&IRStreamEvent{
 		Type:         "response.output_text.delta",
 		ContentDelta: text,
@@ -1151,14 +1153,14 @@ func (e *responsesEmitter) onFinish(reason string) error {
 	if e.partAdded && e.currentType == "text" {
 		if err := e.emit(&IRStreamEvent{
 			Type:         "response.output_text.done",
-			ContentDelta: "",
+			ContentDelta: e.text,
 			Choice:       &IRChoice{Index: e.messageOutputIndex},
 		}); err != nil {
 			return err
 		}
 		if err := e.emit(&IRStreamEvent{
 			Type:         "response.content_part.done",
-			ContentDelta: "",
+			ContentDelta: e.text,
 			Choice:       &IRChoice{Index: e.messageOutputIndex},
 		}); err != nil {
 			return err

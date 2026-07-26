@@ -81,7 +81,15 @@ func (e *ResponsesStreamEncoder) WriteEvent(ev *IRStreamEvent) error {
 	if err != nil {
 		return err
 	}
-	_, err = e.w.Write(append(append([]byte("data: "), data...), '\n', '\n'))
+	// Strict Responses clients use the SSE event field to drive their state
+	// machine. The JSON type remains in data for SDKs that only inspect the
+	// payload, so emit both forms.
+	prefix := []byte("event: " + ev.Type + "\ndata: ")
+	frame := make([]byte, 0, len(prefix)+len(data)+2)
+	frame = append(frame, prefix...)
+	frame = append(frame, data...)
+	frame = append(frame, '\n', '\n')
+	_, err = e.w.Write(frame)
 	return err
 }
 

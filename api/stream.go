@@ -73,6 +73,20 @@ func proxySameProtocolResponse(c *gin.Context, resp *http.Response, stream bool,
 	// Determine if the response is actually SSE by checking the Content-Type.
 	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
 
+	// Responses streams are stateful event protocols. Passing them through
+	// byte-for-byte allows an upstream such as Sub2API to omit lifecycle events
+	// that strict clients (ZCode/Codex) require, even though HTTP status and
+	// token accounting look successful. Canonicalize Responses SSE for both
+	// same-protocol and cross-protocol routes so the client always receives a
+	// complete output-item/content-part lifecycle.
+	if inbound == config.ProtocolResponses && isSSE {
+		if body != nil {
+			return proxyCrossProtocolResponse(c, resp, true, inbound, inbound,
+				p, key, route, start, body)
+		}
+		return proxyCrossProtocolStream(c, resp, inbound, inbound, p, key, route, start)
+	}
+
 	if !stream && !isSSE {
 		// Non-streaming: read the full body (with a size limit) and validate.
 		if body == nil {
@@ -782,7 +796,17 @@ func proxyCrossProtocolStream(c *gin.Context, resp *http.Response,
 	timing := newStreamTimingCapture(inbound, start)
 	timedBody := &firstByteTimingReader{src: resp.Body, capture: timing}
 	bufReader := bufio.NewReaderSize(timedBody, maxSSERead)
-	firstEvent, found, readErr := readFirstSSEEvent(bufReader)
+	var firstEvent []byte
+	var found bool
+	var readErr error
+	if inbound == config.ProtocolResponses {
+		// response.created/in_progress/queued only carry lifecycle metadata.
+		// Do not commit HTTP 200 until content, a tool call, or a terminal
+		// event is available; response.failed must remain failover-eligible.
+		firstEvent, found, readErr = readFirstContentSSEEvent(bufReader, inbound)
+	} else {
+		firstEvent, found, readErr = readFirstSSEEvent(bufReader)
+	}
 	if readErr != nil || !found {
 		errBody, _ := io.ReadAll(io.LimitReader(bufReader, maxErrorBodyRead))
 		_ = resp.Body.Close()

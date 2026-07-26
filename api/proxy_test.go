@@ -124,7 +124,7 @@ func TestCrossProtocolStreamContextCanceledDoesNotMarkKey(t *testing.T) {
 		t.Fatalf("create key: %v", err)
 	}
 
-	c, w := gin.CreateTestContext(httptest.NewRecorder())
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", http.NoBody)
 	reader := &cancelAfterFirstEventReader{event: []byte(
 		"event: message_start\n" +
@@ -147,8 +147,8 @@ func TestCrossProtocolStreamContextCanceledDoesNotMarkKey(t *testing.T) {
 	if !rr.Terminal {
 		t.Fatal("context cancellation after a committed stream must terminate without failover")
 	}
-	if w.Code != http.StatusOK {
-		t.Fatalf("response status = %d, want 200 after the first SSE event was committed", w.Code)
+	if c.Writer.Status() != http.StatusOK {
+		t.Fatalf("response status = %d, want 200 after the first SSE event was committed", c.Writer.Status())
 	}
 
 	var refreshed store.Key
@@ -5546,7 +5546,6 @@ func TestR4_G1_OllamaUsesPreResolvedGroup(t *testing.T) {
 		t.Fatalf("usage log group = %q, want %q", logRow.Group, "premium")
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // Round-5 audit verification tests (API-level).

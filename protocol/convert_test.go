@@ -935,18 +935,63 @@ func TestStreamConverterChatToResponsesEmitsIndexedTextEvents(t *testing.T) {
 	}
 	out := dst.String()
 	for _, want := range []string{
+		"event: response.created",
+		"event: response.output_item.added",
 		`"type":"response.content_part.added"`,
+		"event: response.content_part.added",
 		`"type":"response.output_text.delta"`,
 		`"output_index":0`,
 		`"content_index":0`,
 		`"item_id":"msg_0"`,
 		`"delta":"hi there"`,
+		"event: response.output_text.done",
+		`"type":"response.output_text.done"`,
+		`"text":"hi there"`,
 		`"type":"response.content_part.done"`,
+		"event: response.content_part.done",
 		`"type":"response.completed"`,
 		`"output_text":"hi there"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("responses stream missing %s:\n%s", want, out)
+		}
+	}
+}
+
+func TestStreamConverterResponsesToResponsesNormalizesLifecycle(t *testing.T) {
+	// Some Responses proxies emit only created → delta → completed. The
+	// gateway must synthesize the output-item/content-part lifecycle required
+	// by strict clients instead of forwarding the incomplete sequence.
+	firstEvent := []byte(
+		"event: response.created\n" +
+			"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\"}}\n\n")
+	rest := strings.NewReader(
+		"event: response.output_text.delta\n" +
+			"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n" +
+			"event: response.completed\n" +
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"m\"}}\n\n")
+	var dst bytes.Buffer
+	if _, err := StreamConvertIncremental(
+		string(config.ProtocolResponses), string(config.ProtocolResponses),
+		firstEvent, rest, &dst, nil, nil,
+	); err != nil {
+		t.Fatalf("Responses same-protocol normalization failed: %v", err)
+	}
+	out := dst.String()
+	for _, want := range []string{
+		"event: response.created",
+		"event: response.output_item.added",
+		"event: response.content_part.added",
+		"event: response.output_text.delta",
+		"event: response.output_text.done",
+		"event: response.content_part.done",
+		"event: response.output_item.done",
+		"event: response.completed",
+		`"delta":"hello"`,
+		`"text":"hello"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("normalized Responses stream missing %s:\n%s", want, out)
 		}
 	}
 }
